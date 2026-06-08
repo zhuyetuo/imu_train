@@ -59,6 +59,9 @@ def main(args):
 
     model = load_model(args.model, n_channels, window_size, n_classes, cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["learning_rate"])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-6
+    )
     criterion = nn.CrossEntropyLoss()
 
     from tqdm import tqdm
@@ -95,6 +98,8 @@ def main(args):
                 total += len(yb)
         val_acc = correct / total
 
+        scheduler.step(val_acc)
+
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), best_model_path)
@@ -103,7 +108,8 @@ def main(args):
             no_improve += 1
 
         avg_loss = total_loss / len(train_loader)
-        pbar.set_postfix(loss=f"{avg_loss:.4f}", val_acc=f"{val_acc:.4f}", best=f"{best_val_acc:.4f}")
+        lr_now = optimizer.param_groups[0]["lr"]
+        pbar.set_postfix(loss=f"{avg_loss:.4f}", val_acc=f"{val_acc:.4f}", best=f"{best_val_acc:.4f}", lr=f"{lr_now:.0e}")
 
         if no_improve >= patience:
             tqdm.write(f"  Early stopping at epoch {epoch}, best val_acc={best_val_acc:.4f}")
