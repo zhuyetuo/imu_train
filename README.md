@@ -131,11 +131,13 @@ data/processed_a/    data/processed_b/    data/processed_custom/
 
 ### 机器学习
 
-支持模型：`rf`（随机森林）、`xgb`（XGBoost）
+支持模型：`rf`（随机森林）、`xgb`（XGBoost）、`lgbm`（LightGBM）、`catboost`（CatBoost）
 
 ```bash
-python src/ml/train.py --hz 50 --model rf  --processed_dir data/processed_a
-python src/ml/train.py --hz 50 --model xgb --processed_dir data/processed_a
+python src/ml/train.py --hz 50 --model rf       --processed_dir data/processed_a
+python src/ml/train.py --hz 50 --model xgb      --processed_dir data/processed_a
+python src/ml/train.py --hz 50 --model lgbm     --processed_dir data/processed_a
+python src/ml/train.py --hz 50 --model catboost --processed_dir data/processed_a
 ```
 
 首次提取特征会自动缓存到 `data/processed_a/50hz/ml_features.npz`，下次直接加载。
@@ -170,7 +172,7 @@ python src/ml/train.py --hz 50 --model xgb --processed_dir data/processed_custom
 ```bash
 for ds in processed_a processed_b processed_custom; do
   for hz in 5 10 25 50; do
-    for model in rf xgb; do
+    for model in rf xgb lgbm catboost; do
       python src/ml/train.py --hz $hz --model $model --processed_dir data/$ds
     done
     for model in cnn cnn_lstm transformer; do
