@@ -125,7 +125,9 @@ def main(args):
     print(f"\n[dl/train] 测试集结果 (best val model):")
     print(f"  Accuracy: {acc:.4f}")
     print(f"  Macro F1: {f1:.4f}")
-    print(classification_report(all_true, all_preds, target_names=classes))
+    present_labels = sorted(set(all_true) | set(all_preds))
+    present_names = [classes[i] for i in present_labels]
+    print(classification_report(all_true, all_preds, labels=present_labels, target_names=present_names))
 
     result = {"hz": args.hz, "model": args.model, "accuracy": acc, "macro_f1": f1}
     with open(os.path.join(out_dir, f"dl_{args.model}.json"), "w") as f:
