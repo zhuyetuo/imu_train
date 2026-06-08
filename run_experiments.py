@@ -24,6 +24,7 @@
 import argparse
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -36,6 +37,7 @@ GREEN  = "\033[92m"
 RED    = "\033[91m"
 YELLOW = "\033[93m"
 CYAN   = "\033[96m"
+DIM    = "\033[2m"
 RESET  = "\033[0m"
 
 
@@ -43,18 +45,20 @@ def ts():
     return datetime.now().strftime("%H:%M:%S")
 
 
+# 全局：当前正在运行的任务及其开始时间
+_active: dict[str, float] = {}
+_active_lock = threading.Lock()
+
+
 def run_job(cmd: list[str], label: str) -> tuple[str, bool, str]:
     """运行单个训练命令，返回 (label, success, output_tail)。"""
     start = time.time()
+    with _active_lock:
+        _active[label] = start
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
         elapsed = time.time() - start
         ok = result.returncode == 0
-        # 取最后几行作为摘要
         out_lines = (result.stdout + result.stderr).strip().splitlines()
         tail = "\n    ".join(out_lines[-6:]) if out_lines else ""
         status = f"{GREEN}✓{RESET}" if ok else f"{RED}✗{RESET}"
@@ -64,6 +68,22 @@ def run_job(cmd: list[str], label: str) -> tuple[str, bool, str]:
         return label, ok, tail
     except Exception as e:
         return label, False, str(e)
+    finally:
+        with _active_lock:
+            _active.pop(label, None)
+
+
+def _status_printer(total: int, done_ref: list, stop_evt: threading.Event, interval: int = 15):
+    """后台线程，每隔 interval 秒打印当前运行中的任务。"""
+    while not stop_evt.wait(interval):
+        with _active_lock:
+            running = {lbl: time.time() - t for lbl, t in _active.items()}
+        done = done_ref[0]
+        if running:
+            lines = "  |  ".join(f"{lbl} {DIM}({int(s)}s){RESET}" for lbl, s in sorted(running.items()))
+            print(f"  {YELLOW}[{ts()}] 进行中 {done}/{total} ▶ {lines}{RESET}")
+        else:
+            print(f"  {DIM}[{ts()}] 等待中 {done}/{total}...{RESET}")
 
 
 def build_jobs(datasets, hz_list, ml_models, dl_models, skip_ml, skip_dl):
@@ -93,22 +113,33 @@ def build_jobs(datasets, hz_list, ml_models, dl_models, skip_ml, skip_dl):
     return ml_jobs, dl_jobs
 
 
-def run_pool(jobs, workers, section_name):
+def run_pool(jobs, workers, section_name, status_interval: int = 15):
     if not jobs:
-        return [], []
+        return []
     print(f"\n{CYAN}{'─'*60}{RESET}")
     print(f"{CYAN}  {section_name}  ({len(jobs)} 个任务，{workers} 进程并行){RESET}")
     print(f"{CYAN}{'─'*60}{RESET}")
 
     failed = []
-    done = 0
+    done_ref = [0]
+    stop_evt = threading.Event()
+    printer = threading.Thread(
+        target=_status_printer,
+        args=(len(jobs), done_ref, stop_evt, status_interval),
+        daemon=True,
+    )
+    printer.start()
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(run_job, cmd, label): label for cmd, label in jobs}
         for fut in as_completed(futures):
             label, ok, _ = fut.result()
-            done += 1
+            done_ref[0] += 1
             if not ok:
                 failed.append(label)
+
+    stop_evt.set()
+    printer.join(timeout=1)
     return failed
 
 
@@ -125,6 +156,8 @@ def main():
                         help="DL 并行进程数，单 GPU 建议保持 1（默认 1）")
     parser.add_argument("--skip_ml", action="store_true")
     parser.add_argument("--skip_dl", action="store_true")
+    parser.add_argument("--status_interval", type=int, default=15,
+                        help="进度状态刷新间隔（秒，默认 15）")
     args = parser.parse_args()
 
     ml_jobs, dl_jobs = build_jobs(
@@ -139,13 +172,14 @@ def main():
     print(f"  数据集: {args.datasets}")
     print(f"  采样率: {args.hz}")
     print(f"  总任务: {total}  (ML={len(ml_jobs)}, DL={len(dl_jobs)})")
+    print(f"  进度更新间隔: {args.status_interval}s")
     print(f"{CYAN}{'='*60}{RESET}")
 
     t0 = time.time()
     all_failed = []
 
-    all_failed += run_pool(ml_jobs, args.ml_workers, "机器学习")
-    all_failed += run_pool(dl_jobs, args.dl_workers, "深度学习")
+    all_failed += run_pool(ml_jobs, args.ml_workers, "机器学习", args.status_interval)
+    all_failed += run_pool(dl_jobs, args.dl_workers, "深度学习", args.status_interval)
 
     elapsed = time.time() - t0
     print(f"\n{CYAN}{'='*60}{RESET}")
