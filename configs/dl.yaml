@@ -38,3 +38,11 @@ filternet:
   n_downsample: 3    # 时序缩短 2^3=8 倍后送入 LSTM
   lstm_units: 100
   dropout: 0.3
+
+# FilterNet 原版 many-to-many：逐帧预测，插值上采样回原始 T
+filternet_m2m:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3
+  lstm_units: 100
+  dropout: 0.3

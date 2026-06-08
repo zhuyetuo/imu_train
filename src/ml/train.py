@@ -91,7 +91,7 @@ def main(args):
         cfg = yaml.safe_load(f)
 
     print(f"\n[ml/train] hz={args.hz}, model={args.model}, processed_dir={args.processed_dir}")
-    (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz, args.processed_dir)
+    (X_tr, y_tr, _), (X_val, y_val, _), (X_te, y_te, _), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
 
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
