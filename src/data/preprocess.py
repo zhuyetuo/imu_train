@@ -48,6 +48,11 @@ def split_by_dog(records, train_r, val_r, seed):
     n = len(dog_ids)
     n_train = int(n * train_r)
     n_val = int(n * val_r)
+    # 数据集较小时保证 val 和 test 各至少 1 个 ID
+    if n_val == 0 and n >= 3:
+        n_val = 1
+    if n - n_train - n_val == 0 and n >= 3:
+        n_train = max(1, n_train - 1)
     return (set(dog_ids[:n_train]),
             set(dog_ids[n_train:n_train + n_val]),
             set(dog_ids[n_train + n_val:]))
