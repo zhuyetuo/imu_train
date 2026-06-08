@@ -10,6 +10,14 @@ cnn:
   kernel_size: 3
   dropout: 0.3
 
+# 复现 Animals 2021 论文架构（MaxPool=4, Dropout 只在 FC 前）
+collar_cnn:
+  filters: [64, 128, 256]
+  kernel_size: 5
+  pool_size: 4
+  fc_dim: 256
+  dropout: 0.5
+
 cnn_lstm:
   cnn_filters: [64, 128]
   cnn_kernel_size: 3
@@ -22,3 +30,19 @@ transformer:
   num_layers: 3
   dropout: 0.1
   dim_feedforward: 256
+
+# 复现 FilterNet (Sensors 2020) encoder，many-to-one 适配
+filternet:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3    # 时序缩短 2^3=8 倍后送入 LSTM
+  lstm_units: 100
+  dropout: 0.3
+
+# FilterNet 原版 many-to-many：逐帧预测，插值上采样回原始 T
+filternet_m2m:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3
+  lstm_units: 100
+  dropout: 0.3

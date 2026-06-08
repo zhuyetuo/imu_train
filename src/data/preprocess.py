@@ -21,18 +21,24 @@ def downsample(data, labels, source_hz, target_hz):
 
 
 def sliding_window(data, labels, window_size, stride, keep_label_set=None):
-    X, y = [], []
+    """返回 (X, y_majority, y_seq): y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用。"""
+    X, y, y_seq = [], [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
         end = start + window_size
-        majority = Counter(labels[start:end]).most_common(1)[0][0]
+        frame_labels = labels[start:end]
+        majority = Counter(frame_labels).most_common(1)[0][0]
         if keep_label_set is not None and majority not in keep_label_set:
             continue
         X.append(data[start:end])
         y.append(majority)
+        y_seq.append(frame_labels)
     if not X:
-        return np.empty((0, window_size, data.shape[1]), dtype=np.float32), np.empty((0,))
-    return np.array(X, dtype=np.float32), np.array(y)
+        empty_X = np.empty((0, window_size, data.shape[1]), dtype=np.float32)
+        return empty_X, np.empty((0,)), np.empty((0, window_size), dtype=np.int64)
+    return (np.array(X, dtype=np.float32),
+            np.array(y),
+            np.array(y_seq, dtype=np.int64))
 
 
 def split_by_dog(records, train_r, val_r, seed):
@@ -48,7 +54,7 @@ def split_by_dog(records, train_r, val_r, seed):
 
 
 def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None):
-    X_all, y_all = [], []
+    X_all, y_all, y_seq_all = [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     for r in records:
         if r["dog_id"] not in dog_ids_set:
@@ -57,14 +63,15 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
         labels_enc = np.full(len(labels), -1, dtype=np.int64)
         labels_enc[mask] = le.transform(labels[mask])
-        X, y = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
+        X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
         if len(X) == 0:
             continue
         X_all.append(X)
         y_all.append(y)
+        y_seq_all.append(y_seq)
     if not X_all:
-        return np.empty((0,)), np.empty((0,))
-    return np.concatenate(X_all), np.concatenate(y_all)
+        return np.empty((0,)), np.empty((0,)), np.empty((0,))
+    return np.concatenate(X_all), np.concatenate(y_all), np.concatenate(y_seq_all)
 
 
 def load_records(args, cfg):
@@ -144,9 +151,9 @@ def main(args):
             data_ds, labels_ds = downsample(r["data"], r["labels"], source_hz, target_hz)
             ds_records.append({**r, "data": data_ds, "labels": labels_ds})
 
-        X_train, y_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set)
-        X_val, y_val = process_split(ds_records, val_ids, window_size, stride, le, keep_label_set)
-        X_test, y_test = process_split(ds_records, test_ids, window_size, stride, le, keep_label_set)
+        X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set)
+        X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set)
+        X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set)
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
@@ -163,9 +170,9 @@ def main(args):
             "dataset": args.dataset,
         }
 
-        np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, **meta)
-        np.savez_compressed(os.path.join(out_dir, "val.npz"), X=X_val, y=y_val, **meta)
-        np.savez_compressed(os.path.join(out_dir, "test.npz"), X=X_test, y=y_test, **meta)
+        np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, y_seq=y_seq_train, **meta)
+        np.savez_compressed(os.path.join(out_dir, "val.npz"),   X=X_val,   y=y_val,   y_seq=y_seq_val,   **meta)
+        np.savez_compressed(os.path.join(out_dir, "test.npz"),  X=X_test,  y=y_test,  y_seq=y_seq_test,  **meta)
         print(f"  ✅ 保存至 {out_dir}/")
 
     print("\n[preprocess] 全部完成！")
