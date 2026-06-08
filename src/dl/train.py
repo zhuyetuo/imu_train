@@ -21,6 +21,9 @@ def load_model(model_name: str, n_channels: int, window_size: int, n_classes: in
     if model_name == "cnn":
         from models.cnn import CNN
         return CNN(n_channels, window_size, n_classes, cfg["cnn"])
+    elif model_name == "collar_cnn":
+        from models.collar_cnn import CollarCNN
+        return CollarCNN(n_channels, window_size, n_classes, cfg["collar_cnn"])
     elif model_name == "cnn_lstm":
         from models.cnn_lstm import CNNLSTM
         return CNNLSTM(n_channels, window_size, n_classes, cfg["cnn_lstm"])
@@ -145,7 +148,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
-    parser.add_argument("--model", default="cnn_lstm", choices=["cnn", "cnn_lstm", "transformer"])
+    parser.add_argument("--model", default="cnn_lstm", choices=["cnn", "collar_cnn", "cnn_lstm", "transformer"])
     parser.add_argument("--config", default="configs/dl.yaml")
     parser.add_argument("--processed_dir", default="data/processed")
     parser.add_argument("--results_dir", default="results")

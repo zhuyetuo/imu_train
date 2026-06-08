@@ -10,6 +10,14 @@ cnn:
   kernel_size: 3
   dropout: 0.3
 
+# 复现 Animals 2021 论文架构（MaxPool=4, Dropout 只在 FC 前）
+collar_cnn:
+  filters: [64, 128, 256]
+  kernel_size: 5
+  pool_size: 4
+  fc_dim: 256
+  dropout: 0.5
+
 cnn_lstm:
   cnn_filters: [64, 128]
   cnn_kernel_size: 3

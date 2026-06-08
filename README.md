@@ -144,10 +144,18 @@ python src/ml/train.py --hz 50 --model catboost --processed_dir data/processed_a
 
 ### 深度学习
 
-支持模型：`cnn`、`cnn_lstm`、`transformer`
+支持模型：
+
+| 模型 | 说明 |
+|------|------|
+| `cnn` | 通用 1D CNN（MaxPool=2，每层 Dropout） |
+| `collar_cnn` | 复现 [Animals 2021](https://doi.org/10.3390/ani11061549) 论文架构（64→128→256，MaxPool=4，Dropout 只在 FC 前） |
+| `cnn_lstm` | CNN 提取局部特征 + LSTM 建模时序依赖 |
+| `transformer` | 基于自注意力机制的时序分类器 |
 
 ```bash
 python src/dl/train.py --hz 50 --model cnn         --processed_dir data/processed_a
+python src/dl/train.py --hz 50 --model collar_cnn  --processed_dir data/processed_a
 python src/dl/train.py --hz 50 --model cnn_lstm    --processed_dir data/processed_a
 python src/dl/train.py --hz 50 --model transformer --processed_dir data/processed_a
 ```
@@ -175,7 +183,7 @@ for ds in processed_a processed_b processed_custom; do
     for model in rf xgb lgbm catboost; do
       python src/ml/train.py --hz $hz --model $model --processed_dir data/$ds
     done
-    for model in cnn cnn_lstm transformer; do
+    for model in cnn collar_cnn cnn_lstm transformer; do
       python src/dl/train.py --hz $hz --model $model --processed_dir data/$ds
     done
   done

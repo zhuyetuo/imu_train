@@ -12,7 +12,7 @@ import argparse
 
 HZ_LIST = [5, 10, 25, 50]
 ML_MODELS = ["rf", "xgb", "lgbm", "catboost"]
-DL_MODELS = ["cnn", "cnn_lstm", "transformer"]
+DL_MODELS = ["cnn", "collar_cnn", "cnn_lstm", "transformer"]
 RESULTS_ROOT = "results"
 
 
