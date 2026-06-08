@@ -95,9 +95,18 @@ def main(args):
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
 
     if os.path.exists(feat_cache):
-        print(f"[ml/train] 加载缓存特征: {feat_cache}")
         cache = np.load(feat_cache)
         X_tr_f, X_val_f, X_te_f = cache["X_tr"], cache["X_val"], cache["X_te"]
+        # 缓存与当前 npz 样本数不一致说明数据已重新预处理，需重建缓存
+        if len(X_tr_f) != len(X_tr) or len(X_te_f) != len(X_te):
+            print(f"[ml/train] 缓存样本数与数据不符，重建缓存: {feat_cache}")
+            os.remove(feat_cache)
+            X_tr_f = extract_features(X_tr, args.hz)
+            X_val_f = extract_features(X_val, args.hz)
+            X_te_f = extract_features(X_te, args.hz)
+            np.savez_compressed(feat_cache, X_tr=X_tr_f, X_val=X_val_f, X_te=X_te_f)
+        else:
+            print(f"[ml/train] 加载缓存特征: {feat_cache}")
     else:
         print(f"[ml/train] 提取特征（首次，之后自动缓存）...")
         X_tr_f = extract_features(X_tr, args.hz)
