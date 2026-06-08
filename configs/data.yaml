@@ -32,6 +32,27 @@ keep_labels_b:
   - lying down
   - body shake
 
+# 自采数据集配置
+custom:
+  # CSV 文件路径
+  csv_path: data/raw_custom/data.csv
+  # 采样率（根据你的传感器实际采样率填写）
+  source_hz: 100
+  # 狗ID列名
+  dog_id_col: dog_id
+  # 标签列名
+  label_col: label
+  # 6个传感器通道列名（顺序：acc_x/y/z, gyr_x/y/z）
+  sensor_cols:
+    - acc_x
+    - acc_y
+    - acc_z
+    - gyr_x
+    - gyr_y
+    - gyr_z
+  # 保留的行为类别（填写你实际标注的标签名）
+  keep_labels: []   # 留空则保留所有标签
+
 # 训练/验证/测试按狗ID划分（leave-some-dogs-out）
 # 45只狗，建议 36/5/4 split
 train_ratio: 0.8

@@ -22,9 +22,10 @@ for i in "${!ARGS[@]}"; do
 done
 
 if [ -z "$DATASET" ]; then
-    echo "用法: bash setup.sh --dataset <a|b>"
-    echo "  --dataset a  预处理数据集A (Mendeley vxhx934tbn)"
-    echo "  --dataset b  预处理数据集B (Mendeley mpph6bmn7g)"
+    echo "用法: bash setup.sh --dataset <a|b|custom>"
+    echo "  --dataset a       预处理数据集A (Mendeley vxhx934tbn)"
+    echo "  --dataset b       预处理数据集B (Mendeley mpph6bmn7g)"
+    echo "  --dataset custom  预处理自采数据集 (data/raw_custom/data.csv)"
     exit 1
 fi
 
@@ -98,14 +99,42 @@ elif [ "$DATASET" = "b" ]; then
         --output_dir "$OUT_DIR" \
         --config configs/data.yaml
 
+elif [ "$DATASET" = "custom" ]; then
+    # 从 configs/data.yaml 读取 csv_path（简单 grep）
+    CSV_CUSTOM=$(python -c "import yaml; c=yaml.safe_load(open('configs/data.yaml')); print(c.get('custom',{}).get('csv_path','data/raw_custom/data.csv'))")
+    OUT_DIR="data/processed_custom"
+
+    echo ""
+    echo "[1/2] 检查自采数据集文件..."
+    if [ ! -f "$CSV_CUSTOM" ]; then
+        echo "  ❌ 缺少: $CSV_CUSTOM"
+        echo "  请将你的 CSV 文件放到该路径，或修改 configs/data.yaml 中 custom.csv_path"
+        echo ""
+        echo "  CSV 格式要求（列名可在 configs/data.yaml custom 节自定义）:"
+        echo "    dog_id, label, acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z"
+        exit 1
+    else
+        echo "  ✅ $CSV_CUSTOM"
+    fi
+
+    echo ""
+    echo "[2/2] 运行预处理..."
+    python src/data/preprocess.py \
+        --dataset custom \
+        --raw_csv_custom "$CSV_CUSTOM" \
+        --output_dir "$OUT_DIR" \
+        --config configs/data.yaml
+
 else
-    echo "未知数据集: $DATASET（只支持 a 或 b）"
+    echo "未知数据集: $DATASET（只支持 a / b / custom）"
     exit 1
 fi
 
 echo ""
 echo "================================================"
-echo "  ✅ 数据集${DATASET}整理完成！"
+DATASET_LABEL="$DATASET"
+[ "$DATASET" = "custom" ] && DATASET_LABEL="自采"
+echo "  ✅ 数据集${DATASET_LABEL}整理完成！"
 echo ""
 echo "  处理结果:"
 find "$OUT_DIR" -name "*.npz" 2>/dev/null | sort | sed 's/^/  /'
