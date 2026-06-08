@@ -53,6 +53,61 @@ custom:
   # 保留的行为类别（填写你实际标注的标签名）
   keep_labels: []   # 留空则保留所有标签
 
+# ── 猫咪数据集配置 ────────────────────────────────────────────────────────────
+# 注意: 猫咪数据集通常只有加速度计（3通道），无陀螺仪
+# 下载后需用 src/data/convert_cat_rdata.py 将 .RDATA 转为 CSV
+
+# Smit et al. 2023 (Sensors) — 12只猫，24类行为
+# FigShare: https://figshare.com/articles/dataset/23605842
+# 原始为 R dataframe，需先运行 convert_cat_rdata.py
+cat_smit2023:
+  csv_path: data/raw_cat_smit2023/cat_smit2023.csv
+  # 原始 30Hz，但数据已聚合为 1 秒 epoch 特征，非原始时间序列
+  # 需先运行 convert_cat_rdata.py 转换格式
+  source_hz: 30
+  cat_id_col: cat_id       # 下载后确认实际列名并更新
+  label_col: behavior
+  sensor_cols:
+    - acc_x
+    - acc_y
+    - acc_z
+  keep_labels: []          # 留空保留全部 24 类行为
+
+# Dunford et al. 2024 (Ecology and Evolution) — 9只猫，40Hz 原始时间序列
+# Dryad: https://datadryad.org/dataset/doi:10.5061/dryad.q2bvq83sx
+# ⭐ 推荐优先使用：有原始 40Hz 时序数据，与本项目管线最兼容
+cat_dunford2024:
+  csv_path: data/raw_cat_dunford2024/cat_dunford2024.csv
+  source_hz: 40            # 原始采样率 40Hz
+  cat_id_col: animal_id    # 下载后确认实际列名并更新
+  label_col: behaviour
+  sensor_cols:
+    - acc_x
+    - acc_y
+    - acc_z
+  keep_labels: []
+
+# Smit et al. 2024 (PMC，家庭环境) — 28只猫，8类行为
+# FigShare: https://figshare.com/articles/dataset/24848292
+cat_smit2024:
+  csv_path: data/raw_cat_smit2024/cat_smit2024.csv
+  source_hz: 25
+  cat_id_col: cat_id
+  label_col: behavior
+  sensor_cols:
+    - acc_x
+    - acc_y
+    - acc_z
+  keep_labels:
+    - active
+    - eating
+    - grooming
+    - littering
+    - lying
+    - scratching
+    - sitting
+    - standing
+
 # 训练/验证/测试按狗ID划分（leave-some-dogs-out）
 # 45只狗，建议 36/5/4 split
 train_ratio: 0.8
