@@ -67,7 +67,6 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
         n_iter = cfg["catboost"]["iterations"]
         pbar = tqdm(total=n_iter, desc="CatBoost", unit="轮")
 
-        from catboost import IterationRange
         import catboost
 
         class PbarCallback(catboost.TrainingCallback):
