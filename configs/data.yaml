@@ -30,7 +30,6 @@ keep_labels_b:
   - walking
   - sitting
   - lying down
-  - body shake
 
 # 自采数据集配置
 custom:
@@ -77,11 +76,11 @@ cat_smit2023:
 # Dryad: https://datadryad.org/dataset/doi:10.5061/dryad.q2bvq83sx
 # ⭐ 推荐优先使用：有原始 40Hz 时序数据，与本项目管线最兼容
 cat_dunford2024:
-  csv_path: data/raw_cat_dunford2024/cat_dunford2024.csv
+  csv_path: data/raw_cat_dunford2024/Dunford_et_al._Cats_calibrated_data.csv
   source_hz: 40            # 原始采样率 40Hz
-  cat_id_col: animal_id    # 下载后确认实际列名并更新
-  label_col: behaviour
-  sensor_cols:
+  cat_id_col: animal_id    # 待确认 — 请把 head -2 输出贴过来更新
+  label_col: behaviour     # 待确认
+  sensor_cols:             # 待确认
     - acc_x
     - acc_y
     - acc_z
