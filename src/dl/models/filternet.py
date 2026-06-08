@@ -29,6 +29,7 @@ class FilterNet(nn.Module):
         kernel_size = cfg.get("kernel_size", 5)
         n_downsample= cfg.get("n_downsample", 3)   # stride=2 下采样层数，时序缩短 2^n 倍
         lstm_units  = cfg.get("lstm_units", 100)
+        lstm_layers = cfg.get("lstm_layers", 2)
         dropout     = cfg.get("dropout", 0.3)
 
         # ── Pre-conv（对应原论文 Component A）──────────────────────────────
@@ -55,8 +56,9 @@ class FilterNet(nn.Module):
         self.lstm = nn.LSTM(
             input_size=filters,
             hidden_size=lstm_units,
+            num_layers=lstm_layers,
             batch_first=True,
-            dropout=dropout if n_downsample > 1 else 0,
+            dropout=dropout if lstm_layers > 1 else 0,
         )
 
         # ── 分类头：全局平均池化 → FC ──────────────────────────────────────
