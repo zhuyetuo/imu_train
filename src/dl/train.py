@@ -44,9 +44,9 @@ def main(args):
         cfg = yaml.safe_load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n[dl/train] hz={args.hz}, model={args.model}, device={device}")
+    print(f"\n[dl/train] hz={args.hz}, model={args.model}, device={device}, processed_dir={args.processed_dir}")
 
-    (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz)
+    (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
     n_channels = X_tr.shape[2]
     window_size = X_tr.shape[1]
@@ -70,7 +70,8 @@ def main(args):
     patience = cfg["early_stopping_patience"]
     no_improve = 0
 
-    out_dir = os.path.join("results", f"{args.hz}hz")
+    dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
+    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz")
     os.makedirs(out_dir, exist_ok=True)
     best_model_path = os.path.join(out_dir, f"dl_{args.model}_best.pt")
 
@@ -146,4 +147,6 @@ if __name__ == "__main__":
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
     parser.add_argument("--model", default="cnn_lstm", choices=["cnn", "cnn_lstm", "transformer"])
     parser.add_argument("--config", default="configs/dl.yaml")
+    parser.add_argument("--processed_dir", default="data/processed")
+    parser.add_argument("--results_dir", default="results")
     main(parser.parse_args())
