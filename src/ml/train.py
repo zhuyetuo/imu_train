@@ -62,6 +62,9 @@ def main(args):
 
     model.fit(X_tr_f, y_tr)
 
+    if args.model == "xgb":
+        model.set_params(callbacks=[], verbosity=0)  # 清掉 callback，避免 pickle 失败
+
     from sklearn.metrics import accuracy_score, f1_score, classification_report
     y_pred = model.predict(X_te_f)
     acc = accuracy_score(y_te, y_pred)
