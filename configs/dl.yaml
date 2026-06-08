@@ -1,0 +1,24 @@
+# 深度学习配置
+epochs: 100
+batch_size: 64
+learning_rate: 0.001
+early_stopping_patience: 10
+num_classes: 7
+
+cnn:
+  filters: [64, 128, 256]
+  kernel_size: 3
+  dropout: 0.3
+
+cnn_lstm:
+  cnn_filters: [64, 128]
+  cnn_kernel_size: 3
+  lstm_units: 128
+  dropout: 0.3
+
+transformer:
+  d_model: 128
+  nhead: 8
+  num_layers: 3
+  dropout: 0.1
+  dim_feedforward: 256

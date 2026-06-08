@@ -1,0 +1,36 @@
+# 数据配置
+raw_dir: data/raw
+processed_dir: data/processed
+
+# 原始采样率
+source_hz: 100
+
+# 目标采样率列表（从100Hz降采样）
+target_hz_list: [5, 10, 25, 50]
+
+# 窗口配置（时间固定，点数随hz自动计算）
+window_seconds: 2.0
+stride_seconds: 1.0
+
+# 只使用项圈传感器的列（collar）
+# 列名格式待确认数据后填写
+sensor_position: collar
+
+# 行为标签映射（原始标签 → 统一标签）
+label_map:
+  galloping: galloping
+  lying: lying
+  sitting: sitting
+  sniffing: sniffing
+  standing: standing
+  trotting: trotting
+  walking: walking
+
+# 训练/验证/测试按狗ID划分（leave-some-dogs-out）
+# 45只狗，建议 36/5/4 split
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
+
+# 随机种子
+seed: 42
