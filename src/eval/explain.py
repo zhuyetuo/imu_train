@@ -51,29 +51,28 @@ def build_feature_names(n_channels: int) -> list[str]:
 # ── 绘图工具 ───────────────────────────────────────────────────────────────────
 
 def save_summary_bar(shap_values, feature_names, out_path, title, max_display=20):
-    fig, ax = plt.subplots(figsize=(8, max_display * 0.35 + 1))
+    plt.figure(figsize=(8, max_display * 0.35 + 1))
     shap.summary_plot(
         shap_values, feature_names=feature_names,
-        plot_type="bar", max_display=max_display,
-        show=False, ax=ax,
+        plot_type="bar", max_display=max_display, show=False,
     )
-    ax.set_title(title, fontsize=11)
+    plt.title(title, fontsize=11)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
     print(f"  ✅ {out_path}")
 
 
 def save_summary_dot(shap_values, X_feat, feature_names, out_path, title, max_display=20):
-    fig, ax = plt.subplots(figsize=(9, max_display * 0.35 + 1))
+    plt.figure(figsize=(9, max_display * 0.35 + 1))
     shap.summary_plot(
         shap_values, X_feat, feature_names=feature_names,
-        max_display=max_display, show=False, ax=ax,
+        max_display=max_display, show=False,
     )
-    ax.set_title(title, fontsize=11)
+    plt.title(title, fontsize=11)
     plt.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
     print(f"  ✅ {out_path}")
 
 
@@ -139,12 +138,11 @@ def main(args):
     dataset_label = f"{dataset_tag} | {args.hz}Hz | {args.model.upper()}"
 
     if n_classes == 2 or shap_values.values.ndim == 2:
-        # 二分类或单输出
         sv = shap_values.values
         save_summary_bar(sv, feature_names, os.path.join(out_dir, "summary_bar.png"),
-                         f"特征重要性 — {dataset_label}")
+                         f"Feature Importance — {dataset_label}")
         save_summary_dot(sv, X_explain, feature_names, os.path.join(out_dir, "summary_dot.png"),
-                         f"SHAP 分布 — {dataset_label}")
+                         f"SHAP Values — {dataset_label}")
     else:
         # 多分类：shap_values.values shape = (N, n_features, n_classes)
         sv_all = shap_values.values  # (N, F, C)
@@ -155,7 +153,7 @@ def main(args):
         fig, ax = plt.subplots(figsize=(8, 7))
         ax.barh([feature_names[i] for i in top_idx[::-1]], global_importance[top_idx[::-1]])
         ax.set_xlabel("Mean |SHAP value|")
-        ax.set_title(f"全局特征重要性 (Top 20) — {dataset_label}")
+        ax.set_title(f"Global Feature Importance (Top 20) — {dataset_label}")
         plt.tight_layout()
         bar_path = os.path.join(out_dir, "summary_bar.png")
         fig.savefig(bar_path, dpi=150, bbox_inches="tight")
@@ -167,7 +165,7 @@ def main(args):
             sv_c = sv_all[:, :, c_idx]  # (N, F)
             dot_path = os.path.join(out_dir, f"class_{c_name}.png")
             save_summary_dot(sv_c, X_explain, feature_names, dot_path,
-                             f"SHAP — {dataset_label} — 类别: {c_name}")
+                             f"SHAP — {dataset_label} — Class: {c_name}")
 
     print(f"\n[explain] 完成！图表保存至 {out_dir}/")
 
