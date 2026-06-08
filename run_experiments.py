@@ -22,6 +22,7 @@
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import threading
@@ -86,7 +87,11 @@ def _status_printer(total: int, done_ref: list, stop_evt: threading.Event, inter
             print(f"  {DIM}[{ts()}] 等待中 {done}/{total}...{RESET}")
 
 
-def build_jobs(datasets, hz_list, ml_models, dl_models, skip_ml, skip_dl):
+def build_jobs(datasets, hz_list, ml_models, dl_models, skip_ml, skip_dl, ml_workers):
+    # 每个 ML 任务最多用 total_cores / ml_workers 个核，避免竞争
+    total_cores = os.cpu_count() or 4
+    n_jobs_per_task = max(1, total_cores // ml_workers)
+
     ml_jobs, dl_jobs = [], []
     for ds in datasets:
         for hz in hz_list:
@@ -97,6 +102,7 @@ def build_jobs(datasets, hz_list, ml_models, dl_models, skip_ml, skip_dl):
                         "--hz", str(hz),
                         "--model", model,
                         "--processed_dir", f"data/{ds}",
+                        "--n_jobs", str(n_jobs_per_task),
                     ]
                     label = f"ML/{model:<10} {ds} {hz}hz"
                     ml_jobs.append((cmd, label))
@@ -164,6 +170,7 @@ def main():
         args.datasets, args.hz,
         args.ml_models, args.dl_models,
         args.skip_ml, args.skip_dl,
+        args.ml_workers,
     )
 
     total = len(ml_jobs) + len(dl_jobs)
@@ -171,7 +178,10 @@ def main():
     print(f"{CYAN}  批量实验启动器{RESET}")
     print(f"  数据集: {args.datasets}")
     print(f"  采样率: {args.hz}")
+    total_cores = os.cpu_count() or 4
+    n_jobs_per_task = max(1, total_cores // args.ml_workers)
     print(f"  总任务: {total}  (ML={len(ml_jobs)}, DL={len(dl_jobs)})")
+    print(f"  ML 每任务核数: {n_jobs_per_task}/{total_cores}  (总核 / 并行数)")
     print(f"  进度更新间隔: {args.status_interval}s")
     print(f"{CYAN}{'='*60}{RESET}")
 
