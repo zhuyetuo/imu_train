@@ -1,6 +1,6 @@
 """
-读取原始 CSV 文件，只提取项圈传感器列。
-CSV 列名格式待首次运行 setup.sh 后根据实际输出确认。
+读取原始 CSV，按 DogID 列拆分为每条狗的记录，只保留项圈（Neck）传感器列。
+实际列名: ANeck_x/y/z (加速度计), GNeck_x/y/z (陀螺仪)
 """
 
 import os
@@ -8,74 +8,50 @@ import glob
 import pandas as pd
 import numpy as np
 
+# 项圈传感器列（Neck = 项圈位置）
+COLLAR_COLS = ["ANeck_x", "ANeck_y", "ANeck_z", "GNeck_x", "GNeck_y", "GNeck_z"]
 
-# 项圈传感器列名（运行 setup.sh 后根据实际列名更新）
-# 格式参考: Acc_collar_X / Gyro_collar_X 或类似命名
-COLLAR_COLS_PLACEHOLDER = None  # 由 detect_collar_cols() 自动探测
+# 标签列
+LABEL_COL = "Behavior_1"
 
-LABEL_COL = None  # 由 detect_label_col() 自动探测
-
-
-def detect_collar_cols(df: pd.DataFrame) -> list[str]:
-    """自动探测项圈传感器列（含 'collar' 关键字）。"""
-    cols = [c for c in df.columns if 'collar' in c.lower()]
-    if not cols:
-        # fallback: 尝试常见命名
-        cols = [c for c in df.columns if any(k in c.lower() for k in ['acc', 'gyro', 'accel'])]
-    return cols
+# 狗 ID 列
+DOG_ID_COL = "DogID"
 
 
-def detect_label_col(df: pd.DataFrame) -> str:
-    """自动探测标签列。"""
-    candidates = [c for c in df.columns if any(k in c.lower() for k in ['label', 'behavior', 'activity', 'class'])]
-    if candidates:
-        return candidates[0]
-    raise ValueError(f"未找到标签列，现有列: {list(df.columns)}")
-
-
-def load_raw_csv(csv_path: str) -> pd.DataFrame:
-    """读取单个 CSV 文件。"""
-    df = pd.read_csv(csv_path)
-    return df
-
-
-def load_dataset_files(csv_dir: str, dog_info_path: str = None) -> list[dict]:
+def load_dataset_files(csv_dir: str, dog_info_path: str = None) -> tuple:
     """
-    遍历 csv_dir 下所有 CSV，返回每条记录：
-    {dog_id, df_collar, labels}
+    读取大 CSV，按 DogID 拆分，返回每条狗的记录列表。
+    每条记录: {dog_id, data (np.float32), labels (np.ndarray)}
     """
     csv_files = sorted(glob.glob(os.path.join(csv_dir, "**/*.csv"), recursive=True))
     if not csv_files:
         csv_files = sorted(glob.glob(os.path.join(csv_dir, "*.csv")))
-
     if not csv_files:
         raise FileNotFoundError(f"在 {csv_dir} 下未找到 CSV 文件")
 
+    print(f"[loader] 读取 {csv_files[0]} ...")
+    df = pd.read_csv(csv_files[0])
+
+    # 验证必要列存在
+    missing = [c for c in COLLAR_COLS + [LABEL_COL, DOG_ID_COL] if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV 缺少列: {missing}，现有列: {list(df.columns)}")
+
+    print(f"[loader] 项圈传感器列: {COLLAR_COLS}")
+    print(f"[loader] 标签列: {LABEL_COL}")
+
+    # 按 DogID 拆分
+    dog_ids = sorted(df[DOG_ID_COL].unique())
+    print(f"[loader] 共 {len(dog_ids)} 条狗: {dog_ids[:5]}{'...' if len(dog_ids) > 5 else ''}")
+
     records = []
-    collar_cols = None
-    label_col = None
-
-    for path in csv_files:
-        df = load_raw_csv(path)
-
-        # 首次运行时自动探测列名
-        if collar_cols is None:
-            collar_cols = detect_collar_cols(df)
-            label_col = detect_label_col(df)
-            print(f"[loader] 项圈传感器列: {collar_cols}")
-            print(f"[loader] 标签列: {label_col}")
-
-        dog_id = os.path.splitext(os.path.basename(path))[0]
-        df_collar = df[collar_cols].copy()
-        labels = df[label_col].values
-
+    for dog_id in dog_ids:
+        sub = df[df[DOG_ID_COL] == dog_id]
         records.append({
-            "dog_id": dog_id,
-            "data": df_collar.values.astype(np.float32),
-            "labels": labels,
-            "collar_cols": collar_cols,
-            "n_channels": len(collar_cols),
+            "dog_id": str(dog_id),
+            "data": sub[COLLAR_COLS].values.astype(np.float32),
+            "labels": sub[LABEL_COL].values,
         })
 
-    print(f"[loader] 加载完成: {len(records)} 个文件，{len(collar_cols)} 个传感器通道")
-    return records, collar_cols, label_col
+    print(f"[loader] 加载完成: {len(records)} 条狗，{len(COLLAR_COLS)} 个传感器通道")
+    return records, COLLAR_COLS, LABEL_COL
