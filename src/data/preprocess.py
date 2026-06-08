@@ -19,20 +19,23 @@ def downsample(data: np.ndarray, labels: np.ndarray, source_hz: int, target_hz: 
     return data[::step], labels[::step]
 
 
-def sliding_window(data: np.ndarray, labels: np.ndarray, window_size: int, stride: int):
+def sliding_window(data: np.ndarray, labels: np.ndarray, window_size: int, stride: int,
+                   keep_label_set: set = None):
     """
     滑动窗口切分。
-    返回 X: (N, window_size, n_channels)，y: (N,) 取窗口内众数标签
+    y 取窗口内众数标签；若众数不在 keep_label_set 则丢弃该窗口。
     """
     X, y = [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
         end = start + window_size
-        window = data[start:end]
-        window_labels = labels[start:end]
-        majority = Counter(window_labels).most_common(1)[0][0]
-        X.append(window)
+        majority = Counter(labels[start:end]).most_common(1)[0][0]
+        if keep_label_set is not None and majority not in keep_label_set:
+            continue
+        X.append(data[start:end])
         y.append(majority)
+    if not X:
+        return np.empty((0, window_size, data.shape[1]), dtype=np.float32), np.empty((0,))
     return np.array(X, dtype=np.float32), np.array(y)
 
 
@@ -50,15 +53,20 @@ def split_by_dog(records: list, train_r: float, val_r: float, seed: int):
     return train_ids, val_ids, test_ids
 
 
-def process_split(records, dog_ids_set, window_size, stride, le):
+def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None):
     X_all, y_all = [], []
+    valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     for r in records:
         if r["dog_id"] not in dog_ids_set:
             continue
         data, labels = r["data"], r["labels"]
-        # 编码标签
-        labels_enc = le.transform(labels)
-        X, y = sliding_window(data, labels_enc, window_size, stride)
+        # 只编码保留标签（其余行用 -1 占位，滑窗时会被过滤掉）
+        mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
+        labels_enc = np.full(len(labels), -1, dtype=np.int64)
+        labels_enc[mask] = le.transform(labels[mask])
+        X, y = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
+        if len(X) == 0:
+            continue
         X_all.append(X)
         y_all.append(y)
     if not X_all:
@@ -81,8 +89,20 @@ def main(args):
     print(f"[preprocess] 加载原始数据: {args.raw_csv_dir}")
     records, collar_cols, label_col = load_dataset_files(args.raw_csv_dir, args.dog_info)
 
-    # 拟合标签编码器
-    all_labels = np.concatenate([r["labels"] for r in records])
+    keep_labels = cfg.get("keep_labels", None)
+    if keep_labels:
+        keep_label_set = set(keep_labels)
+        print(f"[preprocess] 过滤标签，只保留: {keep_labels}")
+    else:
+        keep_label_set = None
+
+    # 拟合标签编码器（只对保留的标签）
+    if keep_label_set:
+        all_labels = np.concatenate([
+            r["labels"][np.isin(r["labels"], list(keep_label_set))] for r in records
+        ])
+    else:
+        all_labels = np.concatenate([r["labels"] for r in records])
     le = LabelEncoder()
     le.fit(all_labels)
     classes = list(le.classes_)
@@ -106,9 +126,9 @@ def main(args):
             ds_records.append({**r, "data": data_ds, "labels": labels_ds})
 
         # 切窗口
-        X_train, y_train = process_split(ds_records, train_ids, window_size, stride, le)
-        X_val, y_val = process_split(ds_records, val_ids, window_size, stride, le)
-        X_test, y_test = process_split(ds_records, test_ids, window_size, stride, le)
+        X_train, y_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set)
+        X_val, y_val = process_split(ds_records, val_ids, window_size, stride, le, keep_label_set)
+        X_test, y_test = process_split(ds_records, test_ids, window_size, stride, le, keep_label_set)
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 

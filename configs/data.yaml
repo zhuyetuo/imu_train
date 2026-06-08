@@ -13,18 +13,17 @@ window_seconds: 2.0
 stride_seconds: 1.0
 
 # 只使用项圈传感器的列（collar）
-# 列名格式待确认数据后填写
 sensor_position: collar
 
-# 行为标签映射（原始标签 → 统一标签）
-label_map:
-  galloping: galloping
-  lying: lying
-  sitting: sitting
-  sniffing: sniffing
-  standing: standing
-  trotting: trotting
-  walking: walking
+# 只保留这7类核心行为，其余窗口丢弃
+keep_labels:
+  - Standing
+  - Walking
+  - Trotting
+  - Galloping
+  - Sitting
+  - Lying chest
+  - Sniffing
 
 # 训练/验证/测试按狗ID划分（leave-some-dogs-out）
 # 45只狗，建议 36/5/4 split
