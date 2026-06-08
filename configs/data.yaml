@@ -15,7 +15,7 @@ stride_seconds: 1.0
 # 只使用项圈传感器的列（collar）
 sensor_position: collar
 
-# 只保留这6类核心行为，其余窗口丢弃
+# 数据集A 保留的行为类别
 keep_labels:
   - Standing
   - Walking
@@ -23,6 +23,14 @@ keep_labels:
   - Sitting
   - Lying chest
   - Sniffing
+
+# 数据集B 保留的行为类别（标签为小写）
+keep_labels_b:
+  - standing
+  - walking
+  - sitting
+  - lying down
+  - body shake
 
 # 训练/验证/测试按狗ID划分（leave-some-dogs-out）
 # 45只狗，建议 36/5/4 split

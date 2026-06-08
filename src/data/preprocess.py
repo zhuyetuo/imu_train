@@ -1,7 +1,10 @@
 """
-预处理流程：
-  单数据集: 原始 100Hz CSV → 降采样 → 窗口切分 → 保存 .npz
-  合并模式: 数据集A + 数据集B → 标签统一 → 合并 → 保存 .npz
+预处理流程：原始 100Hz CSV → 降采样 → 窗口切分 → 保存 .npz
+
+支持多个独立数据集，每个数据集单独预处理，互不影响。
+用法示例：
+  python src/data/preprocess.py --dataset a --output_dir data/processed_a
+  python src/data/preprocess.py --dataset b --output_dir data/processed_b
 """
 
 import os
@@ -10,9 +13,6 @@ import numpy as np
 import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
-
-from loader import load_dataset_files
-from label_map import LABEL_MAP_A, LABEL_MAP_B, UNIFIED_LABELS, apply_map
 
 
 def downsample(data, labels, source_hz, target_hz):
@@ -67,25 +67,27 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
     return np.concatenate(X_all), np.concatenate(y_all)
 
 
-def load_merged_records(cfg, args):
-    """加载并合并数据集A和B，统一标签到 UNIFIED_LABELS。"""
-    from loader_b import load_dataset_b
+def load_records(args, cfg):
+    """根据 --dataset 选择对应的 loader，返回 (records, keep_label_set)。"""
+    if args.dataset == "a":
+        from loader import load_dataset_files
+        print("[preprocess] 数据集 A")
+        records, _, _ = load_dataset_files(args.raw_csv_dir, args.dog_info)
+        keep_labels_list = cfg.get("keep_labels", None)
 
-    print(f"[preprocess] 模式: 合并数据集A + B")
+    elif args.dataset == "b":
+        from loader_b import load_dataset_b
+        print("[preprocess] 数据集 B")
+        records, _, _ = load_dataset_b(args.raw_csv_b)
+        keep_labels_list = cfg.get("keep_labels_b", cfg.get("keep_labels", None))
 
-    # 数据集A
-    records_a, _, _ = load_dataset_files(args.raw_csv_dir, args.dog_info)
-    for r in records_a:
-        r["labels"] = apply_map(r["labels"], LABEL_MAP_A)
+    else:
+        raise ValueError(f"未知数据集: {args.dataset}，请传 --dataset a 或 --dataset b")
 
-    # 数据集B
-    records_b, _, _ = load_dataset_b(args.raw_csv_b)
-    for r in records_b:
-        r["labels"] = apply_map(r["labels"], LABEL_MAP_B)
-
-    records = records_a + records_b
-    print(f"[preprocess] 合并后: {len(records_a)} + {len(records_b)} = {len(records)} 只狗")
-    return records, UNIFIED_LABELS
+    keep_label_set = set(keep_labels_list) if keep_labels_list else None
+    if keep_label_set:
+        print(f"[preprocess] 过滤标签，只保留: {keep_labels_list}")
+    return records, keep_label_set
 
 
 def main(args):
@@ -100,19 +102,7 @@ def main(args):
     train_r = cfg["train_ratio"]
     val_r = cfg["val_ratio"]
 
-    # 决定加载模式
-    merge_mode = args.raw_csv_b and os.path.exists(args.raw_csv_b)
-
-    if merge_mode:
-        records, keep_labels_list = load_merged_records(cfg, args)
-        keep_label_set = set(keep_labels_list)
-    else:
-        print(f"[preprocess] 模式: 单数据集A")
-        records, collar_cols, _ = load_dataset_files(args.raw_csv_dir, args.dog_info)
-        keep_labels_list = cfg.get("keep_labels", None)
-        keep_label_set = set(keep_labels_list) if keep_labels_list else None
-        if keep_label_set:
-            print(f"[preprocess] 过滤标签，只保留: {keep_labels_list}")
+    records, keep_label_set = load_records(args, cfg)
 
     # 拟合标签编码器
     if keep_label_set:
@@ -122,7 +112,6 @@ def main(args):
     else:
         all_labels = np.concatenate([r["labels"] for r in records])
 
-    # 去掉 None（合并模式下未映射的标签）
     all_labels = all_labels[all_labels != np.array(None)]
 
     le = LabelEncoder()
@@ -133,10 +122,7 @@ def main(args):
     train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
     print(f"[preprocess] 狗 ID 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
 
-    suffix = "_merged" if merge_mode else ""
-
     for target_hz in target_hz_list:
-        step = source_hz // target_hz
         window_size = int(window_sec * target_hz)
         stride = int(stride_sec * target_hz)
 
@@ -153,7 +139,7 @@ def main(args):
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
-        out_dir = os.path.join(args.output_dir + suffix, f"{target_hz}hz")
+        out_dir = os.path.join(args.output_dir, f"{target_hz}hz")
         os.makedirs(out_dir, exist_ok=True)
 
         meta = {
@@ -163,7 +149,7 @@ def main(args):
             "train_dog_ids": str(list(train_ids)),
             "val_dog_ids": str(list(val_ids)),
             "test_dog_ids": str(list(test_ids)),
-            "mode": "merged" if merge_mode else "single",
+            "dataset": args.dataset,
         }
 
         np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, **meta)
@@ -176,10 +162,15 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw_csv_dir", default="data/raw/csv")
-    parser.add_argument("--dog_info", default="data/raw/DogInfo.csv")
+    parser.add_argument("--dataset", required=True, choices=["a", "b"],
+                        help="数据集标识: a=Mendeley vxhx934tbn, b=Mendeley mpph6bmn7g")
+    parser.add_argument("--raw_csv_dir", default="data/raw/csv",
+                        help="数据集A的 CSV 目录")
+    parser.add_argument("--dog_info", default="data/raw/DogInfo.csv",
+                        help="数据集A的 DogInfo.csv")
     parser.add_argument("--raw_csv_b", default="data/raw_b/df_raw.csv",
-                        help="数据集B的 df_raw.csv 路径，不传则只用数据集A")
-    parser.add_argument("--output_dir", default="data/processed")
+                        help="数据集B的 df_raw.csv")
+    parser.add_argument("--output_dir", required=True,
+                        help="输出目录，如 data/processed_a")
     parser.add_argument("--config", default="configs/data.yaml")
     main(parser.parse_args())
