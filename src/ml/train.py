@@ -11,22 +11,16 @@ import argparse
 import json
 import yaml
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 import joblib
 
 from dataset import load_all_splits
 from features import extract_features
 from models.random_forest import build_rf
-from models.svm import build_svm
 from models.xgboost_model import build_xgb
 
 
 MODELS = {
     "rf": build_rf,
-    "svm": build_svm,
     "xgb": build_xgb,
 }
 
@@ -66,9 +60,6 @@ def main(args):
         n_est = cfg["xgboost"]["n_estimators"]
         model.set_params(callbacks=[TqdmCallback(n_est)], verbosity=0)
 
-    elif args.model == "rf":
-        model.set_params(verbose=1)
-
     model.fit(X_tr_f, y_tr)
 
     from sklearn.metrics import accuracy_score, f1_score, classification_report
@@ -98,6 +89,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
-    parser.add_argument("--model", default="rf", choices=["rf", "svm", "xgb"])
+    parser.add_argument("--model", default="rf", choices=["rf", "xgb"])
     parser.add_argument("--config", default="configs/ml.yaml")
     main(parser.parse_args())
