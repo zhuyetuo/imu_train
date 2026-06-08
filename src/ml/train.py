@@ -109,6 +109,13 @@ def main(args):
         np.savez_compressed(feat_cache, X_tr=X_tr_f, X_val=X_val_f, X_te=X_te_f)
         print(f"[ml/train] 特征已缓存至 {feat_cache}")
 
+    # val 为空时（小数据集）用训练集末尾 10% 代替
+    if len(X_val_f) == 0:
+        n_fallback = max(1, len(X_tr_f) // 10)
+        X_val_f, y_val = X_tr_f[-n_fallback:], y_tr[-n_fallback:]
+        X_tr_f, y_tr   = X_tr_f[:-n_fallback], y_tr[:-n_fallback]
+        print(f"[ml/train] val 集为空，从训练集末尾借用 {n_fallback} 个样本作为 val")
+
     print(f"[ml/train] 特征维度: {X_tr_f.shape[1]}")
 
     build_fn, cfg_key = MODELS[args.model]

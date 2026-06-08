@@ -25,6 +25,7 @@ class FilterNetM2M(nn.Module):
         kernel_size  = cfg.get("kernel_size", 5)
         n_downsample = cfg.get("n_downsample", 3)
         lstm_units   = cfg.get("lstm_units", 100)
+        lstm_layers  = cfg.get("lstm_layers", 2)
         dropout      = cfg.get("dropout", 0.3)
 
         self.window_size  = window_size
@@ -53,8 +54,9 @@ class FilterNetM2M(nn.Module):
         self.lstm = nn.LSTM(
             input_size=filters,
             hidden_size=lstm_units,
+            num_layers=lstm_layers,
             batch_first=True,
-            dropout=dropout if n_downsample > 1 else 0,
+            dropout=dropout if lstm_layers > 1 else 0,
         )
 
         # 1×1 Conv 输出头（Component G）— 对每个时间步输出 n_classes logits

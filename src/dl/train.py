@@ -98,6 +98,13 @@ def main(args):
     n_classes   = len(classes)
     print(f"[dl/train] 数据形状: {X_tr.shape}, 类别数: {n_classes}")
 
+    # val 为空时（小数据集）用训练集末尾 10% 代替
+    if len(X_val) == 0:
+        n_fallback = max(1, len(X_tr) // 10)
+        X_val, y_val, y_seq_val = X_tr[-n_fallback:], y_tr[-n_fallback:], y_seq_tr[-n_fallback:] if y_seq_tr is not None else None
+        X_tr,  y_tr,  y_seq_tr  = X_tr[:-n_fallback],  y_tr[:-n_fallback],  y_seq_tr[:-n_fallback] if y_seq_tr is not None else None
+        print(f"[dl/train] val 集为空，从训练集末尾借用 {n_fallback} 个样本作为 val")
+
     train_loader = make_loader(X_tr, y_tr, y_seq_tr, cfg["batch_size"], shuffle=True,  m2m=m2m)
     val_loader   = make_loader(X_val, y_val, y_seq_val, cfg["batch_size"], shuffle=False, m2m=m2m)
     test_loader  = make_loader(X_te,  y_te,  y_seq_te,  cfg["batch_size"], shuffle=False, m2m=m2m)
