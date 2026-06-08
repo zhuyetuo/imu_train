@@ -59,7 +59,9 @@ def main(args):
     print(f"\n[ml/train] 测试集结果:")
     print(f"  Accuracy: {acc:.4f}")
     print(f"  Macro F1: {f1:.4f}")
-    print(classification_report(y_te, y_pred, target_names=classes))
+    present_labels = sorted(set(y_te) | set(y_pred))
+    present_names = [classes[i] for i in present_labels]
+    print(classification_report(y_te, y_pred, labels=present_labels, target_names=present_names))
 
     # 保存结果
     out_dir = os.path.join("results", f"{args.hz}hz")
