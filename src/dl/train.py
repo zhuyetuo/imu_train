@@ -61,6 +61,8 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["learning_rate"])
     criterion = nn.CrossEntropyLoss()
 
+    from tqdm import tqdm
+
     best_val_acc = 0.0
     patience = cfg["early_stopping_patience"]
     no_improve = 0
@@ -69,7 +71,8 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     best_model_path = os.path.join(out_dir, f"dl_{args.model}_best.pt")
 
-    for epoch in range(1, cfg["epochs"] + 1):
+    pbar = tqdm(range(1, cfg["epochs"] + 1), desc="训练", unit="epoch")
+    for epoch in pbar:
         # 训练
         model.train()
         total_loss = 0
@@ -99,11 +102,11 @@ def main(args):
         else:
             no_improve += 1
 
-        if epoch % 10 == 0:
-            print(f"  epoch {epoch:3d} | loss {total_loss/len(train_loader):.4f} | val_acc {val_acc:.4f}")
+        avg_loss = total_loss / len(train_loader)
+        pbar.set_postfix(loss=f"{avg_loss:.4f}", val_acc=f"{val_acc:.4f}", best=f"{best_val_acc:.4f}")
 
         if no_improve >= patience:
-            print(f"  Early stopping at epoch {epoch}")
+            tqdm.write(f"  Early stopping at epoch {epoch}, best val_acc={best_val_acc:.4f}")
             break
 
     # 测试

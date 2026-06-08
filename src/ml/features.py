@@ -48,8 +48,9 @@ def extract_features(X: np.ndarray, hz: int) -> np.ndarray:
     X: (N, window_size, n_channels)
     返回: (N, n_features)
     """
+    from tqdm import tqdm
     features = []
-    for i in range(len(X)):
+    for i in tqdm(range(len(X)), desc="提取特征", unit="窗口"):
         t_feat = _time_features(X[i])
         f_feat = _freq_features(X[i], hz)
         features.append(np.concatenate([t_feat, f_feat]))
