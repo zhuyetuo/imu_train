@@ -30,6 +30,9 @@ def load_model(model_name: str, n_channels: int, window_size: int, n_classes: in
     elif model_name == "transformer":
         from models.transformer import TransformerClassifier
         return TransformerClassifier(n_channels, window_size, n_classes, cfg["transformer"])
+    elif model_name == "filternet":
+        from models.filternet import FilterNet
+        return FilterNet(n_channels, window_size, n_classes, cfg["filternet"])
     else:
         raise ValueError(f"未知模型: {model_name}")
 
@@ -148,7 +151,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
-    parser.add_argument("--model", default="cnn_lstm", choices=["cnn", "collar_cnn", "cnn_lstm", "transformer"])
+    parser.add_argument("--model", default="cnn_lstm", choices=["cnn", "collar_cnn", "cnn_lstm", "transformer", "filternet"])
     parser.add_argument("--config", default="configs/dl.yaml")
     parser.add_argument("--processed_dir", default="data/processed")
     parser.add_argument("--results_dir", default="results")

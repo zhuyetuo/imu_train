@@ -30,3 +30,11 @@ transformer:
   num_layers: 3
   dropout: 0.1
   dim_feedforward: 256
+
+# 复现 FilterNet (Sensors 2020) encoder，many-to-one 适配
+filternet:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3    # 时序缩短 2^3=8 倍后送入 LSTM
+  lstm_units: 100
+  dropout: 0.3
