@@ -9,7 +9,7 @@ import glob
 
 
 HZ_LIST = [5, 10, 25, 50]
-ML_MODELS = ["rf", "svm", "xgb"]
+ML_MODELS = ["rf", "xgb"]
 DL_MODELS = ["cnn", "cnn_lstm", "transformer"]
 RESULTS_DIR = "results"
 
