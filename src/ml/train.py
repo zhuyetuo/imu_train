@@ -122,7 +122,7 @@ def main(args):
     model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
 
     from sklearn.metrics import accuracy_score, f1_score, classification_report
-    y_pred = model.predict(X_te_f)
+    y_pred = np.array(model.predict(X_te_f)).flatten().astype(int)
     acc = accuracy_score(y_te, y_pred)
     f1 = f1_score(y_te, y_pred, average="macro")
 
