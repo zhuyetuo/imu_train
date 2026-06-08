@@ -2,6 +2,8 @@ data/raw/**
 !data/raw/.gitkeep
 data/raw_b/**
 !data/raw_b/.gitkeep
+data/raw_custom/**
+!data/raw_custom/.gitkeep
 data/processed/**
 !data/processed/.gitkeep
 results/

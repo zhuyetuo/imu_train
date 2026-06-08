@@ -29,11 +29,11 @@ def main(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    print(f"\n[ml/train] hz={args.hz}, model={args.model}")
-    (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz)
+    print(f"\n[ml/train] hz={args.hz}, model={args.model}, processed_dir={args.processed_dir}")
+    (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
 
-    feat_dir = os.path.join("data/processed", f"{args.hz}hz")
+    feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
 
     if os.path.exists(feat_cache):
@@ -89,7 +89,8 @@ def main(args):
     print(classification_report(y_te, y_pred, labels=present_labels, target_names=present_names))
 
     # 保存结果
-    out_dir = os.path.join("results", f"{args.hz}hz")
+    dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
+    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz")
     os.makedirs(out_dir, exist_ok=True)
     result = {"hz": args.hz, "model": args.model, "accuracy": acc, "macro_f1": f1}
     with open(os.path.join(out_dir, f"ml_{args.model}.json"), "w") as f:
@@ -105,4 +106,6 @@ if __name__ == "__main__":
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
     parser.add_argument("--model", default="rf", choices=["rf", "xgb"])
     parser.add_argument("--config", default="configs/ml.yaml")
+    parser.add_argument("--processed_dir", default="data/processed")
+    parser.add_argument("--results_dir", default="results")
     main(parser.parse_args())

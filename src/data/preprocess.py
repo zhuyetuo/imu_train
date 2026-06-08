@@ -1,6 +1,10 @@
 """
-预处理流程：
-  原始 100Hz CSV → 降采样 → 窗口切分 → 按狗划分 train/val/test → 保存 .npz
+预处理流程：原始 100Hz CSV → 降采样 → 窗口切分 → 保存 .npz
+
+支持多个独立数据集，每个数据集单独预处理，互不影响。
+用法示例：
+  python src/data/preprocess.py --dataset a --output_dir data/processed_a
+  python src/data/preprocess.py --dataset b --output_dir data/processed_b
 """
 
 import os
@@ -10,21 +14,13 @@ import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
 
-from loader import load_dataset_files
 
-
-def downsample(data: np.ndarray, labels: np.ndarray, source_hz: int, target_hz: int):
-    """按固定步长降采样（整数比）。"""
+def downsample(data, labels, source_hz, target_hz):
     step = source_hz // target_hz
     return data[::step], labels[::step]
 
 
-def sliding_window(data: np.ndarray, labels: np.ndarray, window_size: int, stride: int,
-                   keep_label_set: set = None):
-    """
-    滑动窗口切分。
-    y 取窗口内众数标签；若众数不在 keep_label_set 则丢弃该窗口。
-    """
+def sliding_window(data, labels, window_size, stride, keep_label_set=None):
     X, y = [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
@@ -39,18 +35,16 @@ def sliding_window(data: np.ndarray, labels: np.ndarray, window_size: int, strid
     return np.array(X, dtype=np.float32), np.array(y)
 
 
-def split_by_dog(records: list, train_r: float, val_r: float, seed: int):
-    """按狗 ID 划分，避免同一条狗同时出现在训练和测试集。"""
+def split_by_dog(records, train_r, val_r, seed):
     rng = np.random.default_rng(seed)
     dog_ids = [r["dog_id"] for r in records]
     rng.shuffle(dog_ids)
     n = len(dog_ids)
     n_train = int(n * train_r)
     n_val = int(n * val_r)
-    train_ids = set(dog_ids[:n_train])
-    val_ids = set(dog_ids[n_train:n_train + n_val])
-    test_ids = set(dog_ids[n_train + n_val:])
-    return train_ids, val_ids, test_ids
+    return (set(dog_ids[:n_train]),
+            set(dog_ids[n_train:n_train + n_val]),
+            set(dog_ids[n_train + n_val:]))
 
 
 def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None):
@@ -60,7 +54,6 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         if r["dog_id"] not in dog_ids_set:
             continue
         data, labels = r["data"], r["labels"]
-        # 只编码保留标签（其余行用 -1 占位，滑窗时会被过滤掉）
         mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
         labels_enc = np.full(len(labels), -1, dtype=np.int64)
         labels_enc[mask] = le.transform(labels[mask])
@@ -72,6 +65,40 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
     if not X_all:
         return np.empty((0,)), np.empty((0,))
     return np.concatenate(X_all), np.concatenate(y_all)
+
+
+def load_records(args, cfg):
+    """根据 --dataset 选择对应的 loader，返回 (records, keep_label_set)。"""
+    if args.dataset == "a":
+        from loader import load_dataset_files
+        print("[preprocess] 数据集 A")
+        records, _, _ = load_dataset_files(args.raw_csv_dir, args.dog_info)
+        keep_labels_list = cfg.get("keep_labels", None)
+
+    elif args.dataset == "b":
+        from loader_b import load_dataset_b
+        print("[preprocess] 数据集 B")
+        records, _, _ = load_dataset_b(args.raw_csv_b)
+        keep_labels_list = cfg.get("keep_labels_b", cfg.get("keep_labels", None))
+
+    elif args.dataset == "custom":
+        from loader_custom import load_dataset_custom
+        print("[preprocess] 自采数据集")
+        custom_cfg = cfg.get("custom", {})
+        csv_path = args.raw_csv_custom or custom_cfg.get("csv_path", "data/raw_custom/data.csv")
+        # 自采数据集可以有不同的源采样率
+        if "source_hz" in custom_cfg:
+            cfg["source_hz"] = custom_cfg["source_hz"]
+        records, _, _ = load_dataset_custom(csv_path, custom_cfg)
+        keep_labels_list = custom_cfg.get("keep_labels") or None
+
+    else:
+        raise ValueError(f"未知数据集: {args.dataset}，请传 --dataset a / b / custom")
+
+    keep_label_set = set(keep_labels_list) if keep_labels_list else None
+    if keep_label_set:
+        print(f"[preprocess] 过滤标签，只保留: {keep_labels_list}")
+    return records, keep_label_set
 
 
 def main(args):
@@ -86,72 +113,59 @@ def main(args):
     train_r = cfg["train_ratio"]
     val_r = cfg["val_ratio"]
 
-    print(f"[preprocess] 加载原始数据: {args.raw_csv_dir}")
-    records, collar_cols, label_col = load_dataset_files(args.raw_csv_dir, args.dog_info)
+    records, keep_label_set = load_records(args, cfg)
 
-    keep_labels = cfg.get("keep_labels", None)
-    if keep_labels:
-        keep_label_set = set(keep_labels)
-        print(f"[preprocess] 过滤标签，只保留: {keep_labels}")
-    else:
-        keep_label_set = None
-
-    # 拟合标签编码器（只对保留的标签）
+    # 拟合标签编码器
     if keep_label_set:
         all_labels = np.concatenate([
             r["labels"][np.isin(r["labels"], list(keep_label_set))] for r in records
         ])
     else:
         all_labels = np.concatenate([r["labels"] for r in records])
+
+    all_labels = all_labels[all_labels != np.array(None)]
+
     le = LabelEncoder()
     le.fit(all_labels)
     classes = list(le.classes_)
     print(f"[preprocess] 行为类别 ({len(classes)}): {classes}")
 
-    # 按狗 ID 划分
     train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
     print(f"[preprocess] 狗 ID 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
 
     for target_hz in target_hz_list:
-        step = source_hz // target_hz
         window_size = int(window_sec * target_hz)
         stride = int(stride_sec * target_hz)
 
-        print(f"\n[preprocess] 处理 {target_hz}Hz (step={step}, window={window_size}pts, stride={stride}pts)")
+        print(f"\n[preprocess] 处理 {target_hz}Hz ...")
 
-        # 降采样所有记录
         ds_records = []
         for r in records:
             data_ds, labels_ds = downsample(r["data"], r["labels"], source_hz, target_hz)
             ds_records.append({**r, "data": data_ds, "labels": labels_ds})
 
-        # 切窗口
         X_train, y_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set)
         X_val, y_val = process_split(ds_records, val_ids, window_size, stride, le, keep_label_set)
         X_test, y_test = process_split(ds_records, test_ids, window_size, stride, le, keep_label_set)
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
-        # 保存
         out_dir = os.path.join(args.output_dir, f"{target_hz}hz")
         os.makedirs(out_dir, exist_ok=True)
 
         meta = {
-            "hz": target_hz,
-            "window_size": window_size,
-            "stride": stride,
-            "n_channels": len(collar_cols),
-            "collar_cols": collar_cols,
-            "classes": classes,
-            "train_dog_ids": list(train_ids),
-            "val_dog_ids": list(val_ids),
-            "test_dog_ids": list(test_ids),
+            "hz": target_hz, "window_size": window_size, "stride": stride,
+            "n_channels": str(X_train.shape[2] if X_train.ndim == 3 else 6),
+            "classes": str(classes),
+            "train_dog_ids": str(list(train_ids)),
+            "val_dog_ids": str(list(val_ids)),
+            "test_dog_ids": str(list(test_ids)),
+            "dataset": args.dataset,
         }
 
-        np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, **{k: str(v) for k, v in meta.items()})
-        np.savez_compressed(os.path.join(out_dir, "val.npz"), X=X_val, y=y_val, **{k: str(v) for k, v in meta.items()})
-        np.savez_compressed(os.path.join(out_dir, "test.npz"), X=X_test, y=y_test, **{k: str(v) for k, v in meta.items()})
-
+        np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, **meta)
+        np.savez_compressed(os.path.join(out_dir, "val.npz"), X=X_val, y=y_val, **meta)
+        np.savez_compressed(os.path.join(out_dir, "test.npz"), X=X_test, y=y_test, **meta)
         print(f"  ✅ 保存至 {out_dir}/")
 
     print("\n[preprocess] 全部完成！")
@@ -159,8 +173,17 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw_csv_dir", required=True)
-    parser.add_argument("--dog_info", default=None)
-    parser.add_argument("--output_dir", default="data/processed")
+    parser.add_argument("--dataset", required=True, choices=["a", "b", "custom"],
+                        help="数据集标识: a=Mendeley vxhx934tbn, b=Mendeley mpph6bmn7g, custom=自采")
+    parser.add_argument("--raw_csv_dir", default="data/raw/csv",
+                        help="数据集A的 CSV 目录")
+    parser.add_argument("--dog_info", default="data/raw/DogInfo.csv",
+                        help="数据集A的 DogInfo.csv")
+    parser.add_argument("--raw_csv_b", default="data/raw_b/df_raw.csv",
+                        help="数据集B的 df_raw.csv")
+    parser.add_argument("--raw_csv_custom", default="",
+                        help="自采数据集CSV路径，留空则读 configs/data.yaml custom.csv_path")
+    parser.add_argument("--output_dir", required=True,
+                        help="输出目录，如 data/processed_a")
     parser.add_argument("--config", default="configs/data.yaml")
     main(parser.parse_args())
