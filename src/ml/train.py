@@ -33,10 +33,21 @@ def main(args):
     (X_tr, y_tr), (X_val, y_val), (X_te, y_te), meta = load_all_splits(args.hz)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
 
-    print(f"[ml/train] 提取特征...")
-    X_tr_f = extract_features(X_tr, args.hz)
-    X_val_f = extract_features(X_val, args.hz)
-    X_te_f = extract_features(X_te, args.hz)
+    feat_dir = os.path.join("data/processed", f"{args.hz}hz")
+    feat_cache = os.path.join(feat_dir, "ml_features.npz")
+
+    if os.path.exists(feat_cache):
+        print(f"[ml/train] 加载缓存特征: {feat_cache}")
+        cache = np.load(feat_cache)
+        X_tr_f, X_val_f, X_te_f = cache["X_tr"], cache["X_val"], cache["X_te"]
+    else:
+        print(f"[ml/train] 提取特征（首次，之后自动缓存）...")
+        X_tr_f = extract_features(X_tr, args.hz)
+        X_val_f = extract_features(X_val, args.hz)
+        X_te_f = extract_features(X_te, args.hz)
+        np.savez_compressed(feat_cache, X_tr=X_tr_f, X_val=X_val_f, X_te=X_te_f)
+        print(f"[ml/train] 特征已缓存至 {feat_cache}")
+
     print(f"[ml/train] 特征维度: {X_tr_f.shape[1]}")
 
     model_fn = MODELS[args.model]
