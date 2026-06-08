@@ -15,12 +15,11 @@ stride_seconds: 1.0
 # 只使用项圈传感器的列（collar）
 sensor_position: collar
 
-# 只保留这7类核心行为，其余窗口丢弃
+# 只保留这6类核心行为，其余窗口丢弃
 keep_labels:
   - Standing
   - Walking
   - Trotting
-  - Galloping
   - Sitting
   - Lying chest
   - Sniffing
