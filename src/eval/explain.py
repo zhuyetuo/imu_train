@@ -120,8 +120,8 @@ def main(args):
     bg_idx = rng.choice(len(X_tr_f), bg_size, replace=False)
     X_bg = X_tr_f[bg_idx]
 
-    # 构建 Explainer
-    if args.model == "xgb":
+    # 构建 Explainer（rf 需要背景数据，tree boosters 不需要）
+    if args.model in ("xgb", "lgbm", "catboost"):
         explainer = shap.TreeExplainer(model)
     else:
         explainer = shap.TreeExplainer(model, data=X_bg)
@@ -173,7 +173,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
-    parser.add_argument("--model", default="xgb", choices=["rf", "xgb"])
+    parser.add_argument("--model", default="xgb", choices=["rf", "xgb", "lgbm", "catboost"])
     parser.add_argument("--processed_dir", default="data/processed_a")
     parser.add_argument("--results_dir", default="results")
     parser.add_argument("--max_samples", type=int, default=1000,
