@@ -49,6 +49,26 @@ def main(args):
     model = model_fn(cfg[{"rf": "random_forest", "svm": "svm", "xgb": "xgboost"}[args.model]])
 
     print(f"[ml/train] 训练中...")
+    if args.model == "xgb":
+        from tqdm import tqdm
+        from xgboost.callback import TrainingCallback
+
+        class TqdmCallback(TrainingCallback):
+            def __init__(self, total):
+                self.pbar = tqdm(total=total, desc="XGBoost训练", unit="轮")
+            def after_iteration(self, model, epoch, evals_log):
+                self.pbar.update(1)
+                return False
+            def after_training(self, model):
+                self.pbar.close()
+                return model
+
+        n_est = cfg["xgboost"]["n_estimators"]
+        model.set_params(callbacks=[TqdmCallback(n_est)], verbosity=0)
+
+    elif args.model == "rf":
+        model.set_params(verbose=1)
+
     model.fit(X_tr_f, y_tr)
 
     from sklearn.metrics import accuracy_score, f1_score, classification_report
