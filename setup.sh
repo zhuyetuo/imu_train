@@ -22,10 +22,13 @@ for i in "${!ARGS[@]}"; do
 done
 
 if [ -z "$DATASET" ]; then
-    echo "用法: bash setup.sh --dataset <a|b|custom>"
-    echo "  --dataset a       预处理数据集A (Mendeley vxhx934tbn)"
-    echo "  --dataset b       预处理数据集B (Mendeley mpph6bmn7g)"
-    echo "  --dataset custom  预处理自采数据集 (data/raw_custom/data.csv)"
+    echo "用法: bash setup.sh --dataset <数据集>"
+    echo "  --dataset a              预处理数据集A (Mendeley vxhx934tbn，犬)"
+    echo "  --dataset b              预处理数据集B (Mendeley mpph6bmn7g，犬)"
+    echo "  --dataset custom         预处理自采数据集"
+    echo "  --dataset cat_smit2023   预处理猫咪数据集 Smit 2023 (FigShare)"
+    echo "  --dataset cat_dunford2024  预处理猫咪数据集 Dunford 2024 (Dryad)"
+    echo "  --dataset cat_smit2024   预处理猫咪数据集 Smit 2024 (FigShare)"
     exit 1
 fi
 
@@ -125,8 +128,55 @@ elif [ "$DATASET" = "custom" ]; then
         --output_dir "$OUT_DIR" \
         --config configs/data.yaml
 
+elif [[ "$DATASET" == cat_* ]]; then
+    # 根据 dataset 名确定 csv_path（从 configs/data.yaml 读取）
+    CSV_CAT=$(python -c "
+import yaml
+cfg = yaml.safe_load(open('configs/data.yaml'))
+print(cfg.get('$DATASET', {}).get('csv_path', 'data/raw_$DATASET/data.csv'))
+")
+    OUT_DIR="data/processed_$DATASET"
+
+    echo ""
+    echo "[1/2] 检查猫咪数据集文件..."
+    if [ ! -f "$CSV_CAT" ]; then
+        echo "  ❌ 缺少: $CSV_CAT"
+        echo ""
+        echo "  请先准备数据："
+        if [[ "$DATASET" == "cat_smit2023" ]]; then
+            echo "  1. 从 FigShare 下载: https://figshare.com/articles/dataset/23605842"
+            echo "  2. 放到 data/raw_cat_smit2023/"
+            echo "  3. 转换格式: python src/data/convert_cat_rdata.py --dataset smit2023 \\"
+            echo "       --rdata data/raw_cat_smit2023/accel_data.RDATA \\"
+            echo "       --annot data/raw_cat_smit2023/anno_data.RDATA \\"
+            echo "       --out data/raw_cat_smit2023/cat_smit2023.csv"
+        elif [[ "$DATASET" == "cat_dunford2024" ]]; then
+            echo "  1. 从 Dryad 下载: https://datadryad.org/dataset/doi:10.5061/dryad.q2bvq83sx"
+            echo "  2. 放到 data/raw_cat_dunford2024/"
+            echo "  3. 确认列名并更新 configs/data.yaml cat_dunford2024 节"
+        elif [[ "$DATASET" == "cat_smit2024" ]]; then
+            echo "  1. 从 FigShare 下载: https://figshare.com/articles/dataset/24848292"
+            echo "  2. 放到 data/raw_cat_smit2024/"
+            echo "  3. 转换格式: python src/data/convert_cat_rdata.py --dataset smit2024 \\"
+            echo "       --rdata data/raw_cat_smit2024/accel_data.RDATA \\"
+            echo "       --annot data/raw_cat_smit2024/anno_data.RDATA \\"
+            echo "       --out data/raw_cat_smit2024/cat_smit2024.csv"
+        fi
+        exit 1
+    else
+        echo "  ✅ $CSV_CAT"
+    fi
+
+    echo ""
+    echo "[2/2] 运行预处理..."
+    python src/data/preprocess.py \
+        --dataset "$DATASET" \
+        --output_dir "$OUT_DIR" \
+        --config configs/data.yaml
+
 else
-    echo "未知数据集: $DATASET（只支持 a / b / custom）"
+    echo "未知数据集: $DATASET"
+    echo "运行 bash setup.sh 查看支持的数据集列表"
     exit 1
 fi
 

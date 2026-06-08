@@ -4,6 +4,12 @@ data/raw_b/**
 !data/raw_b/.gitkeep
 data/raw_custom/**
 !data/raw_custom/.gitkeep
+data/raw_cat_smit2023/**
+!data/raw_cat_smit2023/.gitkeep
+data/raw_cat_dunford2024/**
+!data/raw_cat_dunford2024/.gitkeep
+data/raw_cat_smit2024/**
+!data/raw_cat_smit2024/.gitkeep
 data/processed/**
 !data/processed/.gitkeep
 results/

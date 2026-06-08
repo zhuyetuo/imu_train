@@ -93,14 +93,26 @@ def load_records(args, cfg):
         print("[preprocess] 自采数据集")
         custom_cfg = cfg.get("custom", {})
         csv_path = args.raw_csv_custom or custom_cfg.get("csv_path", "data/raw_custom/data.csv")
-        # 自采数据集可以有不同的源采样率
         if "source_hz" in custom_cfg:
             cfg["source_hz"] = custom_cfg["source_hz"]
         records, _, _ = load_dataset_custom(csv_path, custom_cfg)
         keep_labels_list = custom_cfg.get("keep_labels") or None
 
+    elif args.dataset in ("cat_smit2023", "cat_dunford2024", "cat_smit2024"):
+        from loader_cat import load_dataset_cat
+        print(f"[preprocess] 猫咪数据集: {args.dataset}")
+        cat_cfg = cfg.get(args.dataset, {})
+        csv_path = cat_cfg.get("csv_path", f"data/raw_{args.dataset}/data.csv")
+        if "source_hz" in cat_cfg:
+            cfg["source_hz"] = cat_cfg["source_hz"]
+        records, _, _ = load_dataset_cat(csv_path, cat_cfg)
+        keep_labels_list = cat_cfg.get("keep_labels") or None
+
     else:
-        raise ValueError(f"未知数据集: {args.dataset}，请传 --dataset a / b / custom")
+        raise ValueError(
+            f"未知数据集: {args.dataset}\n"
+            f"支持: a / b / custom / cat_smit2023 / cat_dunford2024 / cat_smit2024"
+        )
 
     keep_label_set = set(keep_labels_list) if keep_labels_list else None
     if keep_label_set:
@@ -180,8 +192,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", required=True, choices=["a", "b", "custom"],
-                        help="数据集标识: a=Mendeley vxhx934tbn, b=Mendeley mpph6bmn7g, custom=自采")
+    parser.add_argument("--dataset", required=True,
+                        choices=["a", "b", "custom",
+                                 "cat_smit2023", "cat_dunford2024", "cat_smit2024"],
+                        help="数据集标识")
     parser.add_argument("--raw_csv_dir", default="data/raw/csv",
                         help="数据集A的 CSV 目录")
     parser.add_argument("--dog_info", default="data/raw/DogInfo.csv",
