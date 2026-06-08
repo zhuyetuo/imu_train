@@ -125,7 +125,10 @@ def main(args):
     print(f"[ml/train] 特征维度: {X_tr_f.shape[1]}")
 
     build_fn, cfg_key = MODELS[args.model]
-    model = build_fn(cfg[cfg_key])
+    model_cfg = dict(cfg[cfg_key])
+    if args.n_jobs is not None:
+        model_cfg["n_jobs"] = args.n_jobs
+    model = build_fn(model_cfg)
 
     print(f"[ml/train] 训练中...")
     model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
@@ -161,4 +164,6 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/ml.yaml")
     parser.add_argument("--processed_dir", default="data/processed_a")
     parser.add_argument("--results_dir", default="results")
+    parser.add_argument("--n_jobs", type=int, default=None,
+                        help="覆盖模型的 n_jobs（并行启动时限制每个任务的核数）")
     main(parser.parse_args())
