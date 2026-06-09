@@ -158,6 +158,10 @@ def main(args):
     print(f"[preprocess] 狗 ID 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
 
     for target_hz in target_hz_list:
+        if target_hz > source_hz:
+            print(f"\n[preprocess] 跳过 {target_hz}Hz（高于源采样率 {source_hz}Hz，无法上采样）")
+            continue
+
         window_size = int(window_sec * target_hz)
         stride = int(stride_sec * target_hz)
 

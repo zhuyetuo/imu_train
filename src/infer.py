@@ -59,6 +59,8 @@ def collect_files(input_dir: str = None, input_file: str = None) -> list[str]:
     for ext in exts:
         files += glob.glob(os.path.join(input_dir, ext))
     files = sorted(set(files))
+    # 跳过非数据文件（README、说明文件等）
+    files = [f for f in files if os.path.basename(f).upper() not in ("README.TXT", "README.CSV")]
     if not files:
         raise FileNotFoundError(f"在 {input_dir} 下未找到 TXT/CSV 文件")
     return files

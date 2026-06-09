@@ -178,6 +178,21 @@ def main():
     print(f"{CYAN}  批量实验启动器{RESET}")
     print(f"  数据集: {args.datasets}")
     print(f"  采样率: {args.hz}")
+    # 过滤掉没有预处理数据的目录
+    def has_data(ds):
+        return os.path.isdir(os.path.join("data", ds))
+    missing = [ds for ds in args.datasets if not has_data(ds)]
+    if missing:
+        print(f"  {YELLOW}跳过（目录不存在）: {missing}{RESET}")
+        args.datasets = [ds for ds in args.datasets if has_data(ds)]
+        ml_jobs, dl_jobs = build_jobs(
+            args.datasets, args.hz,
+            args.ml_models, args.dl_models,
+            args.skip_ml, args.skip_dl,
+            args.ml_workers,
+        )
+        total = len(ml_jobs) + len(dl_jobs)
+
     total_cores = os.cpu_count() or 4
     n_jobs_per_task = max(1, total_cores // args.ml_workers)
     print(f"  总任务: {total}  (ML={len(ml_jobs)}, DL={len(dl_jobs)})")

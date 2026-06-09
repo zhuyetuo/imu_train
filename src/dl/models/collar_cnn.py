@@ -39,18 +39,22 @@ class CollarCNN(nn.Module):
         fc_dim      = cfg.get("fc_dim", 256)
         dropout     = cfg.get("dropout", 0.5)
 
+        # 自动缩减 pool_size，确保每层输出 >= 1
+        out_len = window_size
+        safe_pool = []
+        for _ in filters:
+            p = min(pool_size, max(1, out_len))
+            safe_pool.append(p)
+            out_len = out_len // p
+
         # 卷积块
         blocks = []
         in_ch = n_channels
-        for out_ch in filters:
-            blocks.append(ConvBlock(in_ch, out_ch, kernel_size, pool_size))
+        for out_ch, p in zip(filters, safe_pool):
+            blocks.append(ConvBlock(in_ch, out_ch, kernel_size, p))
             in_ch = out_ch
         self.conv = nn.Sequential(*blocks)
 
-        # 计算展平维度
-        out_len = window_size
-        for _ in filters:
-            out_len = out_len // pool_size
         flat_dim = in_ch * max(out_len, 1)
 
         # 全连接分类头
