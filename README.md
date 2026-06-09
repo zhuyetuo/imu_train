@@ -113,8 +113,9 @@ bash setup.sh --dataset cat_smit2024
 ```bash
 # 先将 .RDATA 转为 CSV（需安装 R 或 rpy2）
 python src/data/convert_cat_rdata.py --dataset smit2023 \
-  --input data/raw_cat_smit2023/smit2023.RDATA \
-  --output data/raw_cat_smit2023/cat_smit2023.csv
+  --rdata data/raw_cat_smit2023/accel_data.RDATA \
+  --annot data/raw_cat_smit2023/anno_data.RDATA \
+  --out   data/raw_cat_smit2023/cat_smit2023.csv
 
 bash setup.sh --dataset cat_smit2023
 ```
