@@ -34,6 +34,7 @@ import json
 import numpy as np
 import pandas as pd
 import yaml
+from gravity_align import gravity_align_batch
 
 SOURCE_HZ = 50   # TXT 文件采样率
 SENSOR_COLS = ["AX", "AY", "AZ", "GX", "GY", "GZ"]
@@ -189,6 +190,8 @@ def main(args):
         if len(windows) == 0:
             print(f"  [跳过] {fname}: 数据太短，无法生成窗口（需至少 {window_size} 帧）")
             continue
+
+        windows = gravity_align_batch(windows)
 
         preds, confidences = predict_fn(windows)
         thresh = args.confidence_threshold

@@ -13,6 +13,7 @@ import numpy as np
 import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
+from gravity_align import gravity_align_batch
 
 
 def downsample(data, labels, source_hz, target_hz):
@@ -71,6 +72,7 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
         if len(X) == 0:
             continue
+        X = gravity_align_batch(X)
         X_all.append(X)
         y_all.append(y)
         y_seq_all.append(y_seq)
