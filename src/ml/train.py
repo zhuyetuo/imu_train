@@ -149,7 +149,17 @@ def main(args):
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz")
     os.makedirs(out_dir, exist_ok=True)
-    result = {"hz": args.hz, "model": args.model, "accuracy": acc, "macro_f1": f1}
+    per_class = classification_report(y_te, y_pred, labels=present_labels,
+                                      target_names=present_names,
+                                      zero_division=0, output_dict=True)
+    result = {
+        "hz": args.hz, "model": args.model,
+        "accuracy": acc, "macro_f1": f1,
+        "classes": present_names,
+        "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
+                          if m in ("precision", "recall", "f1-score")}
+                      for k in present_names},
+    }
     with open(os.path.join(out_dir, f"ml_{args.model}.json"), "w") as f:
         json.dump(result, f, indent=2)
 

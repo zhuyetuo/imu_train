@@ -195,7 +195,17 @@ def main(args):
     print(classification_report(all_true, all_preds, labels=present_labels,
                                 target_names=present_names, zero_division=0))
 
-    result = {"hz": args.hz, "model": args.model, "accuracy": acc, "macro_f1": f1}
+    per_class = classification_report(all_true, all_preds, labels=present_labels,
+                                      target_names=present_names,
+                                      zero_division=0, output_dict=True)
+    result = {
+        "hz": args.hz, "model": args.model,
+        "accuracy": acc, "macro_f1": f1,
+        "classes": present_names,
+        "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
+                          if m in ("precision", "recall", "f1-score")}
+                      for k in present_names},
+    }
     with open(os.path.join(out_dir, f"dl_{args.model}.json"), "w") as f:
         json.dump(result, f, indent=2)
     print(f"[dl/train] 结果保存至 {out_dir}/")
