@@ -196,10 +196,33 @@ python src/ml/train.py --hz 10 --model xgb --processed_dir data/processed_cat_du
 
 ---
 
-## 批量实验
+## 批量实验（并行）
+
+推荐使用并行启动器，比逐个运行快 5-10 倍：
 
 ```bash
-for ds in processed_a processed_b processed_custom; do
+# ML 8进程并行，DL 4进程并行（5090 显存充足）
+python run_experiments.py --ml_workers 8 --dl_workers 4
+
+# 只跑指定数据集和采样率
+python run_experiments.py --datasets processed_a processed_b --hz 25 50
+
+# 只跑 ML 或只跑 DL
+python run_experiments.py --skip_dl --ml_workers 8
+python run_experiments.py --skip_ml --dl_workers 4
+```
+
+启动器会自动：
+- 按 `cpu_count / ml_workers` 分配每个 ML 任务的核数，避免多进程竞争
+- 跳过 `data/` 目录不存在的数据集（如尚未准备自采数据）
+- 每 15 秒打印一次进行中的任务及耗时
+
+每次运行约 20 分钟（2 个数据集 × 4 采样率 × 10 模型，RTX 5090）。
+
+### 手动逐个运行
+
+```bash
+for ds in processed_a processed_b; do
   for hz in 5 10 25 50; do
     for model in rf xgb lgbm catboost; do
       python src/ml/train.py --hz $hz --model $model --processed_dir data/$ds
@@ -210,6 +233,42 @@ for ds in processed_a processed_b processed_custom; do
   done
 done
 ```
+
+---
+
+## 实验结果参考
+
+以下为在数据集 A（45条狗）和数据集 B（42条狗）上的实测结果：
+
+### 数据集 A — Accuracy
+
+| 模型 | 5Hz | 10Hz | 25Hz | 50Hz |
+|------|-----|------|------|------|
+| ML/rf | 0.779 | 0.805 | **0.812** | 0.800 |
+| ML/xgb | 0.772 | 0.802 | 0.806 | 0.806 |
+| ML/lgbm | 0.768 | 0.797 | 0.802 | 0.805 |
+| ML/catboost | 0.768 | 0.796 | 0.799 | 0.797 |
+| DL/cnn | 0.768 | 0.788 | 0.775 | 0.795 |
+| DL/collar_cnn | 0.725 | 0.762 | 0.779 | 0.799 |
+| DL/cnn_lstm | 0.762 | 0.774 | 0.782 | 0.775 |
+| DL/transformer | 0.723 | 0.761 | 0.748 | 0.735 |
+| DL/filternet | 0.740 | 0.778 | 0.803 | 0.784 |
+| DL/filternet_m2m | 0.730 | 0.781 | 0.776 | 0.803 |
+
+**结论**：ML 模型整体略优；最佳为 `RF 25Hz`（Acc 0.812）。DL 中 `filternet 25Hz` F1 最高（0.754），`filternet_m2m 50Hz` 与 ML 持平。
+
+### 数据集 B — Accuracy
+
+| 模型 | 5Hz | 10Hz | 25Hz | 50Hz |
+|------|-----|------|------|------|
+| ML/rf | 0.653 | 0.680 | 0.691 | **0.692** |
+| ML/lgbm | 0.661 | 0.674 | 0.691 | 0.685 |
+| DL/cnn_lstm | 0.631 | 0.646 | 0.643 | 0.644 |
+| DL/transformer | 0.619 | 0.609 | 0.637 | 0.624 |
+
+**结论**：数据集 B 整体比 A 低约 12%；ML 明显优于 DL，说明 DL 需要更多数据才能发挥优势。
+
+> 猫咪数据集（Dunford 2024，9只猫）样本量过小，测试集仅 1 只猫，结果不具统计意义，需更多数据。
 
 ---
 
