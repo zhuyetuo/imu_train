@@ -87,31 +87,40 @@ def sliding_window_infer(data: np.ndarray, window_size: int, stride: int):
 
 # ── 模型推理 ──────────────────────────────────────────────────────────────────
 
-def predict_ml(model, X_windows: np.ndarray, hz: int) -> np.ndarray:
+def predict_ml(model, X_windows: np.ndarray, hz: int) -> tuple[np.ndarray, np.ndarray]:
     from features import extract_features
     X_feat = extract_features(X_windows, hz)
     preds = np.array(model.predict(X_feat)).flatten().astype(int)
-    return preds
+    proba = model.predict_proba(X_feat)          # (N, n_classes)
+    confidence = proba.max(axis=1)
+    return preds, confidence
 
 
-def predict_dl(model, X_windows: np.ndarray, device, m2m: bool, cfg_dl) -> np.ndarray:
+def predict_dl(model, X_windows: np.ndarray, device, m2m: bool, cfg_dl) -> tuple[np.ndarray, np.ndarray]:
     import torch
+    import torch.nn.functional as F
     from dl.train import m2m_predict
 
     model.eval()
     batch_size = cfg_dl.get("batch_size", 64)
-    all_preds = []
+    all_preds, all_conf = [], []
     X_t = torch.from_numpy(X_windows).float().permute(0, 2, 1)  # (N, C, T)
     with torch.no_grad():
         for i in range(0, len(X_t), batch_size):
             xb = X_t[i:i + batch_size].to(device)
             logits = model(xb)
             if m2m:
+                # logits: (B, C, T) → pool over T → softmax
+                pooled = logits.mean(dim=2)          # (B, C)
+                probs = F.softmax(pooled, dim=1)
                 preds = m2m_predict(logits).cpu().numpy()
             else:
+                probs = F.softmax(logits, dim=1)
                 preds = logits.argmax(dim=1).cpu().numpy()
+            conf = probs.max(dim=1).values.cpu().numpy()
             all_preds.extend(preds)
-    return np.array(all_preds)
+            all_conf.extend(conf)
+    return np.array(all_preds), np.array(all_conf)
 
 
 # ── 加载元数据（类别名、窗口参数）────────────────────────────────────────────
@@ -143,6 +152,7 @@ def main(args):
         model = joblib.load(args.model_path)
         print(f"[infer] 已加载 ML 模型: {args.model_path}")
         predict_fn = lambda X: predict_ml(model, X, args.hz)
+        print(f"[infer] 置信度阈值: {args.confidence_threshold}  (低于此值标记为 Unknown)")
 
     else:  # dl
         import torch
@@ -156,6 +166,7 @@ def main(args):
         model = load_model(args.model_name, n_channels, window_size, n_classes, cfg_dl).to(device)
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         print(f"[infer] 已加载 DL 模型: {args.model_path}  device={device}")
+        print(f"[infer] 置信度阈值: {args.confidence_threshold}  (低于此值标记为 Unknown)")
         predict_fn = lambda X: predict_dl(model, X, device, m2m, cfg_dl)
 
     # 收集文件
@@ -179,27 +190,34 @@ def main(args):
             print(f"  [跳过] {fname}: 数据太短，无法生成窗口（需至少 {window_size} 帧）")
             continue
 
-        preds = predict_fn(windows)
-        pred_labels = [classes[p] for p in preds]
+        preds, confidences = predict_fn(windows)
+        thresh = args.confidence_threshold
+        pred_labels = [
+            classes[p] if conf >= thresh else "Unknown"
+            for p, conf in zip(preds, confidences)
+        ]
 
         # 每个窗口的时间起点（秒）
         time_starts = [s / args.hz for s in starts]
 
-        for i, (t, label) in enumerate(zip(time_starts, pred_labels)):
+        for i, (t, label, conf) in enumerate(zip(time_starts, pred_labels, confidences)):
             all_results.append({
                 "file": fname,
                 "window_idx": i,
                 "time_start_s": round(t, 3),
                 "time_end_s": round(t + window_size / args.hz, 3),
                 "prediction": label,
+                "confidence": round(float(conf), 4),
             })
 
-        # 统计
+        # 统计（Unknown 单独计）
         from collections import Counter
         counts = Counter(pred_labels)
         total = len(pred_labels)
+        n_unknown = counts.pop("Unknown", 0)
         summary = "  ".join(f"{k}:{v/total:.0%}" for k, v in counts.most_common())
-        print(f"  {fname}: {total} 窗口  [{summary}]")
+        unknown_str = f"  Unknown:{n_unknown/total:.0%}" if n_unknown else ""
+        print(f"  {fname}: {total} 窗口  [{summary}{unknown_str}]")
 
     if not all_results:
         print("[infer] 无有效结果")
@@ -231,6 +249,8 @@ if __name__ == "__main__":
                         help="单个文件路径（与 --input_dir 二选一）")
     parser.add_argument("--output_dir", default="results/infer")
     parser.add_argument("--dl_config", default="configs/dl.yaml")
+    parser.add_argument("--confidence_threshold", type=float, default=0.6,
+                        help="置信度阈值，低于此值标记为 Unknown（默认 0.6）")
     args = parser.parse_args()
     if args.input_file:
         args.input_dir = None
