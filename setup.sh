@@ -6,10 +6,12 @@
 set -e
 
 DATASET=""
+NO_GRAVITY_ALIGN=""
 for arg in "$@"; do
     case "$arg" in
         --dataset) shift; DATASET="$1" ;;
         a|b) DATASET="$arg" ;;
+        --no_gravity_align) NO_GRAVITY_ALIGN="--no_gravity_align" ;;
     esac
 done
 
@@ -76,7 +78,7 @@ if [ "$DATASET" = "a" ]; then
         --raw_csv_dir "$CSV_DIR" \
         --dog_info "$RAW_DIR/DogInfo.csv" \
         --output_dir "$OUT_DIR" \
-        --config configs/data.yaml
+        --config configs/data.yaml $NO_GRAVITY_ALIGN
 
 elif [ "$DATASET" = "b" ]; then
     RAW_B="data/raw_b/df_raw.csv"
@@ -100,7 +102,7 @@ elif [ "$DATASET" = "b" ]; then
         --dataset b \
         --raw_csv_b "$RAW_B" \
         --output_dir "$OUT_DIR" \
-        --config configs/data.yaml
+        --config configs/data.yaml $NO_GRAVITY_ALIGN
 
 elif [ "$DATASET" = "custom" ]; then
     # 从 configs/data.yaml 读取 csv_path（简单 grep）
@@ -126,7 +128,7 @@ elif [ "$DATASET" = "custom" ]; then
         --dataset custom \
         --raw_csv_custom "$CSV_CUSTOM" \
         --output_dir "$OUT_DIR" \
-        --config configs/data.yaml
+        --config configs/data.yaml $NO_GRAVITY_ALIGN
 
 elif [[ "$DATASET" == cat_* ]]; then
     # 根据 dataset 名确定 csv_path（从 configs/data.yaml 读取）
@@ -172,7 +174,7 @@ print(cfg.get('$DATASET', {}).get('csv_path', 'data/raw_$DATASET/data.csv'))
     python src/data/preprocess.py \
         --dataset "$DATASET" \
         --output_dir "$OUT_DIR" \
-        --config configs/data.yaml
+        --config configs/data.yaml $NO_GRAVITY_ALIGN
 
 else
     echo "未知数据集: $DATASET"
