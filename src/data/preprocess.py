@@ -59,7 +59,7 @@ def split_by_dog(records, train_r, val_r, seed):
             set(dog_ids[n_train + n_val:]))
 
 
-def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None):
+def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
     X_all, y_all, y_seq_all = [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     for r in records:
@@ -72,7 +72,8 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
         if len(X) == 0:
             continue
-        X = gravity_align_batch(X)
+        if use_gravity_align:
+            X = gravity_align_batch(X)
         X_all.append(X)
         y_all.append(y)
         y_seq_all.append(y_seq)
@@ -174,9 +175,10 @@ def main(args):
             data_ds, labels_ds = downsample(r["data"], r["labels"], source_hz, target_hz)
             ds_records.append({**r, "data": data_ds, "labels": labels_ds})
 
-        X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set)
-        X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set)
-        X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set)
+        ga = not args.no_gravity_align
+        X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
+        X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
+        X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
@@ -191,7 +193,10 @@ def main(args):
             "val_dog_ids": str(list(val_ids)),
             "test_dog_ids": str(list(test_ids)),
             "dataset": args.dataset,
+            "gravity_aligned": str(not args.no_gravity_align),
         }
+        if not args.no_gravity_align:
+            print(f"  [重力对齐] 已启用")
 
         np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, y_seq=y_seq_train, **meta)
         np.savez_compressed(os.path.join(out_dir, "val.npz"),   X=X_val,   y=y_val,   y_seq=y_seq_val,   **meta)
@@ -218,4 +223,6 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", required=True,
                         help="输出目录，如 data/processed_a")
     parser.add_argument("--config", default="configs/data.yaml")
+    parser.add_argument("--no_gravity_align", action="store_true",
+                        help="不做重力轴对齐（默认启用）")
     main(parser.parse_args())

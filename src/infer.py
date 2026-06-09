@@ -144,8 +144,20 @@ def main(args):
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
     window_size = int(meta["window_size"])
     stride = int(meta["stride"])
+
+    # 重力对齐：优先用命令行参数，否则跟随训练时的设置
+    trained_with_ga = str(meta.get("gravity_aligned", "True")).lower() == "true"
+    if args.gravity_align is None:
+        use_gravity_align = trained_with_ga
+    else:
+        use_gravity_align = args.gravity_align
+        if use_gravity_align != trained_with_ga:
+            print(f"[infer] ⚠️  警告：训练时重力对齐={'是' if trained_with_ga else '否'}，"
+                  f"当前设置={'是' if use_gravity_align else '否'}，可能影响精度")
+
     print(f"[infer] hz={args.hz}, window={window_size}帧, stride={stride}帧")
     print(f"[infer] 类别: {classes}")
+    print(f"[infer] 重力对齐: {'启用' if use_gravity_align else '禁用'}")
 
     # 加载模型
     if args.model_type == "ml":
@@ -191,7 +203,8 @@ def main(args):
             print(f"  [跳过] {fname}: 数据太短，无法生成窗口（需至少 {window_size} 帧）")
             continue
 
-        windows = gravity_align_batch(windows)
+        if use_gravity_align:
+            windows = gravity_align_batch(windows)
 
         preds, confidences = predict_fn(windows)
         thresh = args.confidence_threshold
@@ -253,7 +266,12 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="results/infer")
     parser.add_argument("--dl_config", default="configs/dl.yaml")
     parser.add_argument("--confidence_threshold", type=float, default=0.6,
-                        help="置信度阈值，低于此值标记为 Unknown（默认 0.6）")
+                        help="置信度阈值，低于此值标记为 Unknown（默认 0.6，设为 0 禁用）")
+    ga_group = parser.add_mutually_exclusive_group()
+    ga_group.add_argument("--gravity_align", dest="gravity_align", action="store_true", default=None,
+                          help="强制启用重力轴对齐（默认跟随训练时设置）")
+    ga_group.add_argument("--no_gravity_align", dest="gravity_align", action="store_false",
+                          help="强制禁用重力轴对齐")
     args = parser.parse_args()
     if args.input_file:
         args.input_dir = None

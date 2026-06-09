@@ -138,6 +138,14 @@ bash setup.sh --dataset custom
 
 每个数据集独立预处理，互不影响，分别保存到 `data/processed_<tag>/`，每个采样率一个子目录。
 
+预处理默认启用**重力轴对齐**（每个窗口将加速度均值对齐到 +Z 轴，使模型对项圈安装方向鲁棒）。如需禁用：
+
+```bash
+python src/data/preprocess.py --dataset a --output_dir data/processed_a --no_gravity_align
+```
+
+> 训练和推理必须使用相同的对齐设置，`setup.sh` 使用默认设置（启用对齐）。
+
 ---
 
 ## 训练
@@ -280,25 +288,26 @@ python src/eval/compare.py
 
 # 只看某个数据集
 python src/eval/compare.py --dataset processed_a
+
+# 同时展示每类 Precision / Recall / F1
+python src/eval/compare.py --per_class
+
+# 只看 XGB 50Hz 的每类指标
+python src/eval/compare.py --per_class --hz 50 --model xgb
 ```
 
-输出示例：
+`--per_class` 输出格式：
 
 ```
-======================================================================
-  数据集: processed_a
-======================================================================
-
-  (Accuracy)
-模型                    5Hz      10Hz      25Hz      50Hz
-----------------------------------------------------------
-ML/rf                   —         —         —    0.8058
-ML/xgb                  —         —         —    0.7366
-ML/lgbm                 —         —         —    0.8031
-ML/catboost             —         —         —    0.8012
-DL/cnn                  —         —         —    0.8123
-DL/filternet_m2m        —         —         —    0.7921
-...
+  [ML/xgb  50Hz]
+  类别              Precision    Recall        F1
+  ─────────────────────────────────────────────────
+  Lying chest          0.6700    0.8100    0.7300
+  Sitting              0.6300    0.4600    0.5300
+  Sniffing             0.9700    0.9900    0.9800
+  Standing             0.4200    0.2400    0.3000
+  Trotting             0.9900    0.9400    0.9600
+  Walking              0.8700    0.9500    0.9100
 ```
 
 ---
@@ -367,33 +376,58 @@ python src/infer.py \
 
 ### 参数说明
 
-| 参数 | 说明 |
-|------|------|
-| `--model_type` | `ml` 或 `dl` |
-| `--model_path` | 训练好的模型文件（ML: `.pkl`，DL: `.pt`） |
-| `--model_name` | DL 模型名称（`cnn` / `collar_cnn` / `cnn_lstm` / `transformer` / `filternet` / `filternet_m2m`） |
-| `--processed_dir` | 对应数据集的预处理目录（用于读取类别名和窗口参数） |
-| `--hz` | 目标采样率（5 / 10 / 25 / 50） |
-| `--input_dir` | 待推理文件目录（默认 `data/infer`） |
-| `--input_file` | 单个文件路径（与 `--input_dir` 二选一） |
-| `--output_dir` | 结果输出目录（默认 `results/infer`） |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model_type` | 必填 | `ml` 或 `dl` |
+| `--model_path` | 必填 | 训练好的模型文件（ML: `.pkl`，DL: `.pt`） |
+| `--model_name` | `cnn_lstm` | DL 模型名称（`cnn` / `collar_cnn` / `cnn_lstm` / `transformer` / `filternet` / `filternet_m2m`） |
+| `--processed_dir` | 必填 | 对应数据集的预处理目录（用于读取类别名和窗口参数） |
+| `--hz` | 必填 | 目标采样率（5 / 10 / 25 / 50） |
+| `--input_dir` | `data/infer` | 待推理文件目录 |
+| `--input_file` | — | 单个文件路径（与 `--input_dir` 二选一） |
+| `--output_dir` | `results/infer` | 结果输出目录 |
+| `--confidence_threshold` | `0.6` | 置信度阈值，低于此值标记为 `Unknown`（设为 `0` 禁用） |
+| `--gravity_align` | 自动 | 强制启用重力轴对齐 |
+| `--no_gravity_align` | — | 强制禁用重力轴对齐 |
+
+#### 重力轴对齐
+
+推理默认跟随训练时的设置（从预处理元数据自动读取），无需手动指定。如果训练时启用了对齐但推理时强制关闭（或反之），会打印警告：
+
+```
+[infer] ⚠️  警告：训练时重力对齐=是，当前设置=否，可能影响精度
+```
+
+若项圈在不同设备上方向不同（如传感器朝向各异），建议训练和推理都启用重力对齐（默认行为）。
+
+#### 置信度与 Unknown 标签
+
+模型对每个窗口输出各类别的概率，最高概率低于 `--confidence_threshold` 时标记为 `Unknown`，用于检测训练类别外的行为（如抓挠、打滚等）。
+
+```bash
+# 提高阈值，更严格地过滤低置信度预测
+python src/infer.py ... --confidence_threshold 0.8
+
+# 禁用过滤，所有窗口都给出预测
+python src/infer.py ... --confidence_threshold 0
+```
 
 ### 输出
 
 结果保存为 CSV，每行一个预测窗口：
 
 ```
-file,window_idx,time_start_s,time_end_s,prediction
-26060316.TXT,0,0.0,2.0,Walking
-26060316.TXT,1,1.0,3.0,Walking
-26060316.TXT,2,2.0,4.0,Standing
+file,window_idx,time_start_s,time_end_s,prediction,confidence
+26060316.TXT,0,0.0,2.0,Walking,0.9312
+26060316.TXT,1,1.0,3.0,Walking,0.8754
+26060316.TXT,2,2.0,4.0,Unknown,0.4821
 ...
 ```
 
 同时打印每个文件的行为分布摘要：
 
 ```
-26060316.TXT: 312 窗口  [Walking:45%  Standing:23%  Trotting:18% ...]
+26060316.TXT: 312 窗口  [Walking:45%  Standing:23%  Trotting:18%  Unknown:14%]
 ```
 
 ---
