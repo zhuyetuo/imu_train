@@ -37,6 +37,7 @@ imu_train/
 │   ├── raw_cat_dunford2024/     ← 猫咪数据集（不入 git）
 │   ├── raw_cat_smit2024/
 │   ├── raw_cat_smit2023/
+│   ├── infer/                   ← 待推理的无标签 TXT/CSV 文件放这里
 │   ├── processed_a/             ← 预处理结果（自动生成）
 │   ├── processed_b/
 │   ├── processed_custom/
@@ -266,6 +267,73 @@ python src/eval/explain.py \
   --model xgb \
   --processed_dir data/processed_a \
   --max_samples 1000    # 用于分析的样本上限，越多越慢
+```
+
+---
+
+## 推理（无标签数据）
+
+将待测试的 TXT/CSV 文件放到 `data/infer/` 目录，文件格式与数据集A项圈传感器一致：
+
+```
+HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ
+16:00:00.000,0.137362,1.149347,8.603002,0.032180,0.012545,0.003272
+16:00:00.020,0.140873,1.149698,8.603353,0.032180,0.012545,0.003272
+...
+```
+
+> 采样率固定为 **50Hz**（每行间隔 20ms）。
+
+### 用 ML 模型推理
+
+```bash
+python src/infer.py \
+  --model_type ml \
+  --model_path results/processed_a/50hz/ml_xgb.pkl \
+  --processed_dir data/processed_a \
+  --hz 50
+```
+
+### 用 DL 模型推理
+
+```bash
+python src/infer.py \
+  --model_type dl \
+  --model_name cnn_lstm \
+  --model_path results/processed_a/50hz/dl_cnn_lstm_best.pt \
+  --processed_dir data/processed_a \
+  --hz 50
+```
+
+### 参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `--model_type` | `ml` 或 `dl` |
+| `--model_path` | 训练好的模型文件（ML: `.pkl`，DL: `.pt`） |
+| `--model_name` | DL 模型名称（`cnn` / `collar_cnn` / `cnn_lstm` / `transformer` / `filternet` / `filternet_m2m`） |
+| `--processed_dir` | 对应数据集的预处理目录（用于读取类别名和窗口参数） |
+| `--hz` | 目标采样率（5 / 10 / 25 / 50） |
+| `--input_dir` | 待推理文件目录（默认 `data/infer`） |
+| `--input_file` | 单个文件路径（与 `--input_dir` 二选一） |
+| `--output_dir` | 结果输出目录（默认 `results/infer`） |
+
+### 输出
+
+结果保存为 CSV，每行一个预测窗口：
+
+```
+file,window_idx,time_start_s,time_end_s,prediction
+26060316.TXT,0,0.0,2.0,Walking
+26060316.TXT,1,1.0,3.0,Walking
+26060316.TXT,2,2.0,4.0,Standing
+...
+```
+
+同时打印每个文件的行为分布摘要：
+
+```
+26060316.TXT: 312 窗口  [Walking:45%  Standing:23%  Trotting:18% ...]
 ```
 
 ---
