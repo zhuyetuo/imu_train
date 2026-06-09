@@ -11,3 +11,5 @@ catboost>=1.2
 tqdm>=4.65
 shap>=0.44
 matplotlib>=3.7
+ultralytics>=8.0.0
+opencv-python>=4.8.0
