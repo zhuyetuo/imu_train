@@ -1,0 +1,20 @@
+video_fps: 25           # 视频提帧采样率
+window_seconds: 1.0     # 滑窗大小（秒，LSTM 用）
+stride_seconds: 0.2     # 滑窗步长（秒）
+
+pose:
+  model: yolov8n-pose.pt
+  conf_threshold: 0.5
+  n_keypoints: 17       # YOLOv8 标准 COCO pose
+
+labels:
+  - Lying chest
+  - Sitting
+  - Sniffing
+  - Standing
+  - Trotting
+  - Walking
+
+seed: 42
+train_ratio: 0.7
+val_ratio: 0.15
