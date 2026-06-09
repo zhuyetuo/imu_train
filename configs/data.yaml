@@ -61,16 +61,16 @@ custom:
 # 原始为 R dataframe，需先运行 convert_cat_rdata.py
 cat_smit2023:
   csv_path: data/raw_cat_smit2023/cat_smit2023.csv
-  # 原始 30Hz，但数据已聚合为 1 秒 epoch 特征，非原始时间序列
-  # 需先运行 convert_cat_rdata.py 转换格式
-  source_hz: 30
-  cat_id_col: cat_id       # 下载后确认实际列名并更新
+  # 数据已聚合为 1 秒 epoch（X/Y/Z 均值），source_hz=1
+  # 需先运行: Rscript src/data/convert_smit2023.R
+  source_hz: 1
+  cat_id_col: cat_id
   label_col: behavior
   sensor_cols:
     - acc_x
     - acc_y
     - acc_z
-  keep_labels: []          # 留空保留全部 24 类行为
+  keep_labels: []
 
 # Dunford et al. 2024 (Ecology and Evolution) — 9只猫，40Hz 原始时间序列
 # Dryad: https://datadryad.org/dataset/doi:10.5061/dryad.q2bvq83sx
