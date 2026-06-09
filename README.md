@@ -353,6 +353,30 @@ HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ
 
 > 采样率固定为 **50Hz**（每行间隔 20ms）。
 
+### 推荐配置（家养犬，项圈方向固定）
+
+经测试，**RF 25Hz 不对齐**在实际推理中表现最符合预期（Lying chest 识别更准确）：
+
+```bash
+# 步骤 1：预处理（不对齐）
+bash setup.sh --dataset a --no_gravity_align
+
+# 步骤 2：训练
+python run_experiments.py --datasets processed_a --skip_dl
+
+# 步骤 3：推理
+python src/infer.py \
+  --model_type ml \
+  --model_path results/processed_a/25hz/ml_rf.pkl \
+  --processed_dir data/processed_a \
+  --hz 25 \
+  --confidence_threshold 0
+```
+
+> 重力对齐适合项圈安装方向差异较大的场景（如多设备、多狗）；方向固定时关闭反而更好。
+
+---
+
 ### 常用示例
 
 ```bash
