@@ -35,15 +35,28 @@ LABEL_SHORT = {
 }
 
 
-def load_model(model_name: str):
+def load_model(model_name: str, model_dir: str = "models/clip"):
     try:
         from transformers import CLIPModel, CLIPProcessor
     except ImportError:
         print("[clip] 请先安装: pip install transformers pillow")
         sys.exit(1)
-    print(f"[clip] 加载模型 {model_name} ...")
-    model = CLIPModel.from_pretrained(model_name)
-    processor = CLIPProcessor.from_pretrained(model_name)
+
+    # 优先从本地加载
+    local_path = os.path.join(model_dir, model_name.replace("/", "_"))
+    if os.path.isdir(local_path):
+        print(f"[clip] 从本地加载模型: {local_path}")
+        model = CLIPModel.from_pretrained(local_path)
+        processor = CLIPProcessor.from_pretrained(local_path)
+    else:
+        print(f"[clip] 下载模型 {model_name} → {local_path} ...")
+        model = CLIPModel.from_pretrained(model_name)
+        processor = CLIPProcessor.from_pretrained(model_name)
+        os.makedirs(local_path, exist_ok=True)
+        model.save_pretrained(local_path)
+        processor.save_pretrained(local_path)
+        print(f"[clip] 模型已保存至 {local_path}")
+
     model.eval()
     return model, processor
 
@@ -216,6 +229,8 @@ def main():
     parser.add_argument("--output_dir", default="results/vision/clip")
     parser.add_argument("--model", default="openai/clip-vit-base-patch32",
                         help="CLIP 模型（默认 clip-vit-base-patch32，更准: clip-vit-large-patch14）")
+    parser.add_argument("--model_dir", default="models/clip",
+                        help="本地模型缓存目录（默认 models/clip）")
     parser.add_argument("--fps", type=int, default=5,
                         help="采样帧率（默认 5，越高越慢）")
     parser.add_argument("--no_video", action="store_true",
@@ -237,7 +252,7 @@ def main():
         LABEL_SHORT = {l: l for l in labels}
     print(f"[clip] 识别类别: {[LABEL_SHORT.get(l, l) for l in labels]}")
 
-    model, processor = load_model(args.model)
+    model, processor = load_model(args.model, args.model_dir)
     model = model.to(device)
 
     import glob
