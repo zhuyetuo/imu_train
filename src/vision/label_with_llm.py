@@ -80,6 +80,8 @@ def label_image(client, model: str, image_path: str, retries: int = 3) -> dict:
                         "confidence": round(float(result.get("confidence", 0.0)), 4),
                     }
         except Exception as e:
+            if attempt == 0:
+                print(f"\n[API错误] {type(e).__name__}: {e}")
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
             else:
