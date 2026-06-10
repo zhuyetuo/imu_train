@@ -98,7 +98,12 @@ def train(args):
         model = PoseLSTM(input_dim, len(classes)).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
+
+    # 类别权重：解决不平衡问题（少数类权重更高）
+    counts = np.bincount(y_tr.astype(int), minlength=len(classes))
+    weights = torch.tensor(1.0 / (counts + 1e-6), dtype=torch.float32)
+    weights = weights / weights.sum() * len(classes)
+    criterion = nn.CrossEntropyLoss(weight=weights.to(device))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     best_val_f1 = 0.0
