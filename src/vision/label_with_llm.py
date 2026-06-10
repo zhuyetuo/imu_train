@@ -105,7 +105,7 @@ def main():
         print("请设置 ARK_API_KEY 环境变量或传入 --api_key")
         sys.exit(1)
 
-    images_dir = Path(args.dataset_dir) / args.split / "images"
+    images_dir = Path(args.dataset_dir) / "images" / args.split
     if not images_dir.exists():
         print(f"找不到图片目录: {images_dir}")
         sys.exit(1)

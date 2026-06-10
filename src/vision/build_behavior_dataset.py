@@ -55,7 +55,7 @@ def load_labels_csv(csv_path: str) -> dict:
 
 
 def load_split(dataset_dir: Path, split: str, labels_map: dict, n_kp: int):
-    labels_dir = dataset_dir / split / "labels"
+    labels_dir = dataset_dir / "labels" / split
     if not labels_dir.exists():
         print(f"  [跳过] {labels_dir} 不存在")
         return np.empty((0, n_kp * 2), dtype=np.float32), np.empty((0,), dtype=np.int64)
