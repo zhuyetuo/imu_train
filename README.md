@@ -641,6 +641,33 @@ python src/vision/quick_validate.py \
 
 输出标注骨骼点的视频 + 检测率统计。
 
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--fps` | 10 | 输出帧率（同时控制推理密度，降低可加快速度） |
+| `--conf` | 0.5 | 检测置信度阈值，降低可提高检测率 |
+| `--imgsz` | 1280 | 推理分辨率，4K 视频建议 1280 或 1920 |
+| `--max_dogs` | 1 | 每帧最多保留几只狗（默认 1，防止误检多框；0=不限制） |
+| `--no_skeleton` | — | 只画关键点，不绘制骨骼连线 |
+
+推理使用多线程加速（帧读取线程 + GPU 推理 + 视频写入线程并行），并启用 FP16 和 BN 融合。
+
+#### 进一步提速：TensorRT 导出
+
+使用 TensorRT 可比 PyTorch FP16 再提速 2-3 倍：
+
+```bash
+# 导出（只需一次，耗时约 2-5 分钟）
+yolo export model=runs/pose/train/weights/best.pt format=engine half=True imgsz=1280
+
+# 使用 TensorRT 引擎推理（与 PyTorch 用法相同，自动识别 .engine 后缀）
+python src/vision/quick_validate.py \
+    --video 你的视频.mp4 \
+    --model runs/pose/train/weights/best.engine \
+    --conf 0.3 --fps 30
+```
+
+> 注意：`.engine` 文件绑定当前机器的 GPU 型号和 TensorRT 版本，换机器需重新导出。导出时的 `imgsz` 要与推理时一致。
+
 ---
 
 ## 参考论文
