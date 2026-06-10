@@ -56,7 +56,8 @@ def label_image(client, model: str, image_path: str, retries: int = 3) -> dict:
                     {"type": "input_text",  "text": PROMPT},
                     {"type": "input_image", "image_url": b64},
                 ]}],
-                max_output_tokens=60,
+                max_output_tokens=200,
+                extra_body={"thinking": {"type": "disabled"}},
             )
             # 收集所有文本输出（兼容 reasoning/message 两种类型）
             raw = ""
