@@ -76,7 +76,7 @@ def train(args):
 
     try:
         results = model.train(
-            data="dog-pose.yaml",
+            data=args.data,
             epochs=args.epochs,
             imgsz=args.imgsz,
             batch=args.batch,
@@ -104,6 +104,8 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--data",    default="dog-pose.yaml",
+                        help="数据集 yaml（默认 dog-pose.yaml）")
     parser.add_argument("--model",   default="yolo26n-pose.pt",
                         help="模型权重（默认 yolo26n-pose.pt）")
     parser.add_argument("--epochs",  type=int,   default=100)
