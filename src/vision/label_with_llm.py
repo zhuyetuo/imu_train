@@ -56,14 +56,26 @@ def label_image(client, model: str, image_path: str, retries: int = 3) -> dict:
                     {"type": "input_text",  "text": PROMPT},
                     {"type": "input_image", "image_url": b64},
                 ]}],
-                max_output_tokens=60,
+                max_output_tokens=200,
+                extra_body={"thinking": {"type": "disabled"}},
             )
+            # 收集所有文本输出（兼容 reasoning/message 两种类型）
             raw = ""
             for item in response.output:
                 if item.type == "message":
                     for c in item.content:
                         if c.type == "output_text":
                             raw = c.text.strip()
+                            break
+                elif item.type == "reasoning":
+                    # reasoning 模型：从 summary 里找 JSON
+                    for s_item in getattr(item, "summary", []):
+                        text = getattr(s_item, "text", "")
+                        if "{" in text and "behavior" in text:
+                            raw = text.strip()
+                            break
+                if raw:
+                    break
 
             s, e = raw.find("{"), raw.rfind("}") + 1
             if s >= 0 and e > s:
@@ -82,6 +94,7 @@ def label_image(client, model: str, image_path: str, retries: int = 3) -> dict:
         except Exception as e:
             if attempt == 0:
                 print(f"\n[API错误] {type(e).__name__}: {e}")
+                import traceback; traceback.print_exc()
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
             else:
