@@ -14,10 +14,17 @@ cleanup() {
     echo ""
     echo "[cleanup] 开始释放内存..."
 
+    # 释放 /dev/shm 共享内存文件
     find /dev/shm -maxdepth 1 \( -name "torch_*" -o -name "*.shm" \) \
         -user "$(whoami)" -delete 2>/dev/null && \
         echo "[cleanup] /dev/shm 共享内存已清理" || true
 
+    # 释放 SysV 共享内存段（PyTorch dataloader 用这个）
+    ipcs -m 2>/dev/null | awk -v user="$(whoami)" '$3==user {print $2}' \
+        | xargs -r -I{} ipcrm -m {} 2>/dev/null && \
+        echo "[cleanup] SysV 共享内存已清理" || true
+
+    # 释放页面缓存
     if sudo -n sync 2>/dev/null; then
         sudo sync
         echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && \

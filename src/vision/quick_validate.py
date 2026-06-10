@@ -87,9 +87,11 @@ def run(video_path: str, output_dir: str, model_path: str,
                 kps_all = r.keypoints.data.cpu().numpy()   # (N, K, 3)
                 boxes_all = r.boxes.data.cpu().numpy()     # (N, 6)
                 for kps, box in zip(kps_all, boxes_all):
+                    cls_id = int(box[5]) if len(box) > 5 else 0
                     dogs.append({
                         "bbox": box[:4].tolist(),
                         "confidence": float(box[4]),
+                        "behavior": r.names.get(cls_id, str(cls_id)),
                         "keypoints": kps.tolist(),
                     })
                 dogs_detected += 1
@@ -97,11 +99,18 @@ def run(video_path: str, output_dir: str, model_path: str,
                 # 绘制关键点和骨骼
                 if show_skeleton:
                     for kps, box in zip(kps_all, boxes_all):
-                        # 画 bbox
+                        # 画 bbox + 类别名称
                         x1, y1, x2, y2 = map(int, box[:4])
+                        cls_id = int(box[5]) if len(box) > 5 else 0
+                        cls_name = r.names.get(cls_id, str(cls_id))
+                        conf = float(box[4])
+                        label = f"{cls_name} {conf:.0%}"
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 0), 2)
-                        cv2.putText(frame, f"{box[4]:.2f}", (x1, y1-5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
+                        # 标签背景
+                        (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                        cv2.rectangle(frame, (x1, y1 - lh - 8), (x1 + lw + 4, y1), (0, 200, 0), -1)
+                        cv2.putText(frame, label, (x1 + 2, y1 - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
                         # 画骨骼连线
                         for a, b in SKELETON:
@@ -122,7 +131,9 @@ def run(video_path: str, output_dir: str, model_path: str,
                 no_dog_frames += 1
 
             # 左上角信息
-            info = f"frame {frame_out_idx}  dogs={len(dogs)}"
+            behaviors = [d.get("behavior", "") for d in dogs if d.get("behavior")]
+            behavior_str = ", ".join(behaviors) if behaviors else ""
+            info = f"frame {frame_out_idx}  {behavior_str or f'dogs={len(dogs)}'}"
             cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                         0.7, (255, 255, 255), 2)
 
