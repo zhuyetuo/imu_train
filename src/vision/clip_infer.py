@@ -1,10 +1,11 @@
 """
-用 CLIP 零样本分类对视频做狗行为识别，无需训练。
+用 CLIP 零样本分类对视频/图片做狗行为识别，无需训练。
 
 用法:
   python src/vision/clip_infer.py --video 你的视频.mp4
-  python src/vision/clip_infer.py --video 你的视频.mp4 --fps 5 --output_dir results/vision/clip
   python src/vision/clip_infer.py --video videos/ --fps 5   # 批量处理目录
+  python src/vision/clip_infer.py --image 你的图片.jpg       # 单张图片
+  python src/vision/clip_infer.py --image images/           # 批量图片目录
 """
 
 import argparse
@@ -167,9 +168,51 @@ def infer_video(video_path: str, output_dir: str, model, processor,
         print(f"  视频 → {vid_path}")
 
 
+def infer_image(image_path: str, output_dir: str, model, processor,
+                labels: list[str], device):
+    try:
+        import torch
+        from PIL import Image
+    except ImportError:
+        print("[clip] 请先安装: pip install torch pillow")
+        sys.exit(1)
+
+    short = [LABEL_SHORT.get(l, l) for l in labels]
+
+    img = Image.open(image_path).convert("RGB")
+
+    with torch.no_grad():
+        text_inputs = processor(text=labels, return_tensors="pt", padding=True).to(device)
+        text_feats = model.get_text_features(**text_inputs)
+        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+
+        img_inputs = processor(images=img, return_tensors="pt").to(device)
+        img_feat = model.get_image_features(**img_inputs)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        sims = (img_feat @ text_feats.T)[0]
+        probs = sims.softmax(dim=0).cpu().tolist()
+
+    pred_idx = probs.index(max(probs))
+    print(f"\n[clip] {os.path.basename(image_path)}")
+    for lb, p in sorted(zip(short, probs), key=lambda x: -x[1]):
+        marker = " ◀" if lb == short[pred_idx] else ""
+        print(f"  {lb:<20} {p:.1%}{marker}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    csv_path = os.path.join(output_dir, f"{stem}_clip.csv")
+    with open(csv_path, "w", newline="") as f:
+        dw = csv.DictWriter(f, fieldnames=["label", "probability"])
+        dw.writeheader()
+        for lb, p in zip(short, probs):
+            dw.writerow({"label": lb, "probability": round(p, 4)})
+    print(f"  → {csv_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--video", required=True, help="视频文件或目录")
+    parser.add_argument("--video", default=None, help="视频文件或目录")
+    parser.add_argument("--image", default=None, help="图片文件或目录")
     parser.add_argument("--output_dir", default="results/vision/clip")
     parser.add_argument("--model", default="openai/clip-vit-base-patch32",
                         help="CLIP 模型（默认 clip-vit-base-patch32，更准: clip-vit-large-patch14）")
@@ -180,6 +223,9 @@ def main():
     parser.add_argument("--labels", nargs="+", default=None,
                         help="自定义标签（英文描述），如: 'a dog sleeping' 'a dog playing'")
     args = parser.parse_args()
+
+    if not args.video and not args.image:
+        parser.error("请指定 --video 或 --image")
 
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -195,20 +241,36 @@ def main():
     model = model.to(device)
 
     import glob
-    video_exts = ("*.mp4", "*.avi", "*.mov", "*.mkv")
-    if os.path.isdir(args.video):
-        files = []
-        for ext in video_exts:
-            files += glob.glob(os.path.join(args.video, ext))
-        if not files:
-            print(f"[clip] 目录下没有视频: {args.video}")
-            sys.exit(1)
-        for f in sorted(files):
-            infer_video(f, args.output_dir, model, processor,
+
+    if args.image:
+        img_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp")
+        if os.path.isdir(args.image):
+            files = []
+            for ext in img_exts:
+                files += glob.glob(os.path.join(args.image, ext))
+            if not files:
+                print(f"[clip] 目录下没有图片: {args.image}")
+                sys.exit(1)
+            for f in sorted(files):
+                infer_image(f, args.output_dir, model, processor, labels, device)
+        else:
+            infer_image(args.image, args.output_dir, model, processor, labels, device)
+
+    if args.video:
+        video_exts = ("*.mp4", "*.avi", "*.mov", "*.mkv")
+        if os.path.isdir(args.video):
+            files = []
+            for ext in video_exts:
+                files += glob.glob(os.path.join(args.video, ext))
+            if not files:
+                print(f"[clip] 目录下没有视频: {args.video}")
+                sys.exit(1)
+            for f in sorted(files):
+                infer_video(f, args.output_dir, model, processor,
+                            labels, args.fps, device, not args.no_video)
+        else:
+            infer_video(args.video, args.output_dir, model, processor,
                         labels, args.fps, device, not args.no_video)
-    else:
-        infer_video(args.video, args.output_dir, model, processor,
-                    labels, args.fps, device, not args.no_video)
 
 
 if __name__ == "__main__":
