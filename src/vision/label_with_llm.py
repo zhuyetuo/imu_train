@@ -79,7 +79,15 @@ def label_image(client, model: str, image_path: str, retries: int = 3) -> dict:
 
             s, e = raw.find("{"), raw.rfind("}") + 1
             if s >= 0 and e > s:
-                result = json.loads(raw[s:e])
+                # 尝试完整 JSON，失败则逐步缩短到第一个 }
+                for end in range(e, s, -1):
+                    try:
+                        result = json.loads(raw[s:end])
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    result = {}
                 behavior = result.get("behavior", "").strip()
                 # 修正大小写
                 for v in VALID_BEHAVIORS:
