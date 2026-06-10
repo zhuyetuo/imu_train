@@ -98,7 +98,11 @@ def build_windows(frames: list[dict], labels_df: pd.DataFrame,
 class DogBehaviorDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray, classes: list[str]):
         self.X = X
-        self.y = np.array([classes.index(c) for c in y], dtype=np.int64)
+        # y 可能已经是整数索引（来自 npz），也可能是字符串标签
+        if y.dtype.kind in ("i", "u"):
+            self.y = y.astype(np.int64)
+        else:
+            self.y = np.array([classes.index(c) for c in y], dtype=np.int64)
         self.classes = classes
 
     def __len__(self):
