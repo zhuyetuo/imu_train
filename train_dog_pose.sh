@@ -1,9 +1,10 @@
 #!/bin/bash
 # 狗姿态估计训练启动脚本
 # 用法:
-#   bash train_dog_pose.sh              # 默认配置
-#   bash train_dog_pose.sh --batch 32   # 降低 batch size
-#   bash train_dog_pose.sh --resume     # 从断点继续
+#   bash train_dog_pose.sh                                        # 默认配置
+#   bash train_dog_pose.sh --batch 256                           # 指定 batch size
+#   bash train_dog_pose.sh --data datasets/dog-pose-behavior/data.yaml  # 行为识别数据集
+#   bash train_dog_pose.sh --resume                              # 从断点继续
 
 set -e
 cd "$(dirname "$0")"
@@ -13,12 +14,10 @@ cleanup() {
     echo ""
     echo "[cleanup] 开始释放内存..."
 
-    # 释放 PyTorch 遗留的共享内存文件
     find /dev/shm -maxdepth 1 \( -name "torch_*" -o -name "*.shm" \) \
         -user "$(whoami)" -delete 2>/dev/null && \
         echo "[cleanup] /dev/shm 共享内存已清理" || true
 
-    # 释放页面缓存（需要 sudo；失败不影响流程）
     if sudo -n sync 2>/dev/null; then
         sudo sync
         echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && \
@@ -30,6 +29,15 @@ cleanup() {
     echo "[cleanup] 完成。"
 }
 trap cleanup EXIT
+
+# ── 解析 --batch 参数（用户明确指定则跳过自动选择）────────────────────────
+USER_BATCH=""
+for arg in "$@"; do
+    if [[ "$prev" == "--batch" ]]; then
+        USER_BATCH="$arg"
+    fi
+    prev="$arg"
+done
 
 # ── 训练前检查内存 ──────────────────────────────────────────────────────────
 AVAIL_GB=$(awk '/MemAvailable/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
@@ -43,15 +51,18 @@ if [ "$AVAIL_GB" -lt 8 ]; then
     echo "[train] 释放后可用内存: ${AVAIL_GB}GB"
 fi
 
-# ── 根据可用内存自动选 batch size ───────────────────────────────────────────
-if [ "$AVAIL_GB" -ge 20 ]; then
-    DEFAULT_BATCH=128
-elif [ "$AVAIL_GB" -ge 12 ]; then
-    DEFAULT_BATCH=64
+# ── 自动选 batch size（用户未指定时）────────────────────────────────────────
+if [ -n "$USER_BATCH" ]; then
+    echo "[train] 使用指定 batch=${USER_BATCH}"
+    python train_dog_pose.py "$@"
 else
-    DEFAULT_BATCH=32
+    if [ "$AVAIL_GB" -ge 20 ]; then
+        DEFAULT_BATCH=256
+    elif [ "$AVAIL_GB" -ge 12 ]; then
+        DEFAULT_BATCH=128
+    else
+        DEFAULT_BATCH=64
+    fi
+    echo "[train] 自动选择 batch=${DEFAULT_BATCH}（可用 ${AVAIL_GB}GB）"
+    python train_dog_pose.py --batch "$DEFAULT_BATCH" "$@"
 fi
-echo "[train] 自动选择 batch=${DEFAULT_BATCH}（可用 ${AVAIL_GB}GB）"
-
-# ── 启动训练 ────────────────────────────────────────────────────────────────
-python train_dog_pose.py --batch "$DEFAULT_BATCH" "$@"
