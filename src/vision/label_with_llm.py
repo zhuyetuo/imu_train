@@ -151,7 +151,14 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(process, f): f for f in todo}
-        for future in as_completed(futures):
+        try:
+            from tqdm import tqdm
+            bar = tqdm(as_completed(futures), total=len(todo), desc="标注进度",
+                       unit="张", dynamic_ncols=True)
+        except ImportError:
+            bar = as_completed(futures)
+
+        for future in bar:
             stem, result = future.result()
             behavior   = result.get("behavior", "Unknown")
             confidence = result.get("confidence", 0.0)
@@ -163,8 +170,8 @@ def main():
             completed += 1
             if behavior == "Unknown":
                 failed += 1
-            if completed % 50 == 0 or completed == len(img_files):
-                print(f"  [{completed}/{len(img_files)}]  失败: {failed}")
+            if hasattr(bar, "set_postfix"):
+                bar.set_postfix({"失败": failed, "最新": f"{behavior}"})
 
     f_out.close()
 
