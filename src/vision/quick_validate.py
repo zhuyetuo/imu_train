@@ -27,7 +27,7 @@ import sys
 
 def run(video_path: str, output_dir: str, model_path: str,
         fps_out: int, conf: float, show_skeleton: bool, imgsz: int = 1280,
-        max_dogs: int = 1):
+        max_dogs: int = 1, batch_size: int = 1):
     try:
         import cv2
         from ultralytics import YOLO
@@ -107,20 +107,12 @@ def run(video_path: str, output_dir: str, model_path: str,
     dogs_detected = 0
     no_dog_frames = 0
 
-    while True:
-        item = frame_queue.get()
-        if item is None:
-            break
-        read_idx, frame = item
-
-        results = model(frame, conf=conf, verbose=False, imgsz=imgsz, half=True)
-        r = results[0]
-
+    def process_one(frame, r):
+        nonlocal dogs_detected, no_dog_frames, frame_out_idx
         dogs = []
         if r.keypoints is not None and len(r.keypoints.data) > 0:
             kps_all   = r.keypoints.data.cpu().numpy()
             boxes_all = r.boxes.data.cpu().numpy()
-            # 限制检测数量，单狗场景只保留置信度最高的
             if max_dogs > 0 and len(boxes_all) > max_dogs:
                 top = boxes_all[:, 4].argsort()[::-1][:max_dogs]
                 kps_all   = kps_all[top]
@@ -134,7 +126,6 @@ def run(video_path: str, output_dir: str, model_path: str,
                     "keypoints":  kps.tolist(),
                 })
             dogs_detected += 1
-
             if show_skeleton:
                 for kps, box in zip(kps_all, boxes_all):
                     x1, y1, x2, y2 = map(int, box[:4])
@@ -158,12 +149,10 @@ def run(video_path: str, output_dir: str, model_path: str,
                             cv2.circle(frame, (int(x), int(y)), 4, (0, 100, 255), -1)
         else:
             no_dog_frames += 1
-
         behaviors    = [d.get("behavior", "") for d in dogs if d.get("behavior")]
         behavior_str = ", ".join(behaviors) if behaviors else ""
         info = f"frame {frame_out_idx}  {behavior_str or f'dogs={len(dogs)}'}"
         cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
         frames_data.append({
             "frame":  frame_out_idx,
             "time_s": round(frame_out_idx / fps_out, 4),
@@ -171,10 +160,28 @@ def run(video_path: str, output_dir: str, model_path: str,
         })
         write_queue.put(frame)
         frame_out_idx += 1
-
         if frame_out_idx % 100 == 0:
             det_rate = dogs_detected / max(frame_out_idx, 1) * 100
             print(f"  {frame_out_idx} 帧  检测率={det_rate:.0f}%  未检出={no_dog_frames}")
+
+    batch_frames = []
+    while True:
+        item = frame_queue.get()
+        if item is None:
+            # 处理剩余不足 batch_size 的帧（batch=1 引擎直接逐帧推理）
+            for _, frame in batch_frames:
+                results = model(frame, conf=conf, verbose=False, imgsz=imgsz, half=True)
+                process_one(frame, results[0])
+            break
+        batch_frames.append(item)
+        if len(batch_frames) < batch_size:
+            continue
+        # 攒够 batch_size 帧，批量推理
+        imgs = [f for _, f in batch_frames]
+        results = model(imgs, conf=conf, verbose=False, imgsz=imgsz, half=True)
+        for (_, frame), r in zip(batch_frames, results):
+            process_one(frame, r)
+        batch_frames = []
 
     write_queue.put(None)
     writer_thread.join()
@@ -220,6 +227,8 @@ def main():
                         help="不绘制骨骼线，只画关键点")
     parser.add_argument("--max_dogs", type=int, default=1,
                         help="每帧最多保留几只狗的检测框（默认 1，避免误检多框；0=不限制）")
+    parser.add_argument("--batch", type=int, default=1,
+                        help="推理 batch size（默认 1；用 batch=4 引擎时设为 4 可提速）")
     args = parser.parse_args()
 
     import glob
@@ -233,10 +242,10 @@ def main():
             sys.exit(1)
         for f in sorted(files):
             run(f, args.output_dir, args.model, args.fps, args.conf,
-                not args.no_skeleton, args.imgsz, args.max_dogs)
+                not args.no_skeleton, args.imgsz, args.max_dogs, args.batch)
     else:
         run(args.video, args.output_dir, args.model, args.fps, args.conf,
-            not args.no_skeleton, args.imgsz, args.max_dogs)
+            not args.no_skeleton, args.imgsz, args.max_dogs, args.batch)
 
 
 if __name__ == "__main__":
