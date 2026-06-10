@@ -44,18 +44,29 @@ def load_model(model_name: str, model_dir: str = "models/clip"):
 
     # 优先从本地加载
     local_path = os.path.join(model_dir, model_name.replace("/", "_"))
-    if os.path.isdir(local_path):
+    if os.path.isdir(local_path) and os.listdir(local_path):
         print(f"[clip] 从本地加载模型: {local_path}")
-        model = CLIPModel.from_pretrained(local_path)
-        processor = CLIPProcessor.from_pretrained(local_path)
     else:
         print(f"[clip] 下载模型 {model_name} → {local_path} ...")
-        model = CLIPModel.from_pretrained(model_name)
-        processor = CLIPProcessor.from_pretrained(model_name)
-        os.makedirs(local_path, exist_ok=True)
-        model.save_pretrained(local_path)
-        processor.save_pretrained(local_path)
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=model_name,
+                local_dir=local_path,
+                ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
+            )
+        except Exception as e:
+            print(f"[clip] snapshot_download 失败: {e}")
+            print("[clip] 尝试直接下载...")
+            os.makedirs(local_path, exist_ok=True)
+            model_tmp = CLIPModel.from_pretrained(model_name)
+            proc_tmp  = CLIPProcessor.from_pretrained(model_name)
+            model_tmp.save_pretrained(local_path)
+            proc_tmp.save_pretrained(local_path)
         print(f"[clip] 模型已保存至 {local_path}")
+
+    model = CLIPModel.from_pretrained(local_path)
+    processor = CLIPProcessor.from_pretrained(local_path)
 
     model.eval()
     return model, processor
