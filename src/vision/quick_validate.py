@@ -26,7 +26,8 @@ import sys
 
 
 def run(video_path: str, output_dir: str, model_path: str,
-        fps_out: int, conf: float, show_skeleton: bool, imgsz: int = 1280):
+        fps_out: int, conf: float, show_skeleton: bool, imgsz: int = 1280,
+        max_dogs: int = 1):
     try:
         import cv2
         from ultralytics import YOLO
@@ -118,6 +119,11 @@ def run(video_path: str, output_dir: str, model_path: str,
         if r.keypoints is not None and len(r.keypoints.data) > 0:
             kps_all   = r.keypoints.data.cpu().numpy()
             boxes_all = r.boxes.data.cpu().numpy()
+            # 限制检测数量，单狗场景只保留置信度最高的
+            if max_dogs > 0 and len(boxes_all) > max_dogs:
+                top = boxes_all[:, 4].argsort()[::-1][:max_dogs]
+                kps_all   = kps_all[top]
+                boxes_all = boxes_all[top]
             for kps, box in zip(kps_all, boxes_all):
                 cls_id = int(box[5]) if len(box) > 5 else 0
                 dogs.append({
@@ -211,6 +217,8 @@ def main():
                         help="推理图像尺寸（默认 1280，4K 视频建议用 1280 或 1920）")
     parser.add_argument("--no_skeleton", action="store_true",
                         help="不绘制骨骼线，只画关键点")
+    parser.add_argument("--max_dogs", type=int, default=1,
+                        help="每帧最多保留几只狗的检测框（默认 1，避免误检多框；0=不限制）")
     args = parser.parse_args()
 
     import glob
@@ -224,10 +232,10 @@ def main():
             sys.exit(1)
         for f in sorted(files):
             run(f, args.output_dir, args.model, args.fps, args.conf,
-                not args.no_skeleton, args.imgsz)
+                not args.no_skeleton, args.imgsz, args.max_dogs)
     else:
         run(args.video, args.output_dir, args.model, args.fps, args.conf,
-            not args.no_skeleton, args.imgsz)
+            not args.no_skeleton, args.imgsz, args.max_dogs)
 
 
 if __name__ == "__main__":
