@@ -79,7 +79,13 @@ def run(video_path: str, output_dir: str, model_path: str,
             break
 
         if read_idx % step == 0:
-            results = model(frame, conf=conf, verbose=False)
+            # 4K 缩放到 1080p 再推理，速度提升 4x
+            if frame.shape[0] > 1080:
+                scale = 1080 / frame.shape[0]
+                infer_frame = cv2.resize(frame, None, fx=scale, fy=scale)
+            else:
+                infer_frame = frame
+            results = model(infer_frame, conf=conf, verbose=False)
             r = results[0]
 
             dogs = []
