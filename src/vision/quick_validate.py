@@ -26,7 +26,7 @@ import sys
 
 
 def run(video_path: str, output_dir: str, model_path: str,
-        fps_out: int, conf: float, show_skeleton: bool):
+        fps_out: int, conf: float, show_skeleton: bool, imgsz: int = 1280):
     try:
         import cv2
         from ultralytics import YOLO
@@ -79,13 +79,7 @@ def run(video_path: str, output_dir: str, model_path: str,
             break
 
         if read_idx % step == 0:
-            # 4K 缩放到 1080p 再推理，速度提升 4x
-            if frame.shape[0] > 1080:
-                scale = 1080 / frame.shape[0]
-                infer_frame = cv2.resize(frame, None, fx=scale, fy=scale)
-            else:
-                infer_frame = frame
-            results = model(infer_frame, conf=conf, verbose=False)
+            results = model(frame, conf=conf, verbose=False, imgsz=imgsz)
             r = results[0]
 
             dogs = []
@@ -193,6 +187,8 @@ def main():
                         help="输出视频帧率，同时控制关键点提取密度（默认 10）")
     parser.add_argument("--conf", type=float, default=0.5,
                         help="检测置信度阈值（默认 0.5，降低可提高检测率）")
+    parser.add_argument("--imgsz", type=int, default=1280,
+                        help="推理图像尺寸（默认 1280，4K 视频建议用 1280 或 1920）")
     parser.add_argument("--no_skeleton", action="store_true",
                         help="不绘制骨骼线，只画关键点")
     args = parser.parse_args()
@@ -208,10 +204,10 @@ def main():
             sys.exit(1)
         for f in sorted(files):
             run(f, args.output_dir, args.model, args.fps, args.conf,
-                not args.no_skeleton)
+                not args.no_skeleton, args.imgsz)
     else:
         run(args.video, args.output_dir, args.model, args.fps, args.conf,
-            not args.no_skeleton)
+            not args.no_skeleton, args.imgsz)
 
 
 if __name__ == "__main__":
