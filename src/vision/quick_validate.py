@@ -39,7 +39,8 @@ def run(video_path: str, output_dir: str, model_path: str,
     import threading
 
     model = YOLO(model_path)
-    model.fuse()  # 融合 BN 层，推理更快
+    if model_path.endswith(".pt"):
+        model.fuse()  # 融合 BN 层，推理更快（仅 PyTorch 模型支持）
     print(f"[validate] 模型: {model_path}")
     print(f"[validate] 视频: {video_path}")
 
