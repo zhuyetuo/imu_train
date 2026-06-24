@@ -54,8 +54,8 @@ BEHAVIOR_ZH = {
 
 # ── 数据读取 ──────────────────────────────────────────────────────────────────
 
-def load_txt(path: str) -> tuple[np.ndarray, int]:
-    """读取单个 TXT/CSV 文件，返回 (N, 6) float32 传感器数据 和 检测到的采样率。"""
+def load_txt(path: str) -> tuple[np.ndarray, int, pd.Timestamp | None]:
+    """读取单个 TXT/CSV 文件，返回 (N, 6) float32 传感器数据、采样率、起始时间戳。"""
     df = pd.read_csv(path)
     df.columns = [c.strip() for c in df.columns]
     if all(c in df.columns for c in SENSOR_COLS):
@@ -64,18 +64,20 @@ def load_txt(path: str) -> tuple[np.ndarray, int]:
         data = df[ALT_COLS].values.astype(np.float32)
     else:
         raise ValueError(f"{path}: 缺少传感器列，现有列: {list(df.columns)}")
-    # 自动检测采样率
+    # 自动检测采样率和起始时间戳
     detected_hz = SOURCE_HZ
+    start_ts = None
     ts_col = next((c for c in df.columns if "time" in c.lower()), None)
     if ts_col and len(df) > 10:
         try:
             ts = pd.to_datetime(df[ts_col])
+            start_ts = ts.iloc[0]
             median_interval = (ts.diff().dropna().dt.total_seconds()).median()
             if median_interval > 0:
                 detected_hz = max(1, round(1.0 / median_interval))
         except Exception:
             pass
-    return data, detected_hz
+    return data, detected_hz, start_ts
 
 
 def collect_files(input_dir: str = None, input_file: str = None, input_url: str = None) -> list[tuple[str, str]]:
@@ -226,7 +228,7 @@ def main(args):
 
     for fpath, fname in files:
         try:
-            raw, file_hz = load_txt(fpath)
+            raw, file_hz, start_ts = load_txt(fpath)
         except Exception as e:
             print(f"  [跳过] {fname}: {e}")
             continue
@@ -257,16 +259,22 @@ def main(args):
 
         time_starts = [s / args.hz for s in starts]
 
+        import datetime
         for i, (t, label, conf) in enumerate(zip(time_starts, pred_labels, confidences)):
-            all_results.append({
+            t_end = t + window_size / args.hz
+            row = {
                 "file": fname,
                 "window_idx": i,
                 "time_start_s": round(t, 3),
-                "time_end_s": round(t + window_size / args.hz, 3),
+                "time_end_s": round(t_end, 3),
                 "prediction": label,
                 "prediction_zh": BEHAVIOR_ZH.get(label, label),
                 "confidence": round(float(conf), 4),
-            })
+            }
+            if start_ts is not None:
+                row["abs_start"] = (start_ts + pd.Timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S")
+                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_end)).strftime("%Y-%m-%d %H:%M:%S")
+            all_results.append(row)
 
         # 统计（Unknown 单独计）
         from collections import Counter
@@ -284,14 +292,51 @@ def main(args):
     out_df = pd.DataFrame(all_results)
     os.makedirs(args.output_dir, exist_ok=True)
     model_tag = os.path.splitext(os.path.basename(args.model_path))[0]
-    # 单文件推理时用原文件名作为输出文件名前缀
     if len(files) == 1:
         src_stem = os.path.splitext(files[0][1])[0]
-        out_path = os.path.join(args.output_dir, f"{src_stem}_{model_tag}.csv")
+        out_path        = os.path.join(args.output_dir, f"{src_stem}_{model_tag}.csv")
+        out_path_merged = os.path.join(args.output_dir, f"{src_stem}_{model_tag}_segments.csv")
     else:
-        out_path = os.path.join(args.output_dir, f"predictions_{model_tag}.csv")
+        out_path        = os.path.join(args.output_dir, f"predictions_{model_tag}.csv")
+        out_path_merged = os.path.join(args.output_dir, f"predictions_{model_tag}_segments.csv")
+
     out_df.to_csv(out_path, index=False)
-    print(f"\n[infer] 结果已保存至 {out_path}  ({len(out_df)} 行)")
+
+    # 合并连续相同行为为时间段
+    merged = []
+    for _, grp in out_df.groupby("file", sort=False):
+        prev = None
+        for row in grp.itertuples():
+            label = row.prediction
+            if prev is None or label != prev["prediction"]:
+                if prev:
+                    merged.append(prev)
+                prev = {
+                    "file": row.file,
+                    "prediction": label,
+                    "prediction_zh": row.prediction_zh,
+                    "time_start_s": row.time_start_s,
+                    "time_end_s": row.time_end_s,
+                    "abs_start": getattr(row, "abs_start", ""),
+                    "abs_end":   getattr(row, "abs_end",   ""),
+                }
+            else:
+                prev["time_end_s"] = row.time_end_s
+                if hasattr(row, "abs_end"):
+                    prev["abs_end"] = row.abs_end
+        if prev:
+            merged.append(prev)
+
+    merged_df = pd.DataFrame(merged)
+    merged_df["duration_s"] = (merged_df["time_end_s"] - merged_df["time_start_s"]).round(1)
+    merged_df.to_csv(out_path_merged, index=False)
+
+    print(f"\n[infer] 明细已保存至 {out_path}  ({len(out_df)} 行)")
+    print(f"[infer] 时间段已保存至 {out_path_merged}  ({len(merged_df)} 段)")
+    print()
+    for row in merged_df.itertuples():
+        t = f"{row.abs_start} → {row.abs_end}" if row.abs_start else f"{row.time_start_s}s → {row.time_end_s}s"
+        print(f"  {t}  {row.prediction_zh}({row.prediction})  {row.duration_s}秒")
 
 
 if __name__ == "__main__":
