@@ -272,8 +272,8 @@ def main(args):
                 "confidence": round(float(conf), 4),
             }
             if start_ts is not None:
-                row["abs_start"] = (start_ts + pd.Timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S")
-                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_end)).strftime("%Y-%m-%d %H:%M:%S")
+                row["abs_start"] = (start_ts + pd.Timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_end)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             all_results.append(row)
 
         # 统计（Unknown 单独计）
