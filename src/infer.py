@@ -72,7 +72,9 @@ def load_txt(path: str) -> tuple[np.ndarray, int, pd.Timestamp | None]:
         try:
             ts = pd.to_datetime(df[ts_col])
             start_ts = ts.iloc[0]
-            median_interval = (ts.diff().dropna().dt.total_seconds()).median()
+            # 去重后计算间隔，避免重复时间戳干扰
+            unique_ts = ts.drop_duplicates().sort_values()
+            median_interval = unique_ts.diff().dropna().dt.total_seconds().median()
             if median_interval > 0:
                 detected_hz = max(1, round(1.0 / median_interval))
         except Exception:
@@ -259,21 +261,22 @@ def main(args):
 
         time_starts = [s / args.hz for s in starts]
 
-        import datetime
+        stride_s = stride / args.hz
         for i, (t, label, conf) in enumerate(zip(time_starts, pred_labels, confidences)):
-            t_end = t + window_size / args.hz
+            # 每个窗口"拥有"一个 stride 长度的时间片，避免相邻窗口重叠
+            t_seg_end = t + stride_s
             row = {
                 "file": fname,
                 "window_idx": i,
                 "time_start_s": round(t, 3),
-                "time_end_s": round(t_end, 3),
+                "time_end_s": round(t_seg_end, 3),
                 "prediction": label,
                 "prediction_zh": BEHAVIOR_ZH.get(label, label),
                 "confidence": round(float(conf), 4),
             }
             if start_ts is not None:
                 row["abs_start"] = (start_ts + pd.Timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_end)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_seg_end)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             all_results.append(row)
 
         # 统计（Unknown 单独计）
