@@ -41,6 +41,16 @@ SENSOR_COLS = ["AX", "AY", "AZ", "GX", "GY", "GZ"]
 # 兼容 timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z 格式
 ALT_COLS    = ["acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
 
+BEHAVIOR_ZH = {
+    "Lying chest": "趴卧",
+    "Sitting":     "坐",
+    "Sniffing":    "嗅闻",
+    "Standing":    "站立",
+    "Trotting":    "小跑",
+    "Walking":     "行走",
+    "Unknown":     "未知",
+}
+
 
 # ── 数据读取 ──────────────────────────────────────────────────────────────────
 
@@ -68,27 +78,29 @@ def load_txt(path: str) -> tuple[np.ndarray, int]:
     return data, detected_hz
 
 
-def collect_files(input_dir: str = None, input_file: str = None, input_url: str = None) -> list[str]:
+def collect_files(input_dir: str = None, input_file: str = None, input_url: str = None) -> list[tuple[str, str]]:
+    """返回 [(实际路径, 显示文件名), ...]"""
     if input_url:
         import tempfile, urllib.request
+        from urllib.parse import urlparse
         print(f"[infer] 下载: {input_url}")
+        url_fname = os.path.basename(urlparse(input_url).path) or "download.csv"
         suffix = ".csv" if input_url.lower().endswith(".csv") else ".txt"
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         urllib.request.urlretrieve(input_url, tmp.name)
         print(f"[infer] 已保存到临时文件: {tmp.name}")
-        return [tmp.name]
+        return [(tmp.name, url_fname)]
     if input_file:
-        return [input_file]
+        return [(input_file, os.path.basename(input_file))]
     exts = ("*.TXT", "*.txt", "*.CSV", "*.csv")
     files = []
     for ext in exts:
         files += glob.glob(os.path.join(input_dir, ext))
     files = sorted(set(files))
-    # 跳过非数据文件（README、说明文件等）
     files = [f for f in files if os.path.basename(f).upper() not in ("README.TXT", "README.CSV")]
     if not files:
         raise FileNotFoundError(f"在 {input_dir} 下未找到 TXT/CSV 文件")
-    return files
+    return [(f, os.path.basename(f)) for f in files]
 
 
 # ── 预处理 ────────────────────────────────────────────────────────────────────
@@ -212,8 +224,7 @@ def main(args):
 
     all_results = []
 
-    for fpath in files:
-        fname = os.path.basename(fpath)
+    for fpath, fname in files:
         try:
             raw, file_hz = load_txt(fpath)
         except Exception as e:
@@ -244,7 +255,6 @@ def main(args):
             for p, conf in zip(preds, confidences)
         ]
 
-        # 每个窗口的时间起点（秒）
         time_starts = [s / args.hz for s in starts]
 
         for i, (t, label, conf) in enumerate(zip(time_starts, pred_labels, confidences)):
@@ -254,6 +264,7 @@ def main(args):
                 "time_start_s": round(t, 3),
                 "time_end_s": round(t + window_size / args.hz, 3),
                 "prediction": label,
+                "prediction_zh": BEHAVIOR_ZH.get(label, label),
                 "confidence": round(float(conf), 4),
             })
 
@@ -273,7 +284,12 @@ def main(args):
     out_df = pd.DataFrame(all_results)
     os.makedirs(args.output_dir, exist_ok=True)
     model_tag = os.path.splitext(os.path.basename(args.model_path))[0]
-    out_path = os.path.join(args.output_dir, f"predictions_{model_tag}.csv")
+    # 单文件推理时用原文件名作为输出文件名前缀
+    if len(files) == 1:
+        src_stem = os.path.splitext(files[0][1])[0]
+        out_path = os.path.join(args.output_dir, f"{src_stem}_{model_tag}.csv")
+    else:
+        out_path = os.path.join(args.output_dir, f"predictions_{model_tag}.csv")
     out_df.to_csv(out_path, index=False)
     print(f"\n[infer] 结果已保存至 {out_path}  ({len(out_df)} 行)")
 
