@@ -38,18 +38,34 @@ from gravity_align import gravity_align_batch
 
 SOURCE_HZ = 50   # TXT 文件采样率
 SENSOR_COLS = ["AX", "AY", "AZ", "GX", "GY", "GZ"]
+# 兼容 timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z 格式
+ALT_COLS    = ["acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
 
 
 # ── 数据读取 ──────────────────────────────────────────────────────────────────
 
-def load_txt(path: str) -> np.ndarray:
-    """读取单个 TXT 文件，返回 (N, 6) float32 传感器数据。"""
+def load_txt(path: str) -> tuple[np.ndarray, int]:
+    """读取单个 TXT/CSV 文件，返回 (N, 6) float32 传感器数据 和 检测到的采样率。"""
     df = pd.read_csv(path)
     df.columns = [c.strip() for c in df.columns]
-    missing = [c for c in SENSOR_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"{path}: 缺少列 {missing}，现有列: {list(df.columns)}")
-    return df[SENSOR_COLS].values.astype(np.float32)
+    if all(c in df.columns for c in SENSOR_COLS):
+        data = df[SENSOR_COLS].values.astype(np.float32)
+    elif all(c in df.columns for c in ALT_COLS):
+        data = df[ALT_COLS].values.astype(np.float32)
+    else:
+        raise ValueError(f"{path}: 缺少传感器列，现有列: {list(df.columns)}")
+    # 自动检测采样率
+    detected_hz = SOURCE_HZ
+    ts_col = next((c for c in df.columns if "time" in c.lower()), None)
+    if ts_col and len(df) > 10:
+        try:
+            ts = pd.to_datetime(df[ts_col])
+            median_interval = (ts.diff().dropna().dt.total_seconds()).median()
+            if median_interval > 0:
+                detected_hz = max(1, round(1.0 / median_interval))
+        except Exception:
+            pass
+    return data, detected_hz
 
 
 def collect_files(input_dir: str = None, input_file: str = None, input_url: str = None) -> list[str]:
@@ -199,12 +215,19 @@ def main(args):
     for fpath in files:
         fname = os.path.basename(fpath)
         try:
-            raw = load_txt(fpath)
+            raw, file_hz = load_txt(fpath)
         except Exception as e:
             print(f"  [跳过] {fname}: {e}")
             continue
 
-        data_ds = downsample(raw, SOURCE_HZ, args.hz)
+        if file_hz != SOURCE_HZ:
+            print(f"  [info] {fname}: 检测到采样率={file_hz}Hz")
+        src_hz = file_hz
+        if src_hz < args.hz:
+            print(f"  [warn] {fname}: 文件采样率({src_hz}Hz) < 目标({args.hz}Hz)，跳过降采样直接使用")
+            data_ds = raw
+        else:
+            data_ds = downsample(raw, src_hz, args.hz)
         windows, starts = sliding_window_infer(data_ds, window_size, stride)
 
         if len(windows) == 0:
