@@ -52,7 +52,15 @@ def load_txt(path: str) -> np.ndarray:
     return df[SENSOR_COLS].values.astype(np.float32)
 
 
-def collect_files(input_dir: str = None, input_file: str = None) -> list[str]:
+def collect_files(input_dir: str = None, input_file: str = None, input_url: str = None) -> list[str]:
+    if input_url:
+        import tempfile, urllib.request
+        print(f"[infer] 下载: {input_url}")
+        suffix = ".csv" if input_url.lower().endswith(".csv") else ".txt"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        urllib.request.urlretrieve(input_url, tmp.name)
+        print(f"[infer] 已保存到临时文件: {tmp.name}")
+        return [tmp.name]
     if input_file:
         return [input_file]
     exts = ("*.TXT", "*.txt", "*.CSV", "*.csv")
@@ -183,7 +191,7 @@ def main(args):
         predict_fn = lambda X: predict_dl(model, X, device, m2m, cfg_dl)
 
     # 收集文件
-    files = collect_files(args.input_dir, args.input_file)
+    files = collect_files(args.input_dir, args.input_file, args.input_url)
     print(f"[infer] 共 {len(files)} 个文件待推理")
 
     all_results = []
@@ -263,6 +271,8 @@ if __name__ == "__main__":
                         help="存放待推理 TXT/CSV 文件的目录")
     parser.add_argument("--input_file", default="",
                         help="单个文件路径（与 --input_dir 二选一）")
+    parser.add_argument("--input_url", default="",
+                        help="CSV/TXT 文件的 URL，自动下载后推理")
     parser.add_argument("--output_dir", default="results/infer")
     parser.add_argument("--dl_config", default="configs/dl.yaml")
     parser.add_argument("--confidence_threshold", type=float, default=0.6,
@@ -273,6 +283,9 @@ if __name__ == "__main__":
     ga_group.add_argument("--no_gravity_align", dest="gravity_align", action="store_false",
                           help="强制禁用重力轴对齐")
     args = parser.parse_args()
-    if args.input_file:
+    if args.input_url:
+        args.input_dir = None
+        args.input_file = ""
+    elif args.input_file:
         args.input_dir = None
     main(args)
