@@ -1,0 +1,8 @@
+# 6类 → 2类重映射：活动 / 睡觉
+# 格式: "原始类别名": "新类别名"
+Lying chest: 睡觉
+Sitting:     活动
+Sniffing:    活动
+Standing:    活动
+Trotting:    活动
+Walking:     活动

@@ -48,6 +48,9 @@ BEHAVIOR_ZH = {
     "Standing":    "站立",
     "Trotting":    "小跑",
     "Walking":     "行走",
+    "活动":        "活动",
+    "睡觉":        "睡觉",
+    "抓挠":        "抓挠",
     "Unknown":     "未知",
 }
 
@@ -72,7 +75,9 @@ def load_txt(path: str) -> tuple[np.ndarray, int, pd.Timestamp | None]:
         try:
             ts = pd.to_datetime(df[ts_col])
             start_ts = ts.iloc[0]
-            median_interval = (ts.diff().dropna().dt.total_seconds()).median()
+            # 去重后计算间隔，避免重复时间戳干扰
+            unique_ts = ts.drop_duplicates().sort_values()
+            median_interval = unique_ts.diff().dropna().dt.total_seconds().median()
             if median_interval > 0:
                 detected_hz = max(1, round(1.0 / median_interval))
         except Exception:
@@ -193,6 +198,17 @@ def main(args):
             print(f"[infer] ⚠️  警告：训练时重力对齐={'是' if trained_with_ga else '否'}，"
                   f"当前设置={'是' if use_gravity_align else '否'}，可能影响精度")
 
+    # 标签重映射（推理时与训练保持一致）
+    remap_cfg = None
+    if args.remap:
+        with open(args.remap) as f:
+            remap_cfg = yaml.safe_load(f)
+        new_class_names = list(dict.fromkeys(remap_cfg.values()))
+        new_class2id    = {c: i for i, c in enumerate(new_class_names)}
+        id_remap        = {i: new_class2id[remap_cfg[c]] for i, c in enumerate(classes) if c in remap_cfg}
+        classes         = new_class_names
+        print(f"[infer] 标签重映射 → {classes}")
+
     print(f"[infer] hz={args.hz}, window={window_size}帧, stride={stride}帧")
     print(f"[infer] 类别: {classes}")
     print(f"[infer] 重力对齐: {'启用' if use_gravity_align else '禁用'}")
@@ -251,6 +267,8 @@ def main(args):
             windows = gravity_align_batch(windows)
 
         preds, confidences = predict_fn(windows)
+        if remap_cfg:
+            preds = np.array([id_remap.get(int(p), 0) for p in preds])
         thresh = args.confidence_threshold
         pred_labels = [
             classes[p] if conf >= thresh else "Unknown"
@@ -259,21 +277,22 @@ def main(args):
 
         time_starts = [s / args.hz for s in starts]
 
-        import datetime
+        stride_s = stride / args.hz
         for i, (t, label, conf) in enumerate(zip(time_starts, pred_labels, confidences)):
-            t_end = t + window_size / args.hz
+            # 每个窗口"拥有"一个 stride 长度的时间片，避免相邻窗口重叠
+            t_seg_end = t + stride_s
             row = {
                 "file": fname,
                 "window_idx": i,
                 "time_start_s": round(t, 3),
-                "time_end_s": round(t_end, 3),
+                "time_end_s": round(t_seg_end, 3),
                 "prediction": label,
                 "prediction_zh": BEHAVIOR_ZH.get(label, label),
                 "confidence": round(float(conf), 4),
             }
             if start_ts is not None:
                 row["abs_start"] = (start_ts + pd.Timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_end)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                row["abs_end"]   = (start_ts + pd.Timedelta(seconds=t_seg_end)).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             all_results.append(row)
 
         # 统计（Unknown 单独计）
@@ -357,6 +376,8 @@ if __name__ == "__main__":
                         help="单个文件路径（与 --input_dir 二选一）")
     parser.add_argument("--input_url", default="",
                         help="CSV/TXT 文件的 URL，自动下载后推理")
+    parser.add_argument("--remap", default="",
+                        help="标签重映射 YAML（如 configs/remap_2class.yaml）")
     parser.add_argument("--output_dir", default="results/infer")
     parser.add_argument("--dl_config", default="configs/dl.yaml")
     parser.add_argument("--confidence_threshold", type=float, default=0.6,
