@@ -48,6 +48,9 @@ BEHAVIOR_ZH = {
     "Standing":    "站立",
     "Trotting":    "小跑",
     "Walking":     "行走",
+    "活动":        "活动",
+    "睡觉":        "睡觉",
+    "抓挠":        "抓挠",
     "Unknown":     "未知",
 }
 
@@ -195,6 +198,17 @@ def main(args):
             print(f"[infer] ⚠️  警告：训练时重力对齐={'是' if trained_with_ga else '否'}，"
                   f"当前设置={'是' if use_gravity_align else '否'}，可能影响精度")
 
+    # 标签重映射（推理时与训练保持一致）
+    remap_cfg = None
+    if args.remap:
+        with open(args.remap) as f:
+            remap_cfg = yaml.safe_load(f)
+        new_class_names = list(dict.fromkeys(remap_cfg.values()))
+        new_class2id    = {c: i for i, c in enumerate(new_class_names)}
+        id_remap        = {i: new_class2id[remap_cfg[c]] for i, c in enumerate(classes) if c in remap_cfg}
+        classes         = new_class_names
+        print(f"[infer] 标签重映射 → {classes}")
+
     print(f"[infer] hz={args.hz}, window={window_size}帧, stride={stride}帧")
     print(f"[infer] 类别: {classes}")
     print(f"[infer] 重力对齐: {'启用' if use_gravity_align else '禁用'}")
@@ -253,6 +267,8 @@ def main(args):
             windows = gravity_align_batch(windows)
 
         preds, confidences = predict_fn(windows)
+        if remap_cfg:
+            preds = np.array([id_remap.get(int(p), 0) for p in preds])
         thresh = args.confidence_threshold
         pred_labels = [
             classes[p] if conf >= thresh else "Unknown"
@@ -360,6 +376,8 @@ if __name__ == "__main__":
                         help="单个文件路径（与 --input_dir 二选一）")
     parser.add_argument("--input_url", default="",
                         help="CSV/TXT 文件的 URL，自动下载后推理")
+    parser.add_argument("--remap", default="",
+                        help="标签重映射 YAML（如 configs/remap_2class.yaml）")
     parser.add_argument("--output_dir", default="results/infer")
     parser.add_argument("--dl_config", default="configs/dl.yaml")
     parser.add_argument("--confidence_threshold", type=float, default=0.6,

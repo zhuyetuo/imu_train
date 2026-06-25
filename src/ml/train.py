@@ -83,6 +83,18 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
     return model
 
 
+def apply_remap(y, classes, remap: dict) -> tuple[np.ndarray, list[str]]:
+    """
+    remap: {"Lying chest": "睡觉", "Walking": "活动", ...}
+    返回重映射后的 y 和新 classes 列表。
+    """
+    new_class_names = list(dict.fromkeys(remap.values()))  # 保序去重
+    new_class2id = {c: i for i, c in enumerate(new_class_names)}
+    mapping = {i: new_class2id[remap[c]] for i, c in enumerate(classes) if c in remap}
+    new_y = np.array([mapping[int(label)] for label in y], dtype=np.int64)
+    return new_y, new_class_names
+
+
 def main(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -90,6 +102,20 @@ def main(args):
     print(f"\n[ml/train] hz={args.hz}, model={args.model}, processed_dir={args.processed_dir}")
     (X_tr, y_tr, _), (X_val, y_val, _), (X_te, y_te, _), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
+
+    # 标签重映射（用于合并类别，如 6类→2类）
+    remap_cfg = None
+    if args.remap:
+        with open(args.remap) as f:
+            remap_cfg = yaml.safe_load(f)
+        print(f"[ml/train] 标签重映射: {args.remap}")
+        for k, v in remap_cfg.items():
+            print(f"  {k} → {v}")
+        y_tr,  classes_new = apply_remap(y_tr,  classes, remap_cfg)
+        y_val, _           = apply_remap(y_val, classes, remap_cfg)
+        y_te,  _           = apply_remap(y_te,  classes, remap_cfg)
+        classes = classes_new
+        print(f"[ml/train] 重映射后类别: {classes}")
 
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
@@ -147,7 +173,8 @@ def main(args):
                                 zero_division=0))
 
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
-    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz")
+    remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
+    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}")
     os.makedirs(out_dir, exist_ok=True)
     per_class = classification_report(y_te, y_pred, labels=present_labels,
                                       target_names=present_names,
@@ -176,4 +203,6 @@ if __name__ == "__main__":
     parser.add_argument("--results_dir", default="results")
     parser.add_argument("--n_jobs", type=int, default=None,
                         help="覆盖模型的 n_jobs（并行启动时限制每个任务的核数）")
+    parser.add_argument("--remap", default="",
+                        help="标签重映射 YAML 文件路径（用于合并类别，如 6类→2类）")
     main(parser.parse_args())
