@@ -108,6 +108,8 @@ def main(args):
     if args.remap:
         with open(args.remap) as f:
             remap_cfg = yaml.safe_load(f)
+        # 过滤掉注释行（以 # 开头的 key）
+        remap_cfg = {k: v for k, v in remap_cfg.items() if not str(k).startswith("#")}
         print(f"[ml/train] 标签重映射: {args.remap}")
         for k, v in remap_cfg.items():
             print(f"  {k} → {v}")
@@ -116,6 +118,46 @@ def main(args):
         y_te,  _           = apply_remap(y_te,  classes, remap_cfg)
         classes = classes_new
         print(f"[ml/train] 重映射后类别: {classes}")
+
+    # 合成数据注入（如抓挠伪数据）
+    if args.synthetic:
+        syn = np.load(args.synthetic)
+        X_syn = syn["X"]                          # (N, window_size, 6)
+        syn_label_id = len(classes)               # 追加为新类别
+        syn_label    = args.synthetic_label
+        classes      = classes + [syn_label]
+
+        # 按 8:1:1 分配合成数据到 train/val/test
+        n = len(X_syn)
+        n_val = max(1, n // 10)
+        n_te  = max(1, n // 10)
+        n_tr  = n - n_val - n_te
+        rng = np.random.default_rng(42)
+        idx = rng.permutation(n)
+        X_syn_tr  = X_syn[idx[:n_tr]]
+        X_syn_val = X_syn[idx[n_tr:n_tr+n_val]]
+        X_syn_te  = X_syn[idx[n_tr+n_val:]]
+        y_syn_tr  = np.full(n_tr,  syn_label_id, dtype=np.int64)
+        y_syn_val = np.full(n_val, syn_label_id, dtype=np.int64)
+        y_syn_te  = np.full(n_te,  syn_label_id, dtype=np.int64)
+
+        # 降采样对齐 window_size（合成数据用50Hz，训练可能用25Hz）
+        src_hz = 50
+        if args.hz < src_hz:
+            step = src_hz // args.hz
+            X_syn_tr  = X_syn_tr[:,  ::step, :]
+            X_syn_val = X_syn_val[:, ::step, :]
+            X_syn_te  = X_syn_te[:,  ::step, :]
+
+        X_tr  = np.concatenate([X_tr,  X_syn_tr],  axis=0)
+        X_val = np.concatenate([X_val, X_syn_val], axis=0)
+        X_te  = np.concatenate([X_te,  X_syn_te],  axis=0)
+        y_tr  = np.concatenate([y_tr,  y_syn_tr],  axis=0)
+        y_val = np.concatenate([y_val, y_syn_val], axis=0)
+        y_te  = np.concatenate([y_te,  y_syn_te],  axis=0)
+        print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
+        print(f"[ml/train] 更新后类别: {classes}")
+        print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
 
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
@@ -205,4 +247,8 @@ if __name__ == "__main__":
                         help="覆盖模型的 n_jobs（并行启动时限制每个任务的核数）")
     parser.add_argument("--remap", default="",
                         help="标签重映射 YAML 文件路径（用于合并类别，如 6类→2类）")
+    parser.add_argument("--synthetic", default="",
+                        help="合成数据 npz 路径（X 字段为窗口数组，追加为新类别）")
+    parser.add_argument("--synthetic_label", default="抓挠",
+                        help="合成数据的类别名称（默认：抓挠）")
     main(parser.parse_args())
