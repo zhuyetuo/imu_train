@@ -29,7 +29,7 @@ MODELS = {
 }
 
 
-def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
+def fit_with_progress(model, args, cfg, X_tr_f, y_tr, sample_weight=None):
     """训练并显示进度条（XGBoost / LightGBM 有原生支持，其余直接 fit）。"""
     from tqdm import tqdm
 
@@ -48,7 +48,7 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
 
         n_est = cfg["xgboost"]["n_estimators"]
         model.set_params(callbacks=[TqdmCallback(n_est)], verbosity=0)
-        model.fit(X_tr_f, y_tr)
+        model.fit(X_tr_f, y_tr, sample_weight=sample_weight)
         model.set_params(callbacks=[], verbosity=0)
 
     elif args.model == "lgbm":
@@ -61,7 +61,7 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
             if env.iteration + 1 == n_est:
                 pbar.close()
 
-        model.fit(X_tr_f, y_tr, callbacks=[_cb])
+        model.fit(X_tr_f, y_tr, sample_weight=sample_weight, callbacks=[_cb])
 
     elif args.model == "catboost":
         n_iter = cfg["catboost"]["iterations"]
@@ -72,12 +72,12 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr):
                 pbar.update(1)
                 return True
 
-        model.fit(X_tr_f, y_tr, callbacks=[PbarCallback()])
+        model.fit(X_tr_f, y_tr, sample_weight=sample_weight, callbacks=[PbarCallback()])
         pbar.close()
 
     else:
         with tqdm(total=1, desc=args.model, unit="step") as pbar:
-            model.fit(X_tr_f, y_tr)
+            model.fit(X_tr_f, y_tr, sample_weight=sample_weight)
             pbar.update(1)
 
     return model
@@ -192,14 +192,28 @@ def main(args):
 
     print(f"[ml/train] 特征维度: {X_tr_f.shape[1]}")
 
+    # 类别权重：按频率倒数自动平衡（解决类别不均衡问题）
+    counts = np.bincount(y_tr.astype(int), minlength=len(classes))
+    weights = len(y_tr) / (len(classes) * counts.clip(min=1))
+    sample_weights = weights[y_tr.astype(int)]
+    print(f"[ml/train] 类别分布: { {classes[i]: int(c) for i, c in enumerate(counts)} }")
+    print(f"[ml/train] 类别权重: { {classes[i]: round(float(w), 3) for i, w in enumerate(weights)} }")
+
     build_fn, cfg_key = MODELS[args.model]
     model_cfg = dict(cfg[cfg_key])
     if args.n_jobs is not None:
         model_cfg["n_jobs"] = args.n_jobs
+    # RF / XGB / LightGBM / CatBoost 都支持 class_weight 或 sample_weight
+    if args.model in ("rf",):
+        model_cfg["class_weight"] = "balanced"
     model = build_fn(model_cfg)
 
     print(f"[ml/train] 训练中...")
-    model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
+    # XGB / LGBM / CatBoost 通过 sample_weight 传入权重
+    if args.model in ("xgb", "lgbm", "catboost"):
+        model = fit_with_progress(model, args, cfg, X_tr_f, y_tr, sample_weight=sample_weights)
+    else:
+        model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
 
     from sklearn.metrics import accuracy_score, f1_score, classification_report
     y_pred = np.array(model.predict(X_te_f)).flatten().astype(int)
