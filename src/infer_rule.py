@@ -127,8 +127,10 @@ def classify(feat: dict, cfg: dict) -> str:
     if std < cfg["sleep_std_thresh"]:
         return "睡觉"
 
-    # 规则2：抓挠 — 3-6Hz 频段能量占主导，运动强度中等
-    if (sp >= cfg["scratch_freq_power"]
+    # 规则2：抓挠 — 主频必须在3-6Hz范围内，且该频段能量占主导，运动强度中等
+    dom = feat["dominant_freq"]
+    if (cfg["scratch_freq_low"] <= dom <= cfg["scratch_freq_high"]
+            and sp >= cfg["scratch_freq_power"]
             and cfg["scratch_std_low"] <= std <= cfg["scratch_std_high"]):
         return "抓挠"
 
