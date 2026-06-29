@@ -22,7 +22,7 @@ python src/ml/train.py --hz 50 --model catboost --processed_dir data/processed_a
 | 模型 | 类型 | 说明 |
 |------|------|------|
 | `cnn` | many-to-one | 通用 1D CNN（MaxPool=2，每层 Dropout） |
-| `collar_cnn` | many-to-one | 复现 [Animals 2021](https://doi.org/10.3390/ani11061549) 架构（64→128→256，MaxPool=4，Dropout 只在 FC 前） |
+| `collar_cnn` | many-to-one | 复现 [Animals 2021 — Real-World Validation](https://doi.org/10.3390/ani11061549) 架构（64→128→256，MaxPool=4，Dropout 只在 FC 前） |
 | `cnn_lstm` | many-to-one | CNN 提取局部特征 + LSTM 建模时序依赖 |
 | `transformer` | many-to-one | 基于自注意力机制的时序分类器 |
 | `filternet` | many-to-one | 复现 [FilterNet (Sensors 2020)](https://doi.org/10.3390/s20092498) encoder，stride 下采样 + LSTM + GAP |
