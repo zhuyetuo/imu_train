@@ -48,16 +48,17 @@ def extract_features(X: np.ndarray, hz: int) -> np.ndarray:
     X: (N, window_size, n_channels)
     返回: (N, n_features)，若 X 为空则返回 shape (0, n_features)
     """
-    from tqdm import tqdm
     if len(X) == 0:
-        # 推断特征维度：用一个零窗口算一次
         n_ch = X.shape[2] if X.ndim == 3 else 6
         dummy = np.zeros((1, X.shape[1] if X.ndim == 3 else 10, n_ch), dtype=np.float32)
         n_feat = len(np.concatenate([_time_features(dummy[0]), _freq_features(dummy[0], hz)]))
         return np.empty((0, n_feat), dtype=np.float32)
     features = []
-    for i in tqdm(range(len(X)), desc="提取特征", unit="窗口"):
-        t_feat = _time_features(X[i])
-        f_feat = _freq_features(X[i], hz)
-        features.append(np.concatenate([t_feat, f_feat]))
+    show_progress = len(X) > 10   # 单窗口推理不显示进度条
+    it = range(len(X))
+    if show_progress:
+        from tqdm import tqdm
+        it = tqdm(it, desc="提取特征", unit="窗口")
+    for i in it:
+        features.append(np.concatenate([_time_features(X[i]), _freq_features(X[i], hz)]))
     return np.stack(features)
