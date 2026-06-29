@@ -5,8 +5,9 @@ processed_dir: data/processed
 # 原始采样率
 source_hz: 100
 
-# 目标采样率列表（从100Hz降采样）
-target_hz_list: [5, 10, 25, 50]
+# 目标采样率列表（从 source_hz 降采样，只支持整除关系）
+# 注意: 若设备直接以 15/16/20Hz 录制，将 custom.source_hz 设为实际采样率，无需降采样
+target_hz_list: [5, 10, 15, 16, 20, 25, 50]
 
 # 窗口配置（时间固定，点数随hz自动计算）
 window_seconds: 2.0
@@ -35,8 +36,9 @@ keep_labels_b:
 custom:
   # CSV 文件路径
   csv_path: data/raw_custom/data.csv
-  # 采样率（WitMotion 默认 50Hz，按设备实际设置填写）
-  source_hz: 50
+  # 采样率 — 填写设备实际采样率，不是目标采样率
+  # WitMotion 可在 PC 端软件调整，常用值: 10 / 20 / 50 Hz
+  source_hz: 20
   # 狗ID列名
   dog_id_col: dog_id
   # 标签列名
