@@ -88,27 +88,41 @@ def rule_classify(acc_win: np.ndarray, hz: int) -> str:
     return "活动"
 
 
+# 中文标签映射（英文原始类别 → 中文）
+BEHAVIOR_ZH = {
+    "Lying chest": "趴卧", "Sitting": "坐", "Sniffing": "嗅闻",
+    "Standing": "站立", "Trotting": "小跑", "Walking": "行走",
+    "活动": "活动", "睡觉": "睡觉", "抓挠": "抓挠",
+}
+
+
 # ── 算法2：ML 模型 ────────────────────────────────────────────────────────────
 class MLClassifier:
     def __init__(self, model_path: str):
-        import joblib
+        import joblib, json
         from features import extract_features as _extract
-        self.model   = joblib.load(model_path)
+        self.model    = joblib.load(model_path)
         self._extract = _extract
-        # 从模型推断类别名
-        self.classes = getattr(self.model, "classes_", None)
+
+        # 优先从同目录的 JSON 文件读取类别名（train.py 保存的格式）
+        json_path = os.path.splitext(model_path)[0] + ".json"
+        if os.path.exists(json_path):
+            with open(json_path) as f:
+                meta = json.load(f)
+            self.class_names = meta.get("classes", [])
+        else:
+            self.class_names = []
+
         print(f"[ml] 加载模型: {model_path}")
-        if self.classes is not None:
-            print(f"[ml] 类别: {list(self.classes)}")
+        print(f"[ml] 类别: {self.class_names}")
 
     def predict(self, acc_win: np.ndarray, gyro_win: np.ndarray, hz: int) -> str:
-        # 拼接 acc+gyro → (1, window_n, 6)
-        win6 = np.concatenate([acc_win, gyro_win], axis=1)   # (window_n, 6)
-        X = win6[np.newaxis]                                   # (1, window_n, 6)
-        feat = self._extract(X, hz)                           # (1, n_feat)
+        win6 = np.concatenate([acc_win, gyro_win], axis=1)[np.newaxis]  # (1, window_n, 6)
+        feat = self._extract(win6, hz)
         pred_id = int(self.model.predict(feat)[0])
-        if self.classes is not None and pred_id < len(self.classes):
-            return str(self.classes[pred_id])
+        if pred_id < len(self.class_names):
+            en = self.class_names[pred_id]
+            return BEHAVIOR_ZH.get(en, en)   # 有中文就用中文，否则用原文
         return str(pred_id)
 
 
