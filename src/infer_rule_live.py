@@ -142,7 +142,7 @@ def fmt_label(label: str) -> str:
 
 def print_row(chip_ts: str, results: dict):
     """results: {algo_name: (label, conf_or_None)}"""
-    pc_ts = datetime.now().strftime("%H:%M:%S")
+    pc_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if chip_ts:
         ts_str = f"PC {pc_ts} | 片上 {chip_ts}"
     else:
