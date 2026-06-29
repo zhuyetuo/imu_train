@@ -337,7 +337,7 @@ def main():
     infer = LiveInfer(hz, args.window_s, args.stride_s, algos,
                       conf_threshold=args.confidence_threshold)
 
-    print(f"算法: {[name for name, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s")
+    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s")
 
     if args.device == "hicc":
         run_hicc(args, infer)
