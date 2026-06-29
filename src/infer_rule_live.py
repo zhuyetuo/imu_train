@@ -23,6 +23,7 @@ import collections
 import sys
 import os
 import numpy as np
+from datetime import datetime
 
 # ── 导入 witmotion_imu 解析模块 ───────────────────────────────────────────────
 # witmotion_imu 是本项目的 git submodule（位于项目根目录下）
@@ -139,9 +140,14 @@ def fmt_label(label: str) -> str:
     return f"{color}{label}{RESET}"
 
 
-def print_row(ts: str, results: dict):
+def print_row(chip_ts: str, results: dict):
     """results: {algo_name: (label, conf_or_None)}"""
-    parts = [f"[{ts}]"]
+    pc_ts = datetime.now().strftime("%H:%M:%S")
+    if chip_ts:
+        ts_str = f"PC {pc_ts} | 片上 {chip_ts}"
+    else:
+        ts_str = f"PC {pc_ts}"
+    parts = [f"[{ts_str}]"]
     for name, (label, conf) in results.items():
         if conf is not None:
             parts.append(f"{name}={fmt_label(label)}({conf:.0%})")
