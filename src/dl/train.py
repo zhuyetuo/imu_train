@@ -213,7 +213,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
+    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 15, 16, 20, 25, 50])
     parser.add_argument("--model", default="cnn_lstm",
                         choices=["cnn", "collar_cnn", "cnn_lstm", "transformer",
                                  "filternet", "filternet_m2m"])
