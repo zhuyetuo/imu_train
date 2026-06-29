@@ -369,7 +369,7 @@ if __name__ == "__main__":
                                  "filternet", "filternet_m2m"])
     parser.add_argument("--processed_dir", required=True,
                         help="对应数据集的预处理目录，用于读取类别和窗口参数")
-    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
+    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 15, 16, 20, 25, 50])
     parser.add_argument("--input_dir", default="data/infer",
                         help="存放待推理 TXT/CSV 文件的目录")
     parser.add_argument("--input_file", default="",

@@ -252,7 +252,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 25, 50])
+    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 15, 16, 20, 25, 50])
     parser.add_argument("--model", default="xgb", choices=list(MODELS))
     parser.add_argument("--config", default="configs/ml.yaml")
     parser.add_argument("--processed_dir", default="data/processed_a")
