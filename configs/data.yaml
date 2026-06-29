@@ -35,8 +35,8 @@ keep_labels_b:
 custom:
   # CSV 文件路径
   csv_path: data/raw_custom/data.csv
-  # 采样率（根据你的传感器实际采样率填写）
-  source_hz: 100
+  # 采样率（WitMotion 默认 50Hz，按设备实际设置填写）
+  source_hz: 50
   # 狗ID列名
   dog_id_col: dog_id
   # 标签列名
@@ -49,8 +49,11 @@ custom:
     - gyr_x
     - gyr_y
     - gyr_z
-  # 保留的行为类别（填写你实际标注的标签名）
-  keep_labels: []   # 留空则保留所有标签
+  # 保留的行为类别（留空则保留所有标签）
+  keep_labels:
+    - 活动
+    - 睡觉
+    - 抓挠
 
 # ── 猫咪数据集配置 ────────────────────────────────────────────────────────────
 # 注意: 猫咪数据集通常只有加速度计（3通道），无陀螺仪
