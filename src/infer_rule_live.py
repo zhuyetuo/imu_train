@@ -116,14 +116,21 @@ class MLClassifier:
         print(f"[ml] 加载模型: {model_path}")
         print(f"[ml] 类别: {self.class_names}")
 
-    def predict(self, acc_win: np.ndarray, gyro_win: np.ndarray, hz: int) -> str:
+    def predict(self, acc_win: np.ndarray, gyro_win: np.ndarray, hz: int) -> tuple[str, float]:
         win6 = np.concatenate([acc_win, gyro_win], axis=1)[np.newaxis]  # (1, window_n, 6)
         feat = self._extract(win6, hz)
         pred_id = int(self.model.predict(feat)[0])
+        # 置信度：取最高类别概率
+        if hasattr(self.model, "predict_proba"):
+            conf = float(self.model.predict_proba(feat)[0].max())
+        else:
+            conf = 1.0
         if pred_id < len(self.class_names):
             en = self.class_names[pred_id]
-            return BEHAVIOR_ZH.get(en, en)   # 有中文就用中文，否则用原文
-        return str(pred_id)
+            label = BEHAVIOR_ZH.get(en, en)
+        else:
+            label = str(pred_id)
+        return label, conf
 
 
 # ── 输出 ──────────────────────────────────────────────────────────────────────
@@ -133,20 +140,25 @@ def fmt_label(label: str) -> str:
 
 
 def print_row(ts: str, results: dict):
-    """results: {algo_name: label}"""
+    """results: {algo_name: (label, conf_or_None)}"""
     parts = [f"[{ts}]"]
-    for name, label in results.items():
-        parts.append(f"{name}={fmt_label(label)}")
+    for name, (label, conf) in results.items():
+        if conf is not None:
+            parts.append(f"{name}={fmt_label(label)}({conf:.0%})")
+        else:
+            parts.append(f"{name}={fmt_label(label)}")
     print("  ".join(parts))
 
 
 # ── 滑动窗口推理器 ────────────────────────────────────────────────────────────
 class LiveInfer:
-    def __init__(self, hz: int, window_s: float, stride_s: float, algos: list):
-        self.hz       = hz
-        self.window_n = int(window_s * hz)
-        self.stride_n = int(stride_s * hz)
-        self.algos    = algos   # list of (name, callable)
+    def __init__(self, hz: int, window_s: float, stride_s: float, algos: list,
+                 conf_threshold: float = 0.0):
+        self.hz             = hz
+        self.window_n       = int(window_s * hz)
+        self.stride_n       = int(stride_s * hz)
+        self.algos          = algos   # list of (name, callable, has_conf)
+        self.conf_threshold = conf_threshold
         self.acc_ring  = collections.deque(maxlen=self.window_n)
         self.gyro_ring = collections.deque(maxlen=self.window_n)
         self.counter   = 0
@@ -157,14 +169,21 @@ class LiveInfer:
         self.counter += 1
         if self.counter >= self.stride_n and len(self.acc_ring) == self.window_n:
             self.counter = 0
-            acc_win  = np.array(self.acc_ring,  dtype=np.float32)   # (window_n, 3)
+            acc_win  = np.array(self.acc_ring,  dtype=np.float32)
             gyro_win = np.array(self.gyro_ring, dtype=np.float32)
             results  = {}
-            for name, fn in self.algos:
+            for name, fn, has_conf in self.algos:
                 try:
-                    results[name] = fn(acc_win, gyro_win)
+                    if has_conf:
+                        label, conf = fn(acc_win, gyro_win)
+                        if self.conf_threshold > 0 and conf < self.conf_threshold:
+                            label = "Unknown"
+                        results[name] = (label, conf)
+                    else:
+                        label = fn(acc_win, gyro_win)
+                        results[name] = (label, None)
                 except Exception as e:
-                    results[name] = f"ERR({e})"
+                    results[name] = (f"ERR({e})", None)
             print_row(ts, results)
 
 
@@ -290,6 +309,8 @@ def main():
                         choices=["rule", "ml"],
                         help="推理算法，可同时选多个: --algo rule ml")
     parser.add_argument("--model",    default="", help="ML 模型路径（.pkl），--algo ml 时必填")
+    parser.add_argument("--confidence_threshold", type=float, default=0.0,
+                        help="ML 置信度阈值（0-1），低于此值显示 Unknown，0=不过滤（默认）")
     parser.add_argument("--scan",     action="store_true", help="扫描附近设备后退出")
     args = parser.parse_args()
 
@@ -299,21 +320,22 @@ def main():
 
     hz = args.hz or (25 if args.device == "hicc" else 50)
 
-    # 构建算法列表
+    # 构建算法列表：(name, fn, has_conf)
     algos = []
     for algo in args.algo:
         if algo == "rule":
             fn = lambda acc, gyro, _hz=hz: rule_classify(acc, _hz)
-            algos.append(("规则", fn))
+            algos.append(("规则", fn, False))
         elif algo == "ml":
             if not args.model:
                 print("[错误] --algo ml 需要指定 --model <路径>")
                 sys.exit(1)
             clf = MLClassifier(args.model)
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
-            algos.append(("ML", fn))
+            algos.append(("ML", fn, True))
 
-    infer = LiveInfer(hz, args.window_s, args.stride_s, algos)
+    infer = LiveInfer(hz, args.window_s, args.stride_s, algos,
+                      conf_threshold=args.confidence_threshold)
 
     print(f"算法: {[name for name, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s")
 
