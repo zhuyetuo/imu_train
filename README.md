@@ -485,9 +485,20 @@ file,window_idx,time_start_s,time_end_s,prediction,confidence
 
 ### 前置准备
 
+`witmotion_imu` 已作为 git submodule 内嵌在本项目中，clone 时一并初始化：
+
+```bash
+# 全新 clone（推荐）
+git clone --recurse-submodules https://github.com/zhuyetuo/imu_train
+
+# 已经 clone 但未初始化 submodule
+git submodule update --init
+```
+
+然后安装 BLE 依赖：
+
 ```bash
 pip install bleak
-git clone https://github.com/zhuyetuo/witmotion_imu ~/witmotion_imu
 ```
 
 > 注意：设备同一时间只能连一个应用，运行实时推理时请关闭其他 BLE 连接程序。
