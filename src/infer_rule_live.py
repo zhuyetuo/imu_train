@@ -25,8 +25,9 @@ import os
 import numpy as np
 
 # ── 导入 witmotion_imu 解析模块 ───────────────────────────────────────────────
-REPO = os.path.expanduser("~/witmotion_imu")
-sys.path.insert(0, REPO)
+# witmotion_imu 是本项目的 git submodule（位于项目根目录下）
+REPO = os.path.join(os.path.dirname(__file__), "..", "witmotion_imu")
+sys.path.insert(0, os.path.abspath(REPO))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
 
 try:
