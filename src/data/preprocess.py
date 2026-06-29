@@ -59,6 +59,25 @@ def split_by_dog(records, train_r, val_r, seed):
             set(dog_ids[n_train + n_val:]))
 
 
+def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
+    """按窗口随机划分（适合 subject 数太少的小数据集）。"""
+    rng = np.random.default_rng(seed)
+    n = len(X_all)
+    idx = rng.permutation(n)
+    n_train = int(n * train_r)
+    n_val = int(n * val_r)
+    # 保证 val/test 各至少 1 个窗口
+    n_val  = max(1, n_val)  if n >= 3 else n_val
+    n_test = max(1, n - n_train - n_val) if n >= 3 else n - n_train - n_val
+    n_train = n - n_val - n_test
+    i_train = idx[:n_train]
+    i_val   = idx[n_train:n_train + n_val]
+    i_test  = idx[n_train + n_val:]
+    return (X_all[i_train], y_all[i_train], y_seq_all[i_train],
+            X_all[i_val],   y_all[i_val],   y_seq_all[i_val],
+            X_all[i_test],  y_all[i_test],  y_seq_all[i_test])
+
+
 def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
     X_all, y_all, y_seq_all = [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
@@ -157,8 +176,20 @@ def main(args):
     classes = list(le.classes_)
     print(f"[preprocess] 行为类别 ({len(classes)}): {classes}")
 
-    train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
-    print(f"[preprocess] 狗 ID 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
+    # 决定划分策略
+    n_subjects = len(records)
+    strategy = args.split_strategy
+    if strategy == "auto":
+        strategy = "subject" if n_subjects >= 10 else "random"
+        if strategy == "random":
+            print(f"[preprocess] subject 数={n_subjects} < 10，自动使用窗口随机划分（可用 --split_strategy subject 强制按subject划分）")
+
+    if strategy == "subject":
+        train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
+        print(f"[preprocess] 按 subject 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
+    else:
+        train_ids = val_ids = test_ids = None
+        print(f"[preprocess] 按窗口随机划分: train={train_r:.0%} / val={val_r:.0%} / test={1-train_r-val_r:.0%}")
 
     for target_hz in target_hz_list:
         if target_hz > source_hz:
@@ -176,9 +207,18 @@ def main(args):
             ds_records.append({**r, "data": data_ds, "labels": labels_ds})
 
         ga = not args.no_gravity_align
-        X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
-        X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
-        X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
+
+        if strategy == "subject":
+            X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
+            X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
+            X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
+        else:
+            # 先把所有窗口提取出来，再随机划分
+            all_ids = set(r["dog_id"] for r in ds_records)
+            X_all, y_all, y_seq_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga)
+            (X_train, y_train, y_seq_train,
+             X_val,   y_val,   y_seq_val,
+             X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
 
         print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
@@ -189,9 +229,10 @@ def main(args):
             "hz": target_hz, "window_size": window_size, "stride": stride,
             "n_channels": str(X_train.shape[2] if X_train.ndim == 3 else 6),
             "classes": str(classes),
-            "train_dog_ids": str(list(train_ids)),
-            "val_dog_ids": str(list(val_ids)),
-            "test_dog_ids": str(list(test_ids)),
+            "split_strategy": strategy,
+            "train_dog_ids": str(list(train_ids)) if train_ids is not None else "[]",
+            "val_dog_ids":   str(list(val_ids))   if val_ids   is not None else "[]",
+            "test_dog_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
             "dataset": args.dataset,
             "gravity_aligned": str(not args.no_gravity_align),
         }
@@ -225,4 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/data.yaml")
     parser.add_argument("--no_gravity_align", action="store_true",
                         help="不做重力轴对齐（默认启用）")
+    parser.add_argument("--split_strategy", default="auto",
+                        choices=["auto", "subject", "random"],
+                        help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分")
     main(parser.parse_args())
