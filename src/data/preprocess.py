@@ -17,8 +17,31 @@ from gravity_align import gravity_align_batch
 
 
 def downsample(data, labels, source_hz, target_hz):
-    step = source_hz // target_hz
-    return data[::step], labels[::step]
+    if source_hz == target_hz:
+        return data, labels
+    from math import gcd
+    g = gcd(source_hz, target_hz)
+    up, down = target_hz // g, source_hz // g
+    if up == 1:
+        # 整除降采样，直接取点（快速路径）
+        step = down
+        data_ds = data[::step]
+        # 标签用多数投票对齐到降采样后长度
+        n_out = len(data_ds)
+        labels_ds = np.array([
+            Counter(labels[i * step: (i + 1) * step]).most_common(1)[0][0]
+            for i in range(n_out)
+        ])
+    else:
+        # 非整除比例，用多项式重采样（scipy）
+        from scipy.signal import resample_poly
+        data_ds = resample_poly(data, up, down, axis=0).astype(np.float32)
+        n_out = len(data_ds)
+        # 标签：按比例映射每个输出点回原始索引
+        orig_indices = (np.arange(n_out) * (source_hz / target_hz)).astype(int)
+        orig_indices = np.clip(orig_indices, 0, len(labels) - 1)
+        labels_ds = labels[orig_indices]
+    return data_ds, labels_ds
 
 
 def sliding_window(data, labels, window_size, stride, keep_label_set=None):
