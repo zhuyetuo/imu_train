@@ -137,9 +137,9 @@ class MLClassifier:
             print(f"[ml] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s")
             if infer_hz:
                 warns = []
-                if not hz_ok:  warns.append(f"采样率 训练={t_hz}Hz 当前={infer_hz}Hz")
-                if not win_ok: warns.append(f"窗口 训练={t_window_s}s 当前={infer_window_s}s")
-                if not str_ok: warns.append(f"步长 训练={t_stride_s}s 当前={infer_stride_s}s")
+                if not hz_ok:  warns.append(f"采样率 训练={t_hz}Hz 推理={infer_hz}Hz")
+                if not win_ok: warns.append(f"窗口 训练={t_window_s}s 推理={infer_window_s}s")
+                if not str_ok: warns.append(f"步长 训练={t_stride_s}s 推理={infer_stride_s}s")
                 if warns:
                     print(f"[ml] ⚠️  参数不一致: {' | '.join(warns)}")
                     if not hz_ok:
@@ -148,7 +148,7 @@ class MLClassifier:
         if self.trained_gravity_aligned is not None:
             trained_str = "开" if self.trained_gravity_aligned else "关"
             current_str = "开" if use_gravity_align else "关"
-            print(f"[ml] 重力对齐: 训练={trained_str}  当前={current_str}", end="")
+            print(f"[ml] 重力对齐: 训练={trained_str}  推理={current_str}", end="")
             if self.trained_gravity_aligned != use_gravity_align:
                 hint = "--no_gravity_align" if not self.trained_gravity_aligned else "去掉 --no_gravity_align"
                 print(f"  ⚠️  不一致！建议: {hint}")
@@ -395,7 +395,7 @@ def main():
                       use_gravity_align=use_ga)
 
     ga_str = "开" if use_ga else "关"
-    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s  重力对齐={ga_str}")
+    print(f"推理参数: 算法={[name for name, _, _ in algos]}  采样率={hz}Hz  窗口={args.window_s}s  步长={args.stride_s}s  重力对齐={ga_str}")
 
     if args.device == "hicc":
         run_hicc(args, infer)
