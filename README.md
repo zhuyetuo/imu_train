@@ -94,6 +94,9 @@ python src/infer_rule_live.py --device hicc
 python src/infer_rule_live.py --device hicc --algo ml \
   --model results/processed_custom/20hz/ml_rf.pkl
 
+# 指定 MAC 地址 + ML 模型（自己设备）
+python src/infer_rule_live.py --device hicc --algo ml --model results/processed_custom/20hz/ml_rf.pkl --address EA:CB:3E:CF:00:1A --hz 20
+
 # 规则 + ML 并排对比
 python src/infer_rule_live.py --device hicc --algo rule ml \
   --model results/processed_custom/20hz/ml_rf.pkl
