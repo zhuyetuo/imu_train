@@ -30,6 +30,9 @@ from datetime import datetime
 REPO = os.path.join(os.path.dirname(__file__), "..", "witmotion_imu")
 sys.path.insert(0, os.path.abspath(REPO))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data"))
+
+from gravity_align import gravity_align
 
 try:
     from bleak import BleakClient, BleakScanner
@@ -99,23 +102,58 @@ BEHAVIOR_ZH = {
 
 # ── 算法2：ML 模型 ────────────────────────────────────────────────────────────
 class MLClassifier:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, use_gravity_align: bool = True,
+                 infer_hz: int = 0, infer_window_s: float = 0, infer_stride_s: float = 0):
         import joblib, json
         from features import extract_features as _extract
         self.model    = joblib.load(model_path)
         self._extract = _extract
+        self.trained_gravity_aligned = None
 
-        # 优先从同目录的 JSON 文件读取类别名（train.py 保存的格式）
         json_path = os.path.splitext(model_path)[0] + ".json"
+        meta = {}
         if os.path.exists(json_path):
             with open(json_path) as f:
                 meta = json.load(f)
             self.class_names = meta.get("classes", [])
+            ga = meta.get("gravity_aligned")
+            if ga is not None:
+                self.trained_gravity_aligned = bool(ga)
         else:
             self.class_names = []
 
         print(f"[ml] 加载模型: {model_path}")
         print(f"[ml] 类别: {self.class_names}")
+
+        # 打印训练参数，并与当前推理参数对比
+        t_hz       = meta.get("hz")
+        t_window_s = meta.get("window_s")
+        t_stride_s = meta.get("stride_s")
+
+        if t_hz is not None:
+            hz_ok  = (infer_hz == 0 or infer_hz == t_hz)
+            win_ok = (infer_window_s == 0 or abs(infer_window_s - t_window_s) < 0.01)
+            str_ok = (infer_stride_s == 0 or abs(infer_stride_s - t_stride_s) < 0.01)
+            print(f"[ml] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s")
+            if infer_hz:
+                warns = []
+                if not hz_ok:  warns.append(f"采样率 训练={t_hz}Hz 当前={infer_hz}Hz")
+                if not win_ok: warns.append(f"窗口 训练={t_window_s}s 当前={infer_window_s}s")
+                if not str_ok: warns.append(f"步长 训练={t_stride_s}s 当前={infer_stride_s}s")
+                if warns:
+                    print(f"[ml] ⚠️  参数不一致: {' | '.join(warns)}")
+                    if not hz_ok:
+                        print(f"[ml]    建议改为: --hz {t_hz} --window_s {t_window_s} --stride_s {t_stride_s}")
+
+        if self.trained_gravity_aligned is not None:
+            trained_str = "开" if self.trained_gravity_aligned else "关"
+            current_str = "开" if use_gravity_align else "关"
+            print(f"[ml] 重力对齐: 训练={trained_str}  当前={current_str}", end="")
+            if self.trained_gravity_aligned != use_gravity_align:
+                hint = "--no_gravity_align" if not self.trained_gravity_aligned else "去掉 --no_gravity_align"
+                print(f"  ⚠️  不一致！建议: {hint}")
+            else:
+                print()
 
     def predict(self, acc_win: np.ndarray, gyro_win: np.ndarray, hz: int) -> tuple[str, float]:
         win6 = np.concatenate([acc_win, gyro_win], axis=1)[np.newaxis]  # (1, window_n, 6)
@@ -159,12 +197,13 @@ def print_row(chip_ts: str, results: dict):
 # ── 滑动窗口推理器 ────────────────────────────────────────────────────────────
 class LiveInfer:
     def __init__(self, hz: int, window_s: float, stride_s: float, algos: list,
-                 conf_threshold: float = 0.0):
-        self.hz             = hz
-        self.window_n       = int(window_s * hz)
-        self.stride_n       = int(stride_s * hz)
-        self.algos          = algos   # list of (name, callable, has_conf)
-        self.conf_threshold = conf_threshold
+                 conf_threshold: float = 0.0, use_gravity_align: bool = True):
+        self.hz                 = hz
+        self.window_n           = int(window_s * hz)
+        self.stride_n           = int(stride_s * hz)
+        self.algos              = algos   # list of (name, callable, has_conf)
+        self.conf_threshold     = conf_threshold
+        self.use_gravity_align  = use_gravity_align
         self.acc_ring  = collections.deque(maxlen=self.window_n)
         self.gyro_ring = collections.deque(maxlen=self.window_n)
         self.counter   = 0
@@ -177,6 +216,10 @@ class LiveInfer:
             self.counter = 0
             acc_win  = np.array(self.acc_ring,  dtype=np.float32)
             gyro_win = np.array(self.gyro_ring, dtype=np.float32)
+            if self.use_gravity_align:
+                win6 = np.concatenate([acc_win, gyro_win], axis=1)
+                win6 = gravity_align(win6)
+                acc_win, gyro_win = win6[:, :3], win6[:, 3:]
             results  = {}
             for name, fn, has_conf in self.algos:
                 try:
@@ -317,6 +360,8 @@ def main():
     parser.add_argument("--model",    default="", help="ML 模型路径（.pkl），--algo ml 时必填")
     parser.add_argument("--confidence_threshold", type=float, default=0.0,
                         help="ML 置信度阈值（0-1），低于此值显示 Unknown，0=不过滤（默认）")
+    parser.add_argument("--no_gravity_align", action="store_true",
+                        help="禁用重力轴对齐（默认启用，与训练保持一致）")
     parser.add_argument("--scan",     action="store_true", help="扫描附近设备后退出")
     args = parser.parse_args()
 
@@ -336,14 +381,21 @@ def main():
             if not args.model:
                 print("[错误] --algo ml 需要指定 --model <路径>")
                 sys.exit(1)
-            clf = MLClassifier(args.model)
+            clf = MLClassifier(args.model,
+                               use_gravity_align=not args.no_gravity_align,
+                               infer_hz=hz,
+                               infer_window_s=args.window_s,
+                               infer_stride_s=args.stride_s)
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
             algos.append(("ML", fn, True))
 
+    use_ga = not args.no_gravity_align
     infer = LiveInfer(hz, args.window_s, args.stride_s, algos,
-                      conf_threshold=args.confidence_threshold)
+                      conf_threshold=args.confidence_threshold,
+                      use_gravity_align=use_ga)
 
-    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s")
+    ga_str = "开" if use_ga else "关"
+    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s  重力对齐={ga_str}")
 
     if args.device == "hicc":
         run_hicc(args, infer)

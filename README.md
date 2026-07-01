@@ -60,6 +60,26 @@ bash setup.sh --dataset a
 python run_experiments.py --ml_workers 8 --dl_workers 4
 ```
 
+### 自采数据训练
+
+```bash
+# 步骤 1：将 Label Studio 标注导出为训练 CSV
+python src/data/labelstudio_to_custom.py \
+  --json data/raw_custom/labelstudio_export.json \
+  --output data/raw_custom/data.csv \
+  --acc_unit g
+
+# 步骤 2：预处理
+bash setup.sh --dataset custom
+
+# 步骤 3：训练（按设备实际采样率选 hz）
+python src/ml/train.py --hz 20 --model rf   --processed_dir data/processed_custom
+python src/ml/train.py --hz 20 --model xgb  --processed_dir data/processed_custom
+python src/ml/train.py --hz 20 --model lgbm --processed_dir data/processed_custom
+```
+
+> 采样率（`--hz`）必须与设备一致，推理时也要用同一个值。
+
 ### 实时 BLE 推理
 
 ```bash
