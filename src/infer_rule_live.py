@@ -30,6 +30,9 @@ from datetime import datetime
 REPO = os.path.join(os.path.dirname(__file__), "..", "witmotion_imu")
 sys.path.insert(0, os.path.abspath(REPO))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data"))
+
+from gravity_align import gravity_align
 
 try:
     from bleak import BleakClient, BleakScanner
@@ -159,12 +162,13 @@ def print_row(chip_ts: str, results: dict):
 # ── 滑动窗口推理器 ────────────────────────────────────────────────────────────
 class LiveInfer:
     def __init__(self, hz: int, window_s: float, stride_s: float, algos: list,
-                 conf_threshold: float = 0.0):
-        self.hz             = hz
-        self.window_n       = int(window_s * hz)
-        self.stride_n       = int(stride_s * hz)
-        self.algos          = algos   # list of (name, callable, has_conf)
-        self.conf_threshold = conf_threshold
+                 conf_threshold: float = 0.0, use_gravity_align: bool = True):
+        self.hz                 = hz
+        self.window_n           = int(window_s * hz)
+        self.stride_n           = int(stride_s * hz)
+        self.algos              = algos   # list of (name, callable, has_conf)
+        self.conf_threshold     = conf_threshold
+        self.use_gravity_align  = use_gravity_align
         self.acc_ring  = collections.deque(maxlen=self.window_n)
         self.gyro_ring = collections.deque(maxlen=self.window_n)
         self.counter   = 0
@@ -177,6 +181,10 @@ class LiveInfer:
             self.counter = 0
             acc_win  = np.array(self.acc_ring,  dtype=np.float32)
             gyro_win = np.array(self.gyro_ring, dtype=np.float32)
+            if self.use_gravity_align:
+                win6 = np.concatenate([acc_win, gyro_win], axis=1)
+                win6 = gravity_align(win6)
+                acc_win, gyro_win = win6[:, :3], win6[:, 3:]
             results  = {}
             for name, fn, has_conf in self.algos:
                 try:
@@ -317,6 +325,8 @@ def main():
     parser.add_argument("--model",    default="", help="ML 模型路径（.pkl），--algo ml 时必填")
     parser.add_argument("--confidence_threshold", type=float, default=0.0,
                         help="ML 置信度阈值（0-1），低于此值显示 Unknown，0=不过滤（默认）")
+    parser.add_argument("--no_gravity_align", action="store_true",
+                        help="禁用重力轴对齐（默认启用，与训练保持一致）")
     parser.add_argument("--scan",     action="store_true", help="扫描附近设备后退出")
     args = parser.parse_args()
 
@@ -340,10 +350,13 @@ def main():
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
             algos.append(("ML", fn, True))
 
+    use_ga = not args.no_gravity_align
     infer = LiveInfer(hz, args.window_s, args.stride_s, algos,
-                      conf_threshold=args.confidence_threshold)
+                      conf_threshold=args.confidence_threshold,
+                      use_gravity_align=use_ga)
 
-    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s")
+    ga_str = "开" if use_ga else "关"
+    print(f"算法: {[name for name, _, _ in algos]}  窗口={args.window_s}s  间隔={args.stride_s}s  重力对齐={ga_str}")
 
     if args.device == "hicc":
         run_hicc(args, infer)
