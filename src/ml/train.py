@@ -238,11 +238,19 @@ def main(args):
     gravity_aligned = meta.get("gravity_aligned", "True")
     if isinstance(gravity_aligned, str):
         gravity_aligned = gravity_aligned.lower() == "true"
+    window_size = int(meta.get("window_size", 0))
+    stride      = int(meta.get("stride", 0))
+    window_s    = round(window_size / args.hz, 3) if args.hz else 0
+    stride_s    = round(stride      / args.hz, 3) if args.hz else 0
     result = {
         "hz": args.hz, "model": args.model,
         "accuracy": acc, "macro_f1": f1,
         "classes": present_names,
         "gravity_aligned": gravity_aligned,
+        "window_size": window_size,
+        "stride": stride,
+        "window_s": window_s,
+        "stride_s": stride_s,
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},

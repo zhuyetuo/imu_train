@@ -102,15 +102,16 @@ BEHAVIOR_ZH = {
 
 # ── 算法2：ML 模型 ────────────────────────────────────────────────────────────
 class MLClassifier:
-    def __init__(self, model_path: str, use_gravity_align: bool = True):
+    def __init__(self, model_path: str, use_gravity_align: bool = True,
+                 infer_hz: int = 0, infer_window_s: float = 0, infer_stride_s: float = 0):
         import joblib, json
         from features import extract_features as _extract
         self.model    = joblib.load(model_path)
         self._extract = _extract
-        self.trained_gravity_aligned = None  # unknown until JSON read
+        self.trained_gravity_aligned = None
 
-        # 优先从同目录的 JSON 文件读取类别名（train.py 保存的格式）
         json_path = os.path.splitext(model_path)[0] + ".json"
+        meta = {}
         if os.path.exists(json_path):
             with open(json_path) as f:
                 meta = json.load(f)
@@ -124,12 +125,33 @@ class MLClassifier:
         print(f"[ml] 加载模型: {model_path}")
         print(f"[ml] 类别: {self.class_names}")
 
+        # 打印训练参数，并与当前推理参数对比
+        t_hz       = meta.get("hz")
+        t_window_s = meta.get("window_s")
+        t_stride_s = meta.get("stride_s")
+
+        if t_hz is not None:
+            hz_ok  = (infer_hz == 0 or infer_hz == t_hz)
+            win_ok = (infer_window_s == 0 or abs(infer_window_s - t_window_s) < 0.01)
+            str_ok = (infer_stride_s == 0 or abs(infer_stride_s - t_stride_s) < 0.01)
+            print(f"[ml] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s")
+            if infer_hz:
+                warns = []
+                if not hz_ok:  warns.append(f"采样率 训练={t_hz}Hz 当前={infer_hz}Hz")
+                if not win_ok: warns.append(f"窗口 训练={t_window_s}s 当前={infer_window_s}s")
+                if not str_ok: warns.append(f"步长 训练={t_stride_s}s 当前={infer_stride_s}s")
+                if warns:
+                    print(f"[ml] ⚠️  参数不一致: {' | '.join(warns)}")
+                    if not hz_ok:
+                        print(f"[ml]    建议改为: --hz {t_hz} --window_s {t_window_s} --stride_s {t_stride_s}")
+
         if self.trained_gravity_aligned is not None:
             trained_str = "开" if self.trained_gravity_aligned else "关"
             current_str = "开" if use_gravity_align else "关"
-            print(f"[ml] 训练时重力对齐: {trained_str}  当前: {current_str}", end="")
+            print(f"[ml] 重力对齐: 训练={trained_str}  当前={current_str}", end="")
             if self.trained_gravity_aligned != use_gravity_align:
-                print(f"  ⚠️  不一致！建议加上 {'--no_gravity_align' if not self.trained_gravity_aligned else '（去掉 --no_gravity_align）'}")
+                hint = "--no_gravity_align" if not self.trained_gravity_aligned else "去掉 --no_gravity_align"
+                print(f"  ⚠️  不一致！建议: {hint}")
             else:
                 print()
 
@@ -359,7 +381,11 @@ def main():
             if not args.model:
                 print("[错误] --algo ml 需要指定 --model <路径>")
                 sys.exit(1)
-            clf = MLClassifier(args.model, use_gravity_align=not args.no_gravity_align)
+            clf = MLClassifier(args.model,
+                               use_gravity_align=not args.no_gravity_align,
+                               infer_hz=hz,
+                               infer_window_s=args.window_s,
+                               infer_stride_s=args.stride_s)
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
             algos.append(("ML", fn, True))
 
