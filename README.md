@@ -58,10 +58,43 @@ bash setup.sh --dataset a
 
 # 训练（ML + DL，并行）
 python run_experiments.py --ml_workers 8 --dl_workers 4
+```
 
-# 实时 BLE 推理（HICC_PetCollar，规则 + ML 对比）
+### 实时 BLE 推理
+
+```bash
+# 扫描附近设备，获取 MAC 地址
+python src/infer_rule_live.py --scan
+
+# ── HICC_PetCollar ───────────────────────────────────────────
+# 仅规则算法
+python src/infer_rule_live.py --device hicc
+
+# 仅 ML 模型
+python src/infer_rule_live.py --device hicc --algo ml \
+  --model results/processed_custom/20hz/ml_rf.pkl
+
+# 规则 + ML 并排对比
 python src/infer_rule_live.py --device hicc --algo rule ml \
-  --model results/processed_a/25hz/ml_rf.pkl
+  --model results/processed_custom/20hz/ml_rf.pkl
+
+# 指定 MAC 地址（新设备或地址变了时用）
+python src/infer_rule_live.py --device hicc --address AA:BB:CC:DD:EE:FF
+
+# ── WitMotion WT901SDCL-BT50 ─────────────────────────────────
+# 仅规则算法（自动扫描）
+python src/infer_rule_live.py --device wit --hz 20
+
+# 仅 ML 模型
+python src/infer_rule_live.py --device wit --hz 20 --algo ml \
+  --model results/processed_custom/20hz/ml_rf.pkl
+
+# 规则 + ML 并排对比
+python src/infer_rule_live.py --device wit --hz 20 --algo rule ml \
+  --model results/processed_custom/20hz/ml_rf.pkl
+
+# 指定 MAC 地址
+python src/infer_rule_live.py --device wit --hz 20 --address AA:BB:CC:DD:EE:FF
 ```
 
 详细用法见各文档页。
