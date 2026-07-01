@@ -235,10 +235,14 @@ def main(args):
     per_class = classification_report(y_te, y_pred, labels=present_labels,
                                       target_names=present_names,
                                       zero_division=0, output_dict=True)
+    gravity_aligned = meta.get("gravity_aligned", "True")
+    if isinstance(gravity_aligned, str):
+        gravity_aligned = gravity_aligned.lower() == "true"
     result = {
         "hz": args.hz, "model": args.model,
         "accuracy": acc, "macro_f1": f1,
         "classes": present_names,
+        "gravity_aligned": gravity_aligned,
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},

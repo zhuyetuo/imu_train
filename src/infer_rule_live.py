@@ -102,11 +102,12 @@ BEHAVIOR_ZH = {
 
 # ── 算法2：ML 模型 ────────────────────────────────────────────────────────────
 class MLClassifier:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, use_gravity_align: bool = True):
         import joblib, json
         from features import extract_features as _extract
         self.model    = joblib.load(model_path)
         self._extract = _extract
+        self.trained_gravity_aligned = None  # unknown until JSON read
 
         # 优先从同目录的 JSON 文件读取类别名（train.py 保存的格式）
         json_path = os.path.splitext(model_path)[0] + ".json"
@@ -114,11 +115,23 @@ class MLClassifier:
             with open(json_path) as f:
                 meta = json.load(f)
             self.class_names = meta.get("classes", [])
+            ga = meta.get("gravity_aligned")
+            if ga is not None:
+                self.trained_gravity_aligned = bool(ga)
         else:
             self.class_names = []
 
         print(f"[ml] 加载模型: {model_path}")
         print(f"[ml] 类别: {self.class_names}")
+
+        if self.trained_gravity_aligned is not None:
+            trained_str = "开" if self.trained_gravity_aligned else "关"
+            current_str = "开" if use_gravity_align else "关"
+            print(f"[ml] 训练时重力对齐: {trained_str}  当前: {current_str}", end="")
+            if self.trained_gravity_aligned != use_gravity_align:
+                print(f"  ⚠️  不一致！建议加上 {'--no_gravity_align' if not self.trained_gravity_aligned else '（去掉 --no_gravity_align）'}")
+            else:
+                print()
 
     def predict(self, acc_win: np.ndarray, gyro_win: np.ndarray, hz: int) -> tuple[str, float]:
         win6 = np.concatenate([acc_win, gyro_win], axis=1)[np.newaxis]  # (1, window_n, 6)
@@ -346,7 +359,7 @@ def main():
             if not args.model:
                 print("[错误] --algo ml 需要指定 --model <路径>")
                 sys.exit(1)
-            clf = MLClassifier(args.model)
+            clf = MLClassifier(args.model, use_gravity_align=not args.no_gravity_align)
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
             algos.append(("ML", fn, True))
 
