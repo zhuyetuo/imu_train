@@ -62,23 +62,43 @@ python run_experiments.py --ml_workers 8 --dl_workers 4
 
 ### 自采数据训练
 
-```bash
-# 步骤 1：将 Label Studio 标注导出为训练 CSV
-python src/data/labelstudio_to_custom.py \
-  --json data/raw_custom/labelstudio_export.json \
-  --output data/raw_custom/data.csv \
-  --acc_unit g
+每次在 Label Studio 补充标注后导出一个新 JSON，流程自动以 JSON 文件名命名数据集，不会覆盖旧版本。
 
-# 步骤 2：预处理
-bash setup.sh --dataset custom
+```bash
+# 以下示例用 project-24-at-2026-07-15-09-20-4a6a29c1.json，替换为你的实际文件名
+
+# 步骤 0：分析标注质量（不需要下载 CSV，秒出结果）
+python src/data/analyze_annotations.py \
+  --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json
+# 输出：各类别片段数、总时长、占比、估算可用窗口数及均衡性警告
+
+# 步骤 1：转换标注 JSON → 训练 CSV
+# --output 可省略，自动保存为 data/raw_custom/<json文件名>.csv
+python src/data/labelstudio_to_custom.py \
+  --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json \
+  --csv_dir data/raw_wit/
+# 脚本执行完会打印步骤 2、3 的完整命令，直接复制运行即可
+
+# 步骤 2：预处理（将 <json文件名> 替换为实际值）
+python src/data/preprocess.py \
+  --dataset custom \
+  --raw_csv_custom data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.csv \
+  --output_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --config configs/data.yaml
+
+# 步骤 2.5：查看数据集类别分布
+python src/data/analyze_dataset.py \
+  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --hz 16
 
 # 步骤 3：训练（按设备实际采样率选 hz）
-python src/ml/train.py --hz 20 --model rf   --processed_dir data/processed_custom
-python src/ml/train.py --hz 20 --model xgb  --processed_dir data/processed_custom
-python src/ml/train.py --hz 20 --model lgbm --processed_dir data/processed_custom
+python src/ml/train.py --hz 16 --model rf \
+  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1
 ```
 
-> 采样率（`--hz`）必须与设备一致，推理时也要用同一个值。
+> - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
+> - 数据集采集用 25Hz、部署用 16Hz 时：预处理加 `--source_hz 25`，训练和推理都用 `--hz 16`
+> - 补充新数据后只需换 JSON 文件名重跑，旧版本数据完整保留
 
 ### 实时 BLE 推理
 
