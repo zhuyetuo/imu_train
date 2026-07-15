@@ -36,9 +36,8 @@ keep_labels_b:
 custom:
   # CSV 文件路径
   csv_path: data/raw_custom/data.csv
-  # 采样率 — 填写设备实际采样率，不是目标采样率
-  # WitMotion 可在 PC 端软件调整，常用值: 10 / 20 / 50 Hz
-  source_hz: 20
+  # 采样率 — 填写 CSV 的实际采样率（已 resample 到 16Hz 的填 16）
+  source_hz: 16
   # 狗ID列名
   dog_id_col: dog_id
   # 标签列名
