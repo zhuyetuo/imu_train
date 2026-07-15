@@ -98,99 +98,130 @@ def parse_ts(df: pd.DataFrame, ts_col: str) -> pd.Series:
 
 
 # ── 主转换逻辑 ────────────────────────────────────────────────────────────────
-def convert(tasks: list, csv_dir: str, acc_unit: str) -> pd.DataFrame:
+def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str):
+    """加载单个传感器 CSV，返回 (df, acc_cols, gyro_cols, ts_col) 或 None。"""
+    if not url_or_none:
+        return None
+    try:
+        df = load_csv(url_or_none, csv_dir)
+    except Exception as e:
+        print(f"  [错误] {sensor_name} CSV 无法加载: {e}")
+        return None
+    df.columns = [c.strip() for c in df.columns]
+    acc_cols  = _find_cols(df.columns.tolist(), ACC_CANDIDATES)
+    gyro_cols = _find_cols(df.columns.tolist(), GYRO_CANDIDATES)
+    ts_col    = _find_ts_col(df.columns.tolist())
+    if acc_cols is None or ts_col is None:
+        print(f"  [错误] {sensor_name}: 找不到加速度列或时间戳列，现有: {list(df.columns)}")
+        return None
+    df["_ts"] = parse_ts(df, ts_col)
+    if df["_ts"].isna().all():
+        print(f"  [错误] {sensor_name}: 时间戳解析失败")
+        return None
+    print(f"  {sensor_name}: acc={acc_cols}  gyro={gyro_cols}  ts={ts_col}  行数={len(df)}")
+    return df, acc_cols, gyro_cols
+
+
+def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
+                  subject_id, acc_unit, keep_labels):
+    """从 df 中切出时间段，返回 row 列表。"""
+    if keep_labels and label not in keep_labels:
+        return []
+    t_start = pd.to_datetime(t_start_str)
+    t_end   = pd.to_datetime(t_end_str)
+    mask    = (df["_ts"] >= t_start) & (df["_ts"] <= t_end)
+    seg_df  = df[mask]
+    if len(seg_df) == 0:
+        print(f"  [警告] {label} {t_start_str}→{t_end_str} 无匹配行")
+        return []
+    print(f"  {label}: {t_start_str} → {t_end_str}  ({len(seg_df)} 行)")
+    acc = seg_df[acc_cols].values.astype(np.float64)
+    if acc_unit == "g":
+        acc = acc * G
+    gyro = seg_df[gyro_cols].values.astype(np.float64) if gyro_cols else np.zeros((len(seg_df), 3))
+    rows = []
+    for i in range(len(seg_df)):
+        rows.append({
+            "dog_id": subject_id,
+            "label":  label,
+            "acc_x":  acc[i, 0], "acc_y": acc[i, 1], "acc_z": acc[i, 2],
+            "gyr_x":  gyro[i, 0], "gyr_y": gyro[i, 1], "gyr_z": gyro[i, 2],
+        })
+    return rows
+
+
+def convert(tasks: list, csv_dir: str, acc_unit: str,
+            keep_labels: list = None) -> pd.DataFrame:
+    keep_set = set(keep_labels) if keep_labels else None
     rows = []
 
     for task in tasks:
-        task_id   = task["id"]
-        csv_url   = task["data"].get("csv", "")
-        if not csv_url:
-            print(f"[跳过] task {task_id}：无 csv 字段")
-            continue
+        task_id = task["id"]
+        data    = task.get("data", {})
 
         annotations = task.get("annotations", [])
         if not annotations:
             print(f"[跳过] task {task_id}：无标注")
             continue
 
-        print(f"\n[task {task_id}] {os.path.basename(csv_url)}")
+        # ── 判断格式：单 csv 还是双 csv1/csv2 ───────────────────────
+        is_multi = "csv1" in data or "csv2" in data
+        print(f"\n[task {task_id}]", "多传感器" if is_multi else "单传感器")
 
-        try:
-            df = load_csv(csv_url, csv_dir)
-        except Exception as e:
-            print(f"  [错误] 无法加载 CSV: {e}")
-            continue
+        if is_multi:
+            # 双传感器：label1→csv1, label2→csv2
+            sensor_map = {}
+            for idx in ("1", "2"):
+                url = data.get(f"csv{idx}", "")
+                if url:
+                    res = _load_sensor_df(url, csv_dir, f"imu{idx}")
+                    if res:
+                        sensor_map[f"label{idx}"] = (res[0], res[1], res[2],
+                                                      f"task{task_id}_imu{idx}")
+            if not sensor_map:
+                print(f"  [跳过] 所有传感器 CSV 均加载失败")
+                continue
 
-        df.columns = [c.strip() for c in df.columns]
-        acc_cols  = _find_cols(df.columns.tolist(), ACC_CANDIDATES)
-        gyro_cols = _find_cols(df.columns.tolist(), GYRO_CANDIDATES)
-        ts_col    = _find_ts_col(df.columns.tolist())
-
-        if acc_cols is None:
-            print(f"  [错误] 找不到加速度列，现有: {list(df.columns)}")
-            continue
-        if ts_col is None:
-            print(f"  [错误] 找不到时间戳列，现有: {list(df.columns)}")
-            continue
-
-        df["_ts"] = parse_ts(df, ts_col)
-        if df["_ts"].isna().all():
-            print(f"  [错误] 时间戳解析失败，列: {ts_col}，样本值: {df[ts_col].iloc[0]}")
-            continue
-
-        print(f"  acc={acc_cols}  gyro={gyro_cols}  ts={ts_col}")
-        print(f"  行数={len(df)}  时间范围: {df['_ts'].min()} → {df['_ts'].max()}")
-
-        subject_id = f"task{task_id}"
-
-        for ann in annotations:
-            for seg in ann.get("result", []):
-                val    = seg.get("value", {})
-                labels = val.get("timeserieslabels", [])
-                t_start_str = val.get("start", "")
-                t_end_str   = val.get("end",   "")
-                if not labels or not t_start_str or not t_end_str:
-                    continue
-
-                label   = labels[0]
-                t_start = pd.to_datetime(t_start_str)
-                t_end   = pd.to_datetime(t_end_str)
-
-                mask = (df["_ts"] >= t_start) & (df["_ts"] <= t_end)
-                seg_df = df[mask]
-
-                if len(seg_df) == 0:
-                    print(f"  [警告] 标注段 {label} {t_start_str}→{t_end_str} 没有匹配到任何行")
-                    continue
-
-                print(f"  {label}: {t_start_str} → {t_end_str}  ({len(seg_df)} 行)")
-
-                acc = seg_df[acc_cols].values.astype(np.float64)
-                if acc_unit == "g":
-                    acc = acc * G
-
-                if gyro_cols:
-                    gyro = seg_df[gyro_cols].values.astype(np.float64)
-                else:
-                    gyro = np.zeros((len(seg_df), 3))
-
-                for i in range(len(seg_df)):
-                    rows.append({
-                        "dog_id": subject_id,
-                        "label":  label,
-                        "acc_x":  acc[i, 0],
-                        "acc_y":  acc[i, 1],
-                        "acc_z":  acc[i, 2],
-                        "gyr_x":  gyro[i, 0],
-                        "gyr_y":  gyro[i, 1],
-                        "gyr_z":  gyro[i, 2],
-                    })
+            for ann in annotations:
+                for seg in ann.get("result", []):
+                    val    = seg.get("value", {})
+                    labels = val.get("timeserieslabels", [])
+                    t0     = val.get("start", "")
+                    t1     = val.get("end",   "")
+                    fn     = seg.get("from_name", "")
+                    if not labels or not t0 or not t1 or fn not in sensor_map:
+                        continue
+                    df, acc_cols, gyro_cols, subject_id = sensor_map[fn]
+                    rows.extend(_extract_rows(df, acc_cols, gyro_cols,
+                                              labels[0], t0, t1,
+                                              subject_id, acc_unit, keep_set))
+        else:
+            # 旧格式：单 csv
+            csv_url = data.get("csv", "")
+            if not csv_url:
+                print(f"[跳过] task {task_id}：无 csv 字段")
+                continue
+            res = _load_sensor_df(csv_url, csv_dir, "imu")
+            if not res:
+                continue
+            df, acc_cols, gyro_cols = res
+            subject_id = f"task{task_id}"
+            for ann in annotations:
+                for seg in ann.get("result", []):
+                    val    = seg.get("value", {})
+                    labels = val.get("timeserieslabels", [])
+                    t0     = val.get("start", "")
+                    t1     = val.get("end",   "")
+                    if not labels or not t0 or not t1:
+                        continue
+                    rows.extend(_extract_rows(df, acc_cols, gyro_cols,
+                                              labels[0], t0, t1,
+                                              subject_id, acc_unit, keep_set))
 
     if not rows:
         raise RuntimeError("没有任何有效数据，请检查输入 JSON 和 CSV 路径")
 
-    out = pd.DataFrame(rows)
-    return out
+    return pd.DataFrame(rows)
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
@@ -202,14 +233,17 @@ def main():
     parser.add_argument("--csv_dir", default="",   help="本地 CSV 目录（不填则从 URL 下载）")
     parser.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"],
                         help="加速度单位：ms2=m/s²（默认），g=重力单位（自动×9.81）")
+    parser.add_argument("--keep_labels", nargs="*", default=["活动", "睡觉", "抓挠"],
+                        help="只保留这些标签（默认: 活动 睡觉 抓挠）")
     args = parser.parse_args()
 
     with open(args.json, encoding="utf-8") as f:
         tasks = json.load(f)
 
     print(f"共 {len(tasks)} 个 task")
+    print(f"只保留标签: {args.keep_labels}")
 
-    out_df = convert(tasks, args.csv_dir, args.acc_unit)
+    out_df = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     out_df.to_csv(args.output, index=False)
