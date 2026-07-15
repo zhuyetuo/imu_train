@@ -229,13 +229,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Label Studio IMU 标注 → 训练 CSV")
     parser.add_argument("--json",    required=True, help="Label Studio 导出的 JSON 文件")
-    parser.add_argument("--output",  required=True, help="输出 CSV 路径（如 data/raw_custom/data.csv）")
+    parser.add_argument("--output",  default="",   help="输出 CSV 路径（默认: 与 JSON 同目录同名，扩展名改 .csv）")
     parser.add_argument("--csv_dir", default="",   help="本地 CSV 目录（不填则从 URL 下载）")
     parser.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"],
                         help="加速度单位：ms2=m/s²（默认），g=重力单位（自动×9.81）")
     parser.add_argument("--keep_labels", nargs="*", default=["活动", "睡觉", "抓挠"],
                         help="只保留这些标签（默认: 活动 睡觉 抓挠）")
     args = parser.parse_args()
+
+    json_stem = os.path.splitext(os.path.basename(args.json))[0]
+    json_dir  = os.path.dirname(os.path.abspath(args.json))
+    output    = args.output if args.output else os.path.join(json_dir, f"{json_stem}.csv")
+    processed_dir = f"data/processed_{json_stem}"
 
     with open(args.json, encoding="utf-8") as f:
         tasks = json.load(f)
@@ -245,8 +250,8 @@ def main():
 
     out_df = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels)
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    out_df.to_csv(args.output, index=False)
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    out_df.to_csv(output, index=False)
 
     print(f"\n── 汇总 ──")
     print(f"总行数: {len(out_df)}")
@@ -254,11 +259,11 @@ def main():
     counts = out_df["label"].value_counts()
     for label, cnt in counts.items():
         print(f"  {label}: {cnt} 行")
-    print(f"\n已保存: {args.output}")
+    print(f"\n已保存: {output}")
     print(f"\n下一步（预处理）:")
-    print(f"  bash setup.sh --dataset custom")
-    print(f"下一步（训练）:")
-    print(f"  python src/ml/train.py --hz 50 --model rf --processed_dir data/processed_custom")
+    print(f"  python src/data/preprocess.py --dataset custom --raw_csv_custom {output} --output_dir {processed_dir} --config configs/data.yaml")
+    print(f"\n下一步（训练）:")
+    print(f"  python src/ml/train.py --hz 16 --model rf --processed_dir {processed_dir}")
 
 
 if __name__ == "__main__":
