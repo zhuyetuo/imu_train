@@ -149,7 +149,7 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         X_aligned = X
 
     # 提取特征 + 预测
-    feats = extract_features(X_aligned, model_hz)
+    feats = extract_features(X_aligned, model_hz, show_progress=not quiet and not scratch_only)
     probs = model.predict_proba(feats)
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
