@@ -78,13 +78,11 @@ def load_csv(path):
         raise ValueError(f"找不到加速度列: {list(df.columns)}")
     valid_mask = df[acc_cols].notnull().all(axis=1).values  # True = 有效行
     null_ratio = 1 - valid_mask.mean()
-    if null_ratio > 0.1:
-        print(f"  [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
     acc  = df[acc_cols].ffill().bfill().values.astype(np.float32)
     gyro = df[gyro_cols].ffill().bfill().values.astype(np.float32) if gyro_cols \
            else np.zeros((len(df), 3), dtype=np.float32)
     ts   = pd.to_datetime(df[ts_col], errors="coerce") if ts_col else None
-    return acc, gyro, ts, valid_mask
+    return acc, gyro, ts, valid_mask, null_ratio
 
 
 def downsample(data, device_hz, model_hz):
@@ -111,8 +109,11 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
-    acc, gyro, ts, valid_mask = load_csv(path)
-    print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
+    acc, gyro, ts, valid_mask, null_ratio = load_csv(path)
+    if not scratch_only:
+        print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
+        if null_ratio > 0.1:
+            print(f"  [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
 
     # 降采样
     acc_ds       = downsample(acc,        device_hz, model_hz)
@@ -137,10 +138,9 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         X            = X[valid_windows]
         start_indices = [s for s, v in zip(start_indices, valid_windows) if v]
         n_skipped = sum(not v for v in valid_windows)
-        if n_skipped:
+        if n_skipped and not scratch_only:
             print(f"  [过滤] 跳过 {n_skipped} 个缺失率>30% 的窗口")
     if len(X) == 0:
-        print("  [跳过] 数据不足一个窗口")
         return
 
     if gravity_aligned:
