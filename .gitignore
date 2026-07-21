@@ -12,6 +12,8 @@ data/raw_cat_smit2024/**
 !data/raw_cat_smit2024/.gitkeep
 data/processed/**
 !data/processed/.gitkeep
+data/synthetic/**
+!data/synthetic/.gitkeep
 results/
 *.zip
 *.mat
