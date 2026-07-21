@@ -102,7 +102,7 @@ def sliding_windows(data, window_size, stride):
 
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0):
+               confidence_threshold=0.0, quiet=False):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     print(f"\n── {display_name} ──")
     acc, gyro, ts = load_csv(path)
@@ -142,18 +142,20 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     seg_start_ts = None
     seg_start_i  = None
 
-    print(f"  {'时间':<22} {'预测':<6} {'置信度':>6}")
-    print(f"  {'-'*38}")
+    if not quiet:
+        print(f"  {'时间':<22} {'预测':<6} {'置信度':>6}")
+        print(f"  {'-'*38}")
 
     for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
         label = classes[pred_id]
         # 置信度低于阈值时，将抓挠预测视为非抓挠
         if label == "抓挠" and conf < confidence_threshold:
             label = f"({classes[pred_id]}?)"
-        t = idx_to_ts(start_i)
-        t_str = t.strftime("%Y-%m-%d %H:%M:%S") if t is not None else f"帧{start_i}"
-        marker = " ⬅ 抓挠" if label == "抓挠" else ""
-        print(f"  {t_str:<22} {label:<6} {conf:>6.2f}{marker}")
+        if not quiet:
+            t = idx_to_ts(start_i)
+            t_str = t.strftime("%Y-%m-%d %H:%M:%S") if t is not None else f"帧{start_i}"
+            marker = " ⬅ 抓挠" if label == "抓挠" else ""
+            print(f"  {t_str:<22} {label:<6} {conf:>6.2f}{marker}")
 
         # 合并连续抓挠片段
         if label == "抓挠" and not in_scratch:
@@ -171,15 +173,11 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     # 汇总
     n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
-    print(f"\n  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)")
-    if scratch_segs:
-        print(f"  【抓挠片段】")
-        for t0, t1, i0, i1 in scratch_segs:
-            t0s = t0.strftime("%H:%M:%S") if t0 is not None else f"帧{i0}"
-            t1s = t1.strftime("%H:%M:%S") if t1 is not None else f"帧{i1}"
-            print(f"    {t0s} → {t1s}")
-    else:
-        print("  【抓挠片段】未检测到抓挠")
+    seg_str = "  ".join(
+        f"{t0.strftime('%H:%M:%S') if t0 else f'帧{i0}'}→{t1.strftime('%H:%M:%S') if t1 else f'帧{i1}'}"
+        for t0, t1, i0, i1 in scratch_segs
+    ) if scratch_segs else "未检测到抓挠"
+    print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)  {seg_str}")
 
     return preds, classes, scratch_segs
 
@@ -200,6 +198,8 @@ def main():
                         help="步长秒数（0=从模型元数据读取，默认1.0）")
     parser.add_argument("--confidence_threshold", type=float, default=0.0,
                         help="置信度阈值，低于此值的预测忽略（默认0=不过滤，建议0.65-0.75）")
+    parser.add_argument("--quiet", action="store_true",
+                        help="只输出每个文件的汇总行，不打印逐窗口详情")
     parser.add_argument("--no_gravity_align", action="store_true")
     args = parser.parse_args()
 
@@ -254,7 +254,8 @@ def main():
         try:
             result = infer_file(path, model, classes, window_size, stride,
                                 device_hz, model_hz, gravity_aligned,
-                                confidence_threshold=args.confidence_threshold)
+                                confidence_threshold=args.confidence_threshold,
+                                quiet=args.quiet)
             if result:
                 preds, _, _ = result
                 all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
