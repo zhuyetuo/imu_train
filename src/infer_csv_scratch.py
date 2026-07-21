@@ -224,6 +224,8 @@ def main():
                         help="只输出每个文件的汇总行，不打印逐窗口详情")
     parser.add_argument("--scratch_only", action="store_true",
                         help="只输出检测到抓挠的文件，忽略无抓挠的文件")
+    parser.add_argument("--workers", type=int, default=-1,
+                        help="并行进程数（默认-1=用全部CPU核，1=单进程）")
     parser.add_argument("--no_gravity_align", action="store_true")
     args = parser.parse_args()
 
@@ -273,21 +275,31 @@ def main():
     print(f"\n共 {len(files)} 个文件")
 
     from tqdm import tqdm
+    from joblib import Parallel, delayed
+
+    def _run_one(path):
+        try:
+            return infer_file(path, model, classes, window_size, stride,
+                              device_hz, model_hz, gravity_aligned,
+                              confidence_threshold=args.confidence_threshold,
+                              quiet=args.quiet,
+                              scratch_only=args.scratch_only)
+        except Exception as e:
+            tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
+            return None
+
+    n_jobs = args.workers if args.workers > 0 else -1
+    results = Parallel(n_jobs=n_jobs, backend="loky")(
+        delayed(_run_one)(p) for p in tqdm(files, desc="推理进度", unit="文件")
+    )
+
     all_scratch = 0
     all_total   = 0
-    for path in tqdm(files, desc="推理进度", unit="文件"):
-        try:
-            result = infer_file(path, model, classes, window_size, stride,
-                                device_hz, model_hz, gravity_aligned,
-                                confidence_threshold=args.confidence_threshold,
-                                quiet=args.quiet,
-                                scratch_only=args.scratch_only)
-            if result:
-                preds, _, _ = result
-                all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
-                all_total   += len(preds)
-        except Exception as e:
-            print(f"  [错误] {e}")
+    for result in results:
+        if result:
+            preds, _, _ = result
+            all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
+            all_total   += len(preds)
 
     if len(files) > 1:
         print(f"\n{'='*50}")
