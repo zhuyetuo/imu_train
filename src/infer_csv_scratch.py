@@ -272,9 +272,10 @@ def main():
 
     print(f"\n共 {len(files)} 个文件")
 
+    from tqdm import tqdm
     all_scratch = 0
     all_total   = 0
-    for path in files:
+    for path in tqdm(files, desc="推理进度", unit="文件"):
         try:
             result = infer_file(path, model, classes, window_size, stride,
                                 device_hz, model_hz, gravity_aligned,
