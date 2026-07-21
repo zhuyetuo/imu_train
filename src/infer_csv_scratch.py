@@ -151,8 +151,8 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         # 置信度低于阈值时，将抓挠预测视为非抓挠
         if label == "抓挠" and conf < confidence_threshold:
             label = f"({classes[pred_id]}?)"
+        t = idx_to_ts(start_i)
         if not quiet:
-            t = idx_to_ts(start_i)
             t_str = t.strftime("%Y-%m-%d %H:%M:%S") if t is not None else f"帧{start_i}"
             marker = " ⬅ 抓挠" if label == "抓挠" else ""
             print(f"  {t_str:<22} {label:<6} {conf:>6.2f}{marker}")
