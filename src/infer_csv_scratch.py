@@ -107,9 +107,10 @@ def sliding_windows(data, window_size, stride):
 
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0, quiet=False):
+               confidence_threshold=0.0, quiet=False, scratch_only=False):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
-    print(f"\n── {display_name} ──")
+    if not scratch_only:
+        print(f"\n── {display_name} ──")
     acc, gyro, ts, valid_mask = load_csv(path)
     print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
 
@@ -190,10 +191,14 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     # 汇总
     n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
+    if scratch_only and not scratch_segs:
+        return preds, classes, scratch_segs
     seg_str = "  ".join(
         f"{t0.strftime('%H:%M:%S') if t0 else f'帧{i0}'}→{t1.strftime('%H:%M:%S') if t1 else f'帧{i1}'}"
         for t0, t1, i0, i1 in scratch_segs
     ) if scratch_segs else "未检测到抓挠"
+    if scratch_only:
+        print(f"\n── {display_name} ──")
     print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)  {seg_str}")
 
     return preds, classes, scratch_segs
@@ -217,6 +222,8 @@ def main():
                         help="置信度阈值，低于此值的预测忽略（默认0=不过滤，建议0.65-0.75）")
     parser.add_argument("--quiet", action="store_true",
                         help="只输出每个文件的汇总行，不打印逐窗口详情")
+    parser.add_argument("--scratch_only", action="store_true",
+                        help="只输出检测到抓挠的文件，忽略无抓挠的文件")
     parser.add_argument("--no_gravity_align", action="store_true")
     args = parser.parse_args()
 
@@ -272,7 +279,8 @@ def main():
             result = infer_file(path, model, classes, window_size, stride,
                                 device_hz, model_hz, gravity_aligned,
                                 confidence_threshold=args.confidence_threshold,
-                                quiet=args.quiet)
+                                quiet=args.quiet,
+                                scratch_only=args.scratch_only)
             if result:
                 preds, _, _ = result
                 all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
