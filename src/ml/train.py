@@ -141,13 +141,22 @@ def main(args):
         y_syn_val = np.full(n_val, syn_label_id, dtype=np.int64)
         y_syn_te  = np.full(n_te,  syn_label_id, dtype=np.int64)
 
-        # 降采样对齐 window_size（合成数据用50Hz，训练可能用25Hz）
-        src_hz = 50
-        if args.hz < src_hz:
-            step = src_hz // args.hz
-            X_syn_tr  = X_syn_tr[:,  ::step, :]
-            X_syn_val = X_syn_val[:, ::step, :]
-            X_syn_te  = X_syn_te[:,  ::step, :]
+        # 降采样对齐 window_size（合成数据 Hz 与训练 Hz 不同时才处理）
+        src_hz = args.synthetic_hz if args.synthetic_hz > 0 else args.hz
+        if src_hz != args.hz:
+            from math import gcd
+            g = gcd(src_hz, args.hz)
+            up, down = args.hz // g, src_hz // g
+            if up == 1:
+                step = down
+                X_syn_tr  = X_syn_tr[:,  ::step, :]
+                X_syn_val = X_syn_val[:, ::step, :]
+                X_syn_te  = X_syn_te[:,  ::step, :]
+            else:
+                from scipy.signal import resample_poly
+                X_syn_tr  = resample_poly(X_syn_tr,  up, down, axis=1).astype(np.float32)
+                X_syn_val = resample_poly(X_syn_val, up, down, axis=1).astype(np.float32)
+                X_syn_te  = resample_poly(X_syn_te,  up, down, axis=1).astype(np.float32)
 
         X_tr  = np.concatenate([X_tr,  X_syn_tr],  axis=0)
         X_val = np.concatenate([X_val, X_syn_val], axis=0)
@@ -277,4 +286,6 @@ if __name__ == "__main__":
                         help="合成数据 npz 路径（X 字段为窗口数组，追加为新类别）")
     parser.add_argument("--synthetic_label", default="抓挠",
                         help="合成数据的类别名称（默认：抓挠）")
+    parser.add_argument("--synthetic_hz", type=int, default=0,
+                        help="合成数据的采样率（默认0=与--hz相同，无需降采样）")
     main(parser.parse_args())
