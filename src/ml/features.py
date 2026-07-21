@@ -20,8 +20,8 @@ def _time_features(window: np.ndarray) -> np.ndarray:
             np.max(x),
             np.max(x) - np.min(x),
             np.sqrt(np.mean(x ** 2)),                   # RMS
-            stats.skew(x),
-            stats.kurtosis(x),
+            stats.skew(x) if np.std(x) > 1e-8 else 0.0,
+            stats.kurtosis(x) if np.std(x) > 1e-8 else 0.0,
             np.sum(np.diff(np.sign(x)) != 0),           # zero crossing rate
         ])
     return np.array(feats, dtype=np.float32)
