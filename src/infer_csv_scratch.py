@@ -80,8 +80,8 @@ def load_csv(path):
     null_ratio = 1 - valid_mask.mean()
     if null_ratio > 0.1:
         print(f"  [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
-    acc  = df[acc_cols].fillna(method="ffill").fillna(method="bfill").values.astype(np.float32)
-    gyro = df[gyro_cols].fillna(method="ffill").fillna(method="bfill").values.astype(np.float32) if gyro_cols \
+    acc  = df[acc_cols].ffill().bfill().values.astype(np.float32)
+    gyro = df[gyro_cols].ffill().bfill().values.astype(np.float32) if gyro_cols \
            else np.zeros((len(df), 3), dtype=np.float32)
     ts   = pd.to_datetime(df[ts_col], errors="coerce") if ts_col else None
     return acc, gyro, ts, valid_mask
