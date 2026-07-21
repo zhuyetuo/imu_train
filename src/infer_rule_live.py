@@ -197,8 +197,10 @@ def print_row(chip_ts: str, results: dict):
 # ── 滑动窗口推理器 ────────────────────────────────────────────────────────────
 class LiveInfer:
     def __init__(self, hz: int, window_s: float, stride_s: float, algos: list,
-                 conf_threshold: float = 0.0, use_gravity_align: bool = True):
+                 conf_threshold: float = 0.0, use_gravity_align: bool = True,
+                 model_hz: int = 0):
         self.hz                 = hz
+        self.model_hz           = model_hz if model_hz > 0 else hz
         self.window_n           = int(window_s * hz)
         self.stride_n           = int(stride_s * hz)
         self.algos              = algos   # list of (name, callable, has_conf)
@@ -208,6 +210,18 @@ class LiveInfer:
         self.gyro_ring = collections.deque(maxlen=self.window_n)
         self.counter   = 0
 
+    def _downsample(self, win: np.ndarray) -> np.ndarray:
+        """将窗口从设备 Hz 降采样到模型 Hz。"""
+        if self.model_hz == self.hz:
+            return win
+        from math import gcd
+        g = gcd(self.hz, self.model_hz)
+        up, down = self.model_hz // g, self.hz // g
+        if up == 1:
+            return win[::down]
+        from scipy.signal import resample_poly
+        return resample_poly(win, up, down, axis=0).astype(np.float32)
+
     def push(self, acc3: list, gyro3: list, ts: str):
         self.acc_ring.append(acc3)
         self.gyro_ring.append(gyro3)
@@ -216,6 +230,9 @@ class LiveInfer:
             self.counter = 0
             acc_win  = np.array(self.acc_ring,  dtype=np.float32)
             gyro_win = np.array(self.gyro_ring, dtype=np.float32)
+            # 降采样到模型训练 Hz
+            acc_win  = self._downsample(acc_win)
+            gyro_win = self._downsample(gyro_win)
             if self.use_gravity_align:
                 win6 = np.concatenate([acc_win, gyro_win], axis=1)
                 win6 = gravity_align(win6)
@@ -351,7 +368,9 @@ def main():
     parser.add_argument("--address",  default="", help="BLE MAC 地址")
     parser.add_argument("--name",     default="", help="WitMotion 设备名关键字（默认 WTSDCL）")
     parser.add_argument("--hz",       type=int, default=0,
-                        help="采样率（HICC默认25，WitMotion默认50，可按设备实际调整）")
+                        help="设备实际采样率（HICC默认25，WitMotion默认50）")
+    parser.add_argument("--model_hz", type=int, default=0,
+                        help="模型训练时的采样率（默认与--hz相同，不同时自动降采样）")
     parser.add_argument("--window_s", type=float, default=2.0, help="判断窗口长度（秒）")
     parser.add_argument("--stride_s", type=float, default=1.0, help="判断间隔（秒）")
     parser.add_argument("--algo",     nargs="+", default=["rule"],
@@ -389,13 +408,16 @@ def main():
             fn  = lambda acc, gyro, _clf=clf, _hz=hz: _clf.predict(acc, gyro, _hz)
             algos.append(("ML", fn, True))
 
-    use_ga = not args.no_gravity_align
+    use_ga   = not args.no_gravity_align
+    model_hz = args.model_hz or hz
     infer = LiveInfer(hz, args.window_s, args.stride_s, algos,
                       conf_threshold=args.confidence_threshold,
-                      use_gravity_align=use_ga)
+                      use_gravity_align=use_ga,
+                      model_hz=model_hz)
 
     ga_str = "开" if use_ga else "关"
-    print(f"推理参数: 算法={[name for name, _, _ in algos]}  采样率={hz}Hz  窗口={args.window_s}s  步长={args.stride_s}s  重力对齐={ga_str}")
+    ds_str = f"  设备→模型={hz}Hz→{model_hz}Hz" if model_hz != hz else ""
+    print(f"推理参数: 算法={[name for name, _, _ in algos]}  采样率={hz}Hz  窗口={args.window_s}s  步长={args.stride_s}s  重力对齐={ga_str}{ds_str}")
 
     if args.device == "hicc":
         run_hicc(args, infer)
