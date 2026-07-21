@@ -128,16 +128,63 @@ python src/infer_rule_live.py --device hicc --address AA:BB:CC:DD:EE:FF
 # 仅规则算法（自动扫描）
 python src/infer_rule_live.py --device wit --hz 20
 
-# 仅 ML 模型
-python src/infer_rule_live.py --device wit --hz 20 --algo ml \
-  --model results/processed_custom/20hz/ml_rf.pkl
+# 仅 ML 模型（设备 16Hz，模型也 16Hz）
+python src/infer_rule_live.py --device wit --hz 16 --algo ml \
+  --model results/processed_merged_all/16hz/ml_rf.pkl
+
+# 设备 100Hz，模型训练用 16Hz（自动降采样）
+python src/infer_rule_live.py --device wit --hz 100 --model_hz 16 --algo ml \
+  --model results/processed_merged_all/16hz/ml_rf.pkl
+
+# 设备 50Hz，模型训练用 16Hz（自动降采样）
+python src/infer_rule_live.py --device wit --hz 50 --model_hz 16 --algo ml \
+  --model results/processed_merged_all/16hz/ml_rf.pkl
 
 # 规则 + ML 并排对比
-python src/infer_rule_live.py --device wit --hz 20 --algo rule ml \
-  --model results/processed_custom/20hz/ml_rf.pkl
+python src/infer_rule_live.py --device wit --hz 50 --model_hz 16 --algo rule ml \
+  --model results/processed_merged_all/16hz/ml_rf.pkl
 
 # 指定 MAC 地址
-python src/infer_rule_live.py --device wit --hz 20 --address AA:BB:CC:DD:EE:FF
+python src/infer_rule_live.py --device wit --hz 50 --model_hz 16 --address AA:BB:CC:DD:EE:FF \
+  --algo ml --model results/processed_merged_all/16hz/ml_rf.pkl
+```
+
+> `--hz` 是设备实际采样率，`--model_hz` 是模型训练时的采样率，不同时自动降采样，无需修改设备配置。
+
+### 离线 CSV 推理（验证历史采集数据）
+
+对已录制的 CSV 文件批量推理，输出每个时间窗口的预测结果和抓挠片段汇总：
+
+```bash
+# 单个 CSV（设备采样率与模型一致）
+python src/infer_csv_scratch.py \
+  --csv data/raw_wit/multicam_20260715_084939_cam1_imu1_resampled16hz.csv \
+  --model results/processed_merged_all/16hz/ml_rf.pkl
+
+# 设备 100Hz CSV，模型训练用 16Hz（自动降采样）
+python src/infer_csv_scratch.py \
+  --csv data/raw_wit/rec_wit_20260629.csv \
+  --model results/processed_merged_all/16hz/ml_rf.pkl \
+  --device_hz 100 --model_hz 16
+
+# 批量处理目录下所有 imu1 CSV
+python src/infer_csv_scratch.py \
+  --csv_dir data/raw_wit/ \
+  --pattern "*imu1*.csv" \
+  --model results/processed_merged_all/16hz/ml_rf.pkl \
+  --device_hz 16
+```
+
+输出示例：
+```
+  时间                   预测    置信度
+  --------------------------------------
+  2026-07-15 08:52:37    活动     0.91
+  2026-07-15 08:52:39    抓挠     0.87  ⬅ 抓挠
+  2026-07-15 08:52:41    抓挠     0.92  ⬅ 抓挠
+
+  【抓挠片段】
+    08:52:39 → 08:52:43
 ```
 
 详细用法见各文档页。
