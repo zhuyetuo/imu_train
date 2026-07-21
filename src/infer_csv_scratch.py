@@ -76,10 +76,15 @@ def load_csv(path):
     ts_col    = find_ts_col(df.columns.tolist())
     if acc_cols is None:
         raise ValueError(f"找不到加速度列: {list(df.columns)}")
-    acc  = df[acc_cols].values.astype(np.float32)
-    gyro = df[gyro_cols].values.astype(np.float32) if gyro_cols else np.zeros((len(df), 3), dtype=np.float32)
+    valid_mask = df[acc_cols].notnull().all(axis=1).values  # True = 有效行
+    null_ratio = 1 - valid_mask.mean()
+    if null_ratio > 0.1:
+        print(f"  [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
+    acc  = df[acc_cols].fillna(method="ffill").fillna(method="bfill").values.astype(np.float32)
+    gyro = df[gyro_cols].fillna(method="ffill").fillna(method="bfill").values.astype(np.float32) if gyro_cols \
+           else np.zeros((len(df), 3), dtype=np.float32)
     ts   = pd.to_datetime(df[ts_col], errors="coerce") if ts_col else None
-    return acc, gyro, ts
+    return acc, gyro, ts, valid_mask
 
 
 def downsample(data, device_hz, model_hz):
@@ -105,12 +110,14 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
                confidence_threshold=0.0, quiet=False):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     print(f"\n── {display_name} ──")
-    acc, gyro, ts = load_csv(path)
+    acc, gyro, ts, valid_mask = load_csv(path)
     print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
 
     # 降采样
-    acc_ds  = downsample(acc,  device_hz, model_hz)
-    gyro_ds = downsample(gyro, device_hz, model_hz)
+    acc_ds       = downsample(acc,        device_hz, model_hz)
+    gyro_ds      = downsample(gyro,       device_hz, model_hz)
+    valid_mask_ds = downsample(valid_mask.astype(np.float32).reshape(-1, 1),
+                               device_hz, model_hz).reshape(-1) > 0.5
 
     # 时间戳对应（降采样后的索引 → 原始时间戳）
     ratio = device_hz / model_hz
@@ -118,9 +125,19 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         orig = min(int(i * ratio), len(ts) - 1) if ts is not None else -1
         return ts.iloc[orig] if ts is not None and orig >= 0 else None
 
-    # 重力对齐 + 滑窗
+    # 重力对齐 + 滑窗（跳过缺失率>30%的窗口）
     data6 = np.concatenate([acc_ds, gyro_ds], axis=1)
     X, start_indices = sliding_windows(data6, window_size, stride)
+    if len(X) > 0:
+        valid_windows = [
+            valid_mask_ds[s:s + window_size].mean() >= 0.7
+            for s in start_indices
+        ]
+        X            = X[valid_windows]
+        start_indices = [s for s, v in zip(start_indices, valid_windows) if v]
+        n_skipped = sum(not v for v in valid_windows)
+        if n_skipped:
+            print(f"  [过滤] 跳过 {n_skipped} 个缺失率>30% 的窗口")
     if len(X) == 0:
         print("  [跳过] 数据不足一个窗口")
         return
