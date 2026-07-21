@@ -27,6 +27,8 @@ import argparse
 import os
 import sys
 import glob
+import io
+import urllib.request
 from math import gcd
 
 import numpy as np
@@ -63,7 +65,11 @@ def find_ts_col(cols):
 
 
 def load_csv(path):
-    df = pd.read_csv(path)
+    if path.startswith("http://") or path.startswith("https://"):
+        with urllib.request.urlopen(path) as resp:
+            df = pd.read_csv(io.BytesIO(resp.read()))
+    else:
+        df = pd.read_csv(path)
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
     acc_cols  = find_cols(df.columns.tolist(), ACC_CANDIDATES)
     gyro_cols = find_cols(df.columns.tolist(), GYRO_CANDIDATES)
@@ -97,7 +103,8 @@ def sliding_windows(data, window_size, stride):
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0):
-    print(f"\n── {os.path.basename(path)} ──")
+    display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
+    print(f"\n── {display_name} ──")
     acc, gyro, ts = load_csv(path)
     print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
 
