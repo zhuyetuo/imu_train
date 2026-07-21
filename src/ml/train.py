@@ -123,9 +123,13 @@ def main(args):
     if args.synthetic:
         syn = np.load(args.synthetic)
         X_syn = syn["X"]                          # (N, window_size, 6)
-        syn_label_id = len(classes)               # 追加为新类别
         syn_label    = args.synthetic_label
-        classes      = classes + [syn_label]
+        if syn_label in classes:
+            syn_label_id = classes.index(syn_label)   # 合并到已有类别
+            print(f"[ml/train] 合成数据合并到已有类别 '{syn_label}'(id={syn_label_id})")
+        else:
+            syn_label_id = len(classes)               # 追加为新类别
+            classes      = classes + [syn_label]
 
         # 按 8:1:1 分配合成数据到 train/val/test
         n = len(X_syn)
