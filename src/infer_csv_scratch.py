@@ -105,7 +105,7 @@ def sliding_windows(data, window_size, stride):
 
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0, quiet=False, scratch_only=False):
+               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -193,13 +193,30 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
     if scratch_only and not scratch_segs:
         return preds, classes, scratch_segs
-    seg_str = "  ".join(
-        f"{t0.strftime('%H:%M:%S') if t0 else f'帧{i0}'}→{t1.strftime('%H:%M:%S') if t1 else f'帧{i1}'}"
-        for t0, t1, i0, i1 in scratch_segs
-    ) if scratch_segs else "未检测到抓挠"
+
+    # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）
+    merged = []
+    for t0, t1, i0, i1 in scratch_segs:
+        if merged and t0 is not None and merged[-1][1] is not None:
+            gap = (t0 - merged[-1][1]).total_seconds()
+            if gap <= merge_gap_s:
+                merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
+                continue
+        merged.append([t0, t1, i0, i1])
+
+    def fmt(t, i, suffix=""):
+        return t.strftime(f"%H:%M:%S{suffix}") if t else f"帧{i}"
+
+    seg_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in scratch_segs) \
+              if scratch_segs else "未检测到抓挠"
+    merged_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
+                 if merged else "未检测到抓挠"
+
     if scratch_only:
         print(f"\n── {display_name} ──")
-    print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)  {seg_str}")
+    print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)")
+    print(f"  【片段】{seg_str}")
+    print(f"  【合并】{merged_str}")
 
     return preds, classes, scratch_segs
 
@@ -224,6 +241,8 @@ def main():
                         help="只输出每个文件的汇总行，不打印逐窗口详情")
     parser.add_argument("--scratch_only", action="store_true",
                         help="只输出检测到抓挠的文件，忽略无抓挠的文件")
+    parser.add_argument("--merge_gap", type=float, default=10.0,
+                        help="合并相邻抓挠片段的最大间隔秒数（默认10s）")
     parser.add_argument("--workers", type=int, default=-1,
                         help="并行进程数（默认-1=用全部CPU核，1=单进程）")
     parser.add_argument("--no_gravity_align", action="store_true")
@@ -283,7 +302,8 @@ def main():
                               device_hz, model_hz, gravity_aligned,
                               confidence_threshold=args.confidence_threshold,
                               quiet=args.quiet,
-                              scratch_only=args.scratch_only)
+                              scratch_only=args.scratch_only,
+                              merge_gap_s=args.merge_gap)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None
