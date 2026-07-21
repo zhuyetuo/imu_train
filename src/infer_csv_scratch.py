@@ -95,7 +95,8 @@ def sliding_windows(data, window_size, stride):
     return np.stack(windows) if windows else np.empty((0, window_size, data.shape[1])), indices
 
 
-def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned):
+def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
+               confidence_threshold=0.0):
     print(f"\n── {os.path.basename(path)} ──")
     acc, gyro, ts = load_csv(path)
     print(f"  行数={len(acc)}  device_hz={device_hz}  model_hz={model_hz}")
@@ -139,6 +140,9 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
         label = classes[pred_id]
+        # 置信度低于阈值时，将抓挠预测视为非抓挠
+        if label == "抓挠" and conf < confidence_threshold:
+            label = f"({classes[pred_id]}?)"
         t = idx_to_ts(start_i)
         t_str = t.strftime("%Y-%m-%d %H:%M:%S") if t is not None else f"帧{start_i}"
         marker = " ⬅ 抓挠" if label == "抓挠" else ""
@@ -187,6 +191,8 @@ def main():
                         help="窗口秒数（0=从模型元数据读取，默认2.0）")
     parser.add_argument("--stride_s",  type=float, default=0,
                         help="步长秒数（0=从模型元数据读取，默认1.0）")
+    parser.add_argument("--confidence_threshold", type=float, default=0.0,
+                        help="置信度阈值，低于此值的预测忽略（默认0=不过滤，建议0.65-0.75）")
     parser.add_argument("--no_gravity_align", action="store_true")
     args = parser.parse_args()
 
@@ -240,7 +246,8 @@ def main():
     for path in files:
         try:
             result = infer_file(path, model, classes, window_size, stride,
-                                device_hz, model_hz, gravity_aligned)
+                                device_hz, model_hz, gravity_aligned,
+                                confidence_threshold=args.confidence_threshold)
             if result:
                 preds, _, _ = result
                 all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
