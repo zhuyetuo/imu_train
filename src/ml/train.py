@@ -103,6 +103,19 @@ def main(args):
     (X_tr, y_tr, _), (X_val, y_val, _), (X_te, y_te, _), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
 
+    # 打印映射前的类别分布
+    counts_tr0  = np.bincount(y_tr.astype(int),  minlength=len(classes))
+    counts_val0 = np.bincount(y_val.astype(int), minlength=len(classes))
+    counts_te0  = np.bincount(y_te.astype(int),  minlength=len(classes))
+    print(f"\n[ml/train] ── 原始类别分布（映射前）──")
+    print(f"  {'类别':<12} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
+    print(f"  {'-'*44}")
+    for i, cls in enumerate(classes):
+        total = int(counts_tr0[i] + counts_val0[i] + counts_te0[i])
+        print(f"  {cls:<12} {int(counts_tr0[i]):>8} {int(counts_val0[i]):>8} {int(counts_te0[i]):>8} {total:>8}")
+    print(f"  {'-'*44}")
+    print(f"  {'合计':<12} {int(counts_tr0.sum()):>8} {int(counts_val0.sum()):>8} {int(counts_te0.sum()):>8} {int(counts_tr0.sum()+counts_val0.sum()+counts_te0.sum()):>8}")
+
     # 标签重映射（用于合并类别，如 6类→2类）
     remap_cfg = None
     if args.remap:
@@ -110,7 +123,7 @@ def main(args):
             remap_cfg = yaml.safe_load(f)
         # 过滤掉注释行（以 # 开头的 key）
         remap_cfg = {k: v for k, v in remap_cfg.items() if not str(k).startswith("#")}
-        print(f"[ml/train] 标签重映射: {args.remap}")
+        print(f"\n[ml/train] 标签重映射: {args.remap}")
         for k, v in remap_cfg.items():
             print(f"  {k} → {v}")
         y_tr,  classes_new = apply_remap(y_tr,  classes, remap_cfg)
@@ -171,6 +184,26 @@ def main(args):
         print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
         print(f"[ml/train] 更新后类别: {classes}")
         print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
+
+    # 打印注入后的完整类别分布
+    counts_tr  = np.bincount(y_tr.astype(int),  minlength=len(classes))
+    counts_val = np.bincount(y_val.astype(int), minlength=len(classes))
+    counts_te  = np.bincount(y_te.astype(int),  minlength=len(classes))
+    print(f"\n[ml/train] ── 数据集类别分布（含合成数据）──")
+    print(f"  {'类别':<10} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
+    print(f"  {'-'*42}")
+    for i, cls in enumerate(classes):
+        total = int(counts_tr[i] + counts_val[i] + counts_te[i])
+        print(f"  {cls:<10} {int(counts_tr[i]):>8} {int(counts_val[i]):>8} {int(counts_te[i]):>8} {total:>8}")
+    print(f"  {'-'*42}")
+    print(f"  {'合计':<10} {int(counts_tr.sum()):>8} {int(counts_val.sum()):>8} {int(counts_te.sum()):>8} {int(counts_tr.sum()+counts_val.sum()+counts_te.sum()):>8}")
+    min_ratio = counts_tr.min() / counts_tr.sum()
+    if min_ratio < 0.1:
+        print(f"\n  [警告] 最少类别占训练集比例 {min_ratio*100:.1f}%，类别严重不均衡，建议补充数据或调整合成量")
+
+    if args.dry_run:
+        print(f"\n[ml/train] --dry_run 模式，已退出（未训练）")
+        return
 
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
@@ -292,4 +325,6 @@ if __name__ == "__main__":
                         help="合成数据的类别名称（默认：抓挠）")
     parser.add_argument("--synthetic_hz", type=int, default=0,
                         help="合成数据的采样率（默认0=与--hz相同，无需降采样）")
+    parser.add_argument("--dry_run", action="store_true",
+                        help="只打印数据集分布，不训练模型")
     main(parser.parse_args())

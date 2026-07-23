@@ -64,44 +64,123 @@ python run_experiments.py --ml_workers 8 --dl_workers 4
 
 每次在 Label Studio 补充标注后导出一个新 JSON，流程自动以 JSON 文件名命名数据集，不会覆盖旧版本。
 
-```bash
-# 以下示例用 project-24-at-2026-07-15-09-20-4a6a29c1.json，替换为你的实际文件名
+#### 步骤 0：分析标注质量
 
-# 步骤 0：分析标注质量（不需要下载 CSV，秒出结果）
+```bash
+# 单个 JSON（秒出结果，不需要下载 CSV）
 python src/data/analyze_annotations.py \
   --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json
-# 输出：各类别片段数、总时长、占比、估算可用窗口数及均衡性警告
 
-# 步骤 1：转换标注 JSON → 训练 CSV
-# --output 可省略，自动保存为 data/raw_custom/<json文件名>.csv
+# 多个 JSON 合并分析（先合并成一个临时文件再分析）
+python -c "
+import json, sys
+files = sys.argv[1:]
+merged = []
+for f in files:
+    merged += json.load(open(f))
+json.dump(merged, open('data/raw_custom/merged_tmp.json','w'), ensure_ascii=False)
+print(f'合并 {len(files)} 个JSON，共 {len(merged)} 条任务')
+" \
+  data/raw_custom/project-9-*.json \
+  data/raw_custom/project-24-*.json \
+  data/raw_custom/project-25-*.json
+
+python src/data/analyze_annotations.py \
+  --json data/raw_custom/merged_tmp.json
+# 输出：各类别片段数、总时长、占比、估算可用窗口数及均衡性警告
+```
+
+#### 步骤 1：转换标注 JSON → 训练 CSV
+
+```bash
+# 单个 JSON（--output 可省略，自动保存为 data/raw_custom/<json文件名>.csv）
 python src/data/labelstudio_to_custom.py \
   --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json \
   --csv_dir data/raw_wit/
-# 脚本执行完会打印步骤 2、3 的完整命令，直接复制运行即可
 
-# 步骤 2：预处理（将 <json文件名> 替换为实际值）
+# 多个 JSON 合并（先手动合并再转换，合并文件名即为数据集版本标识）
+python src/data/labelstudio_to_custom.py \
+  --json data/raw_custom/merged_tmp.json \
+  --output data/raw_custom/merged_20260715.csv \
+  --csv_dir data/raw_wit/
+# 脚本执行完会打印步骤 2、3 的完整命令，直接复制运行即可
+```
+
+#### 步骤 2：预处理
+
+```bash
 python src/data/preprocess.py \
   --dataset custom \
-  --raw_csv_custom data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.csv \
-  --output_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --raw_csv_custom data/raw_custom/merged_20260715.csv \
+  --output_dir data/processed_merged_20260715 \
   --config configs/data.yaml
 
-# 步骤 2.5：查看数据集类别分布
+# 查看类别分布（确认各类样本数是否均衡）
 python src/data/analyze_dataset.py \
-  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --processed_dir data/processed_merged_20260715 \
   --hz 16
+```
 
-# 步骤 3：训练（按设备实际采样率选 hz）
+#### 步骤 3（可选）：合成抓挠数据
+
+抓挠行为较短暂，标注数据通常不足。从真实标注片段生成增强数据：
+
+```bash
+python src/data/synthesize_scratch.py \
+  --csv1 data/raw_wit/multicam_20260715_084939_cam1_imu1_resampled16hz.csv \
+  --csv2 data/raw_wit/multicam_20260715_084939_cam2_imu2_resampled16hz.csv \
+  --output data/synthetic/scratch_synthetic.npz \
+  --hz 16 --n_aug 30
+# 输出：data/synthetic/scratch_synthetic.npz（约1600+个合成窗口）
+
+# 验证生成数量
+python -c "import numpy as np; d=np.load('data/synthetic/scratch_synthetic.npz'); print('合成窗口数:', d['X'].shape)"
+```
+
+> `synthesize_scratch.py` 内硬编码了真实抓挠片段的时间段（来自 task 472 标注），增强方式包括加噪声、幅值缩放、轴向翻转、时移、时间拉伸。
+
+#### 步骤 3.5：确认注入后的数据分布
+
+合成数据注入后类别比例会变，先用 `--dry_run` 看分布，确认均衡再正式训练：
+
+```bash
 python src/ml/train.py --hz 16 --model rf \
-  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --processed_dir data/processed_merged_20260715 \
+  --remap configs/remap_custom_3class.yaml \
+  --synthetic data/synthetic/scratch_synthetic.npz \
+  --synthetic_label 抓挠 \
+  --dry_run
+```
+
+输出示例：
+```
+[ml/train] ── 数据集类别分布（含合成数据）──
+  类别            训练      验证      测试      合计
+  ------------------------------------------
+  抓挠            1340       167       167      1674
+  活动            3200       400       400      4000
+  睡觉            1800       225       225      2250
+  ------------------------------------------
+  合计            6340       792       792      7924
+```
+
+各类别比例差距在 3 倍以内视为可接受，差距过大时可调整 `--n_aug` 重新生成合成数据。
+
+#### 步骤 4：训练
+
+```bash
+python src/ml/train.py --hz 16 --model rf \
+  --processed_dir data/processed_merged_20260715 \
   --remap configs/remap_custom_3class.yaml \
   --synthetic data/synthetic/scratch_synthetic.npz \
   --synthetic_label 抓挠
+# 模型保存至 results/processed_merged_20260715/16hz/ml_rf.pkl
 ```
 
 > - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
 > - 数据集采集用 25Hz、部署用 16Hz 时：预处理加 `--source_hz 25`，训练和推理都用 `--hz 16`
 > - 补充新数据后只需换 JSON 文件名重跑，旧版本数据完整保留
+> - 抓挠数据足够多后可去掉 `--synthetic`，直接用标注数据训练
 
 ### 标签映射（15类 → 3类）
 
