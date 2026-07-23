@@ -133,32 +133,27 @@ python src/data/analyze_dataset.py \
 
 某个类别窗口数偏少时，从当天 JSON 标注自动提取该类别的所有片段进行数据增强：
 
-> **重要**：`--target_windows` 应填**步骤 3.5 dry_run 输出里最大类别的实际训练窗口数**，而不是步骤 0 的估算值。
-> 步骤 0 的估算基于全量数据；但训练集因 subject 分割通常只有约 70–80% 的窗口，设太大会导致合成类别远超其他类别。
-
 ```bash
 DATE=2026_7_23
 
-# 先用 dry_run（不注入合成数据）查看各类别实际训练窗口数
-python src/ml/train.py --hz 16 --model rf \
-  --processed_dir "data/processed_${DATE}" \
-  --remap configs/remap_custom_3class.yaml \
-  --dry_run
-# 记下输出里最大类别的训练窗口数，例如 活动=223、睡觉=230 → 目标约 250
-
-# 合成抓挠数据，--target_windows 填上面查到的最大训练窗口数（略上浮 10-20% 即可）
+# 合成抓挠数据
+# 加上 --processed_dir 后脚本会自动从训练集推算合理的 target_windows，无需手动填写
 python src/data/synthesize_scratch.py \
   --json "data/raw_custom/${DATE}/merged_tmp.json" \
   --csv_dir data/raw_wit/ \
   --output "data/synthetic/scratch_${DATE}.npz" \
-  --label 抓挠 --hz 16 --n_aug 50 --target_windows 250
+  --processed_dir "data/processed_${DATE}" \
+  --remap configs/remap_custom_3class.yaml \
+  --label 抓挠 --hz 16 --n_aug 50
 
 # 合成其他少数类别（同理）
 python src/data/synthesize_scratch.py \
   --json "data/raw_custom/${DATE}/merged_tmp.json" \
   --csv_dir data/raw_wit/ \
   --output "data/synthetic/sleep_${DATE}.npz" \
-  --label 睡觉 --hz 16 --n_aug 50 --target_windows 250
+  --processed_dir "data/processed_${DATE}" \
+  --remap configs/remap_custom_3class.yaml \
+  --label 睡觉 --hz 16 --n_aug 50
 
 # 验证生成数量
 python -c "import numpy as np; d=np.load('data/synthetic/scratch_${DATE}.npz'); print('合成窗口数:', d['X'].shape)"
