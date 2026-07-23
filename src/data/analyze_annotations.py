@@ -119,15 +119,44 @@ def main():
             print(f"  {label}: {sec:.0f}s")
 
     # ── 估算窗口数 ────────────────────────────────────────
-    print(f"\n【估算可用窗口数】(窗口=2s, 步长=1s, 采样率=16Hz)")
+    WINDOW_S, STRIDE_S = 2, 1
+    print(f"\n【估算可用窗口数】(窗口={WINDOW_S}s, 步长={STRIDE_S}s, 采样率=16Hz)")
+    win_counts = {}
     for label in sorted(label_sec):
         sec = label_sec[label]
-        est_windows = max(0, int(sec - 2) + 1)  # 近似
-        print(f"  {label}: ~{est_windows} 个窗口", end="")
-        if est_windows < 30:
-            print(f"  ⚠️  偏少")
+        est = max(0, int(sec - WINDOW_S) + 1)
+        win_counts[label] = est
+        print(f"  {label}: ~{est} 个窗口")
+
+    # ── 合成数据建议 ──────────────────────────────────────
+    if win_counts:
+        max_wins  = max(win_counts.values())
+        # 目标：最少类别窗口数 >= max 的 50%（3倍以内差距）
+        TARGET_RATIO = 0.5
+        # 单类别绝对下限
+        ABS_MIN = 100
+        need_syn = []
+        for label, wins in sorted(win_counts.items()):
+            target = max(int(max_wins * TARGET_RATIO), ABS_MIN)
+            if wins < target:
+                need_aug = target - wins
+                # 估算 n_aug：每个原始片段约能切出 (duration/stride - window/stride + 1) 个窗口
+                # 粗估每片段平均 3 个原始窗口
+                raw_wins_per_seg = max(1, int(label_sec[label] / label_count[label] - WINDOW_S) + 1) \
+                                   if label_count[label] > 0 else 1
+                n_aug_needed = max(5, int(need_aug / max(1, wins) / max(1, raw_wins_per_seg))) + 1
+                need_syn.append((label, wins, target, n_aug_needed))
+
+        print(f"\n【合成数据建议】")
+        if not need_syn:
+            print(f"  ✅  各类别窗口数均衡，无需合成数据")
         else:
-            print()
+            for label, wins, target, n_aug in need_syn:
+                print(f"  ⚠️  {label}: 当前 ~{wins} 窗口，建议补充到 ~{target}，推荐命令：")
+                print(f"      python src/data/synthesize_scratch.py \\")
+                print(f"        --json <merged_tmp.json> --csv_dir data/raw_wit/ \\")
+                print(f"        --output data/synthetic/{label}_$(DATE).npz \\")
+                print(f"        --label {label} --hz 16 --n_aug {n_aug}")
 
     print()
 
