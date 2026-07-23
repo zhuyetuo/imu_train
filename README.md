@@ -136,19 +136,20 @@ python src/data/analyze_dataset.py \
 ```bash
 DATE=2026_7_23
 
-# 合成抓挠数据（从当天全部标注中提取抓挠片段）
+# 合成抓挠数据，--target_windows 填步骤0分析里最大类别的窗口数
+# 脚本会自动采样到目标数量，避免合成数据压过其他类别
 python src/data/synthesize_scratch.py \
   --json "data/raw_custom/${DATE}/merged_tmp.json" \
   --csv_dir data/raw_wit/ \
   --output "data/synthetic/scratch_${DATE}.npz" \
-  --label 抓挠 --hz 16 --n_aug 30
+  --label 抓挠 --hz 16 --n_aug 50 --target_windows 2000
 
-# 合成其他少数类别（同理，换 --label 即可）
+# 合成其他少数类别（同理，--target_windows 填目标窗口数）
 python src/data/synthesize_scratch.py \
   --json "data/raw_custom/${DATE}/merged_tmp.json" \
   --csv_dir data/raw_wit/ \
   --output "data/synthetic/sleep_${DATE}.npz" \
-  --label 睡觉 --hz 16 --n_aug 10
+  --label 睡觉 --hz 16 --n_aug 50 --target_windows 2000
 
 # 验证生成数量
 python -c "import numpy as np; d=np.load('data/synthetic/scratch_${DATE}.npz'); print('合成窗口数:', d['X'].shape)"
