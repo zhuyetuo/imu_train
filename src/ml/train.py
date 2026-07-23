@@ -103,6 +103,19 @@ def main(args):
     (X_tr, y_tr, _), (X_val, y_val, _), (X_te, y_te, _), meta = load_all_splits(args.hz, args.processed_dir)
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
 
+    # 打印映射前的类别分布
+    counts_tr0  = np.bincount(y_tr.astype(int),  minlength=len(classes))
+    counts_val0 = np.bincount(y_val.astype(int), minlength=len(classes))
+    counts_te0  = np.bincount(y_te.astype(int),  minlength=len(classes))
+    print(f"\n[ml/train] ── 原始类别分布（映射前）──")
+    print(f"  {'类别':<12} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
+    print(f"  {'-'*44}")
+    for i, cls in enumerate(classes):
+        total = int(counts_tr0[i] + counts_val0[i] + counts_te0[i])
+        print(f"  {cls:<12} {int(counts_tr0[i]):>8} {int(counts_val0[i]):>8} {int(counts_te0[i]):>8} {total:>8}")
+    print(f"  {'-'*44}")
+    print(f"  {'合计':<12} {int(counts_tr0.sum()):>8} {int(counts_val0.sum()):>8} {int(counts_te0.sum()):>8} {int(counts_tr0.sum()+counts_val0.sum()+counts_te0.sum()):>8}")
+
     # 标签重映射（用于合并类别，如 6类→2类）
     remap_cfg = None
     if args.remap:
@@ -110,7 +123,7 @@ def main(args):
             remap_cfg = yaml.safe_load(f)
         # 过滤掉注释行（以 # 开头的 key）
         remap_cfg = {k: v for k, v in remap_cfg.items() if not str(k).startswith("#")}
-        print(f"[ml/train] 标签重映射: {args.remap}")
+        print(f"\n[ml/train] 标签重映射: {args.remap}")
         for k, v in remap_cfg.items():
             print(f"  {k} → {v}")
         y_tr,  classes_new = apply_remap(y_tr,  classes, remap_cfg)
