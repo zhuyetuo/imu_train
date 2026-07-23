@@ -172,6 +172,26 @@ def main(args):
         print(f"[ml/train] 更新后类别: {classes}")
         print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
 
+    # 打印注入后的完整类别分布
+    counts_tr  = np.bincount(y_tr.astype(int),  minlength=len(classes))
+    counts_val = np.bincount(y_val.astype(int), minlength=len(classes))
+    counts_te  = np.bincount(y_te.astype(int),  minlength=len(classes))
+    print(f"\n[ml/train] ── 数据集类别分布（含合成数据）──")
+    print(f"  {'类别':<10} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
+    print(f"  {'-'*42}")
+    for i, cls in enumerate(classes):
+        total = int(counts_tr[i] + counts_val[i] + counts_te[i])
+        print(f"  {cls:<10} {int(counts_tr[i]):>8} {int(counts_val[i]):>8} {int(counts_te[i]):>8} {total:>8}")
+    print(f"  {'-'*42}")
+    print(f"  {'合计':<10} {int(counts_tr.sum()):>8} {int(counts_val.sum()):>8} {int(counts_te.sum()):>8} {int(counts_tr.sum()+counts_val.sum()+counts_te.sum()):>8}")
+    min_ratio = counts_tr.min() / counts_tr.sum()
+    if min_ratio < 0.1:
+        print(f"\n  [警告] 最少类别占训练集比例 {min_ratio*100:.1f}%，类别严重不均衡，建议补充数据或调整合成量")
+
+    if args.dry_run:
+        print(f"\n[ml/train] --dry_run 模式，已退出（未训练）")
+        return
+
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
 
@@ -292,4 +312,6 @@ if __name__ == "__main__":
                         help="合成数据的类别名称（默认：抓挠）")
     parser.add_argument("--synthetic_hz", type=int, default=0,
                         help="合成数据的采样率（默认0=与--hz相同，无需降采样）")
+    parser.add_argument("--dry_run", action="store_true",
+                        help="只打印数据集分布，不训练模型")
     main(parser.parse_args())

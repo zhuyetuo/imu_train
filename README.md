@@ -139,6 +139,33 @@ python -c "import numpy as np; d=np.load('data/synthetic/scratch_synthetic.npz')
 
 > `synthesize_scratch.py` 内硬编码了真实抓挠片段的时间段（来自 task 472 标注），增强方式包括加噪声、幅值缩放、轴向翻转、时移、时间拉伸。
 
+#### 步骤 3.5：确认注入后的数据分布
+
+合成数据注入后类别比例会变，先用 `--dry_run` 看分布，确认均衡再正式训练：
+
+```bash
+python src/ml/train.py --hz 16 --model rf \
+  --processed_dir data/processed_merged_20260715 \
+  --remap configs/remap_custom_3class.yaml \
+  --synthetic data/synthetic/scratch_synthetic.npz \
+  --synthetic_label 抓挠 \
+  --dry_run
+```
+
+输出示例：
+```
+[ml/train] ── 数据集类别分布（含合成数据）──
+  类别            训练      验证      测试      合计
+  ------------------------------------------
+  抓挠            1340       167       167      1674
+  活动            3200       400       400      4000
+  睡觉            1800       225       225      2250
+  ------------------------------------------
+  合计            6340       792       792      7924
+```
+
+各类别比例差距在 3 倍以内视为可接受，差距过大时可调整 `--n_aug` 重新生成合成数据。
+
 #### 步骤 4：训练
 
 ```bash
