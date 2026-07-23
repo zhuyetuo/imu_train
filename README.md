@@ -129,23 +129,32 @@ python src/data/analyze_dataset.py \
   --hz 16
 ```
 
-#### 步骤 3（可选）：合成抓挠数据
+#### 步骤 3（可选）：合成少数类别数据
 
-抓挠行为较短暂，标注数据通常不足。从真实标注片段生成增强数据：
+某个类别窗口数偏少时，从当天 JSON 标注自动提取该类别的所有片段进行数据增强：
 
 ```bash
+DATE=2026_7_23
+
+# 合成抓挠数据（从当天全部标注中提取抓挠片段）
 python src/data/synthesize_scratch.py \
-  --csv1 data/raw_wit/multicam_20260715_084939_cam1_imu1_resampled16hz.csv \
-  --csv2 data/raw_wit/multicam_20260715_084939_cam2_imu2_resampled16hz.csv \
-  --output data/synthetic/scratch_synthetic.npz \
-  --hz 16 --n_aug 30
-# 输出：data/synthetic/scratch_synthetic.npz（约1600+个合成窗口）
+  --json "data/raw_custom/${DATE}/merged_tmp.json" \
+  --csv_dir data/raw_wit/ \
+  --output "data/synthetic/scratch_${DATE}.npz" \
+  --label 抓挠 --hz 16 --n_aug 30
+
+# 合成其他少数类别（同理，换 --label 即可）
+python src/data/synthesize_scratch.py \
+  --json "data/raw_custom/${DATE}/merged_tmp.json" \
+  --csv_dir data/raw_wit/ \
+  --output "data/synthetic/sleep_${DATE}.npz" \
+  --label 睡觉 --hz 16 --n_aug 10
 
 # 验证生成数量
-python -c "import numpy as np; d=np.load('data/synthetic/scratch_synthetic.npz'); print('合成窗口数:', d['X'].shape)"
+python -c "import numpy as np; d=np.load('data/synthetic/scratch_${DATE}.npz'); print('合成窗口数:', d['X'].shape)"
 ```
 
-> `synthesize_scratch.py` 内硬编码了真实抓挠片段的时间段（来自 task 472 标注），增强方式包括加噪声、幅值缩放、轴向翻转、时移、时间拉伸。
+> 增强方式：加高斯噪声、幅值缩放（±15%）、轴向翻转、循环时移、时间拉伸。自动从 JSON 读取标注时间段，无需硬编码。
 
 #### 步骤 3.5：确认注入后的数据分布
 
@@ -157,7 +166,7 @@ DATE=2026_7_23
 python src/ml/train.py --hz 16 --model rf \
   --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
-  --synthetic data/synthetic/scratch_synthetic.npz \
+  --synthetic "data/synthetic/scratch_${DATE}.npz" \
   --synthetic_label 抓挠 \
   --dry_run
 ```
@@ -193,7 +202,7 @@ DATE=2026_7_23
 python src/ml/train.py --hz 16 --model rf \
   --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
-  --synthetic data/synthetic/scratch_synthetic.npz \
+  --synthetic "data/synthetic/scratch_${DATE}.npz" \
   --synthetic_label 抓挠
 # 模型保存至 results/processed_${DATE}/16hz/ml_rf.pkl
 ```
