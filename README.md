@@ -93,12 +93,39 @@ python src/data/analyze_dataset.py \
 
 # 步骤 3：训练（按设备实际采样率选 hz）
 python src/ml/train.py --hz 16 --model rf \
-  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1
+  --processed_dir data/processed_project-24-at-2026-07-15-09-20-4a6a29c1 \
+  --remap configs/remap_custom_3class.yaml \
+  --synthetic data/synthetic/scratch_synthetic.npz \
+  --synthetic_label 抓挠
 ```
 
 > - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
 > - 数据集采集用 25Hz、部署用 16Hz 时：预处理加 `--source_hz 25`，训练和推理都用 `--hz 16`
 > - 补充新数据后只需换 JSON 文件名重跑，旧版本数据完整保留
+
+### 标签映射（15类 → 3类）
+
+Label Studio 中支持全部标签正常标注，训练时通过 `configs/remap_custom_3class.yaml` 自动合并：
+
+| Label Studio 标签 | 训练类别 | 说明 |
+|------------------|---------|------|
+| 活动 | 活动 | |
+| 睡觉 | 睡觉 | |
+| 抓挠 | 抓挠 | |
+| 甩身体 | 活动 | |
+| 跳跃 | 活动 | |
+| 舔身体 | 活动 | |
+| 啃身体 | 活动 | |
+| 奔跑 | 活动 | |
+| 行走 | 活动 | |
+| 进食 | 活动 | |
+| 饮水 | 活动 | |
+| 蹭擦身体 | 活动 | |
+| 嗅闻 | 活动 | |
+| 戴摘项圈 | 活动 | |
+| 伸懒腰 | 活动 | |
+
+> 数据积累到足够量后，删除 remap 文件中对应行即可将该类别拆出独立训练，无需修改其他代码。
 
 ### 实时 BLE 推理
 
