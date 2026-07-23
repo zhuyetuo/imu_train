@@ -223,6 +223,8 @@ def main():
     parser.add_argument("--window_s", type=float, default=2.0, help="窗口秒数（默认 2.0）")
     parser.add_argument("--stride_s", type=float, default=1.0, help="步长秒数（默认 1.0）")
     parser.add_argument("--n_aug",    type=int,   default=30,  help="每个原始片段生成的增强数量（默认 30）")
+    parser.add_argument("--target_windows", type=int, default=0,
+                        help="目标窗口总数（0=不限制，建议设为最大类别的训练窗口数）")
     parser.add_argument("--seed",     type=int,   default=42)
     args = parser.parse_args()
 
@@ -258,6 +260,14 @@ def main():
     if not all_windows:
         print("[错误] 没有生成任何窗口")
         return
+
+    # 按目标数量随机采样，避免合成数据压过真实数据
+    if args.target_windows > 0 and len(all_windows) > args.target_windows:
+        idx = rng.choice(len(all_windows), size=args.target_windows, replace=False)
+        all_windows = [all_windows[i] for i in idx]
+        print(f"采样到目标窗口数: {len(all_windows)} 个（原 {len(raw_windows) + len(aug_windows)} 个）")
+    elif args.target_windows > 0:
+        print(f"[提示] 生成窗口数 {len(all_windows)} 少于目标 {args.target_windows}，可调大 --n_aug")
 
     X = np.stack(all_windows, axis=0)
     print(f"\n输出形状: {X.shape}")

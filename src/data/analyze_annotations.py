@@ -139,24 +139,19 @@ def main():
         for label, wins in sorted(win_counts.items()):
             target = max(int(max_wins * TARGET_RATIO), ABS_MIN)
             if wins < target:
-                need_aug = target - wins
-                # 估算 n_aug：每个原始片段约能切出 (duration/stride - window/stride + 1) 个窗口
-                # 粗估每片段平均 3 个原始窗口
-                raw_wins_per_seg = max(1, int(label_sec[label] / label_count[label] - WINDOW_S) + 1) \
-                                   if label_count[label] > 0 else 1
-                n_aug_needed = max(5, int(need_aug / max(1, wins) / max(1, raw_wins_per_seg))) + 1
-                need_syn.append((label, wins, target, n_aug_needed))
+                need_syn.append((label, wins, target))
 
         print(f"\n【合成数据建议】")
         if not need_syn:
             print(f"  ✅  各类别窗口数均衡，无需合成数据")
         else:
-            for label, wins, target, n_aug in need_syn:
-                print(f"  ⚠️  {label}: 当前 ~{wins} 窗口，建议补充到 ~{target}，推荐命令：")
+            for label, wins, target in need_syn:
+                shortage = target - wins
+                print(f"  ⚠️  {label}: 当前 ~{wins} 窗口，目标 ~{target}（还差 ~{shortage}），推荐命令：")
                 print(f"      python src/data/synthesize_scratch.py \\")
                 print(f"        --json <merged_tmp.json> --csv_dir data/raw_wit/ \\")
-                print(f"        --output data/synthetic/{label}_$(DATE).npz \\")
-                print(f"        --label {label} --hz 16 --n_aug {n_aug}")
+                print(f"        --output data/synthetic/{label}_<DATE>.npz \\")
+                print(f"        --label {label} --hz 16 --n_aug 50 --target_windows {target}")
 
     print()
 
