@@ -22,7 +22,7 @@ imu_train/
 ├── data/
 │   ├── raw/                     ← 数据集A原始文件（不入 git）
 │   ├── raw_b/                   ← 数据集B原始文件
-│   ├── raw_custom/              ← 自采数据集
+│   ├── raw_custom/              ← 自采数据集（按日期子目录存放 JSON）
 │   ├── raw_cat_dunford2024/     ← 猫咪数据集
 │   ├── infer/                   ← 待推理的无标签 TXT/CSV 文件
 │   └── processed_*/             ← 预处理结果（自动生成）
@@ -62,46 +62,52 @@ python run_experiments.py --ml_workers 8 --dl_workers 4
 
 ### 自采数据训练
 
-每次在 Label Studio 补充标注后导出一个新 JSON，流程自动以 JSON 文件名命名数据集，不会覆盖旧版本。
+每次标注完成后从 Label Studio 导出 JSON，**按日期放入对应子目录**，方便管理多次导出：
+
+```
+data/raw_custom/
+├── 2026_7_15/
+│   ├── project-24-at-2026-07-15-09-20-4a6a29c1.json
+│   └── project-9-at-2026-07-15-....json
+├── 2026_7_23/
+│   └── project-25-at-2026-07-23-....json
+└── ...
+```
+
+以下示例以 `DATE=2026_7_23` 为当天日期，替换为实际值即可。
 
 #### 步骤 0：分析标注质量
 
 ```bash
-# 单个 JSON（秒出结果，不需要下载 CSV）
-python src/data/analyze_annotations.py \
-  --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json
+DATE=2026_7_23
 
-# 多个 JSON 合并分析（先合并成一个临时文件再分析）
+# 分析当天所有 JSON（合并后分析）
 python -c "
-import json, sys
-files = sys.argv[1:]
+import json, glob, sys
+files = glob.glob(sys.argv[1])
 merged = []
-for f in files:
+for f in sorted(files):
     merged += json.load(open(f))
-json.dump(merged, open('data/raw_custom/merged_tmp.json','w'), ensure_ascii=False)
-print(f'合并 {len(files)} 个JSON，共 {len(merged)} 条任务')
+    print(f'  加载: {f}')
+json.dump(merged, open(sys.argv[2], 'w'), ensure_ascii=False)
+print(f'合并完成，共 {len(merged)} 条任务')
 " \
-  data/raw_custom/project-9-*.json \
-  data/raw_custom/project-24-*.json \
-  data/raw_custom/project-25-*.json
+  "data/raw_custom/${DATE}/*.json" \
+  "data/raw_custom/${DATE}/merged_tmp.json"
 
 python src/data/analyze_annotations.py \
-  --json data/raw_custom/merged_tmp.json
+  --json "data/raw_custom/${DATE}/merged_tmp.json"
 # 输出：各类别片段数、总时长、占比、估算可用窗口数及均衡性警告
 ```
 
 #### 步骤 1：转换标注 JSON → 训练 CSV
 
 ```bash
-# 单个 JSON（--output 可省略，自动保存为 data/raw_custom/<json文件名>.csv）
-python src/data/labelstudio_to_custom.py \
-  --json data/raw_custom/project-24-at-2026-07-15-09-20-4a6a29c1.json \
-  --csv_dir data/raw_wit/
+DATE=2026_7_23
 
-# 多个 JSON 合并（先手动合并再转换，合并文件名即为数据集版本标识）
 python src/data/labelstudio_to_custom.py \
-  --json data/raw_custom/merged_tmp.json \
-  --output data/raw_custom/merged_20260715.csv \
+  --json "data/raw_custom/${DATE}/merged_tmp.json" \
+  --output "data/raw_custom/${DATE}/merged_${DATE}.csv" \
   --csv_dir data/raw_wit/
 # 脚本执行完会打印步骤 2、3 的完整命令，直接复制运行即可
 ```
@@ -109,15 +115,17 @@ python src/data/labelstudio_to_custom.py \
 #### 步骤 2：预处理
 
 ```bash
+DATE=2026_7_23
+
 python src/data/preprocess.py \
   --dataset custom \
-  --raw_csv_custom data/raw_custom/merged_20260715.csv \
-  --output_dir data/processed_merged_20260715 \
+  --raw_csv_custom "data/raw_custom/${DATE}/merged_${DATE}.csv" \
+  --output_dir "data/processed_${DATE}" \
   --config configs/data.yaml
 
 # 查看类别分布（确认各类样本数是否均衡）
 python src/data/analyze_dataset.py \
-  --processed_dir data/processed_merged_20260715 \
+  --processed_dir "data/processed_${DATE}" \
   --hz 16
 ```
 
@@ -144,8 +152,10 @@ python -c "import numpy as np; d=np.load('data/synthetic/scratch_synthetic.npz')
 合成数据注入后类别比例会变，先用 `--dry_run` 看分布，确认均衡再正式训练：
 
 ```bash
+DATE=2026_7_23
+
 python src/ml/train.py --hz 16 --model rf \
-  --processed_dir data/processed_merged_20260715 \
+  --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
   --synthetic data/synthetic/scratch_synthetic.npz \
   --synthetic_label 抓挠 \
@@ -154,6 +164,15 @@ python src/ml/train.py --hz 16 --model rf \
 
 输出示例：
 ```
+[ml/train] ── 原始类别分布（映射前）──
+  类别              训练      验证      测试      合计
+  --------------------------------------------
+  活动               800       100       100      1000
+  睡觉               600        75        75       750
+  抓挠                64         8         8        80
+  甩身体              96        12        12       120
+  ...
+
 [ml/train] ── 数据集类别分布（含合成数据）──
   类别            训练      验证      测试      合计
   ------------------------------------------
@@ -169,12 +188,14 @@ python src/ml/train.py --hz 16 --model rf \
 #### 步骤 4：训练
 
 ```bash
+DATE=2026_7_23
+
 python src/ml/train.py --hz 16 --model rf \
-  --processed_dir data/processed_merged_20260715 \
+  --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
   --synthetic data/synthetic/scratch_synthetic.npz \
   --synthetic_label 抓挠
-# 模型保存至 results/processed_merged_20260715/16hz/ml_rf.pkl
+# 模型保存至 results/processed_${DATE}/16hz/ml_rf.pkl
 ```
 
 > - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
