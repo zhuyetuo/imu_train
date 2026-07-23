@@ -213,6 +213,43 @@ def sliding_windows(data, window_size, stride):
     return wins
 
 
+def _auto_target_from_processed(processed_dir, hz, label, remap_cfg=None):
+    """读取已预处理的训练集，返回（去掉 label 类后）最大类别的训练窗口数。"""
+    import sys, os as _os
+    sys.path.insert(0, _os.path.join(_os.path.dirname(__file__)))
+    try:
+        from dataset import load_all_splits
+    except ImportError:
+        sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "../ml"))
+        from dataset import load_all_splits  # type: ignore
+
+    try:
+        (_, y_tr, _), _, _, meta = load_all_splits(hz, processed_dir)
+    except Exception as e:
+        print(f"  [auto_target] 无法读取 processed_dir: {e}")
+        return 0
+
+    classes = meta.get("classes", [])
+    if remap_cfg:
+        # 应用 remap 后统计
+        remap = {}
+        for src, dst in remap_cfg.items():
+            if src in classes and dst in classes:
+                remap[classes.index(src)] = classes.index(dst)
+        y_remapped = np.array([remap.get(int(v), int(v)) for v in y_tr])
+        counts = np.bincount(y_remapped, minlength=len(classes))
+    else:
+        counts = np.bincount(y_tr.astype(int), minlength=len(classes))
+
+    # 排除要合成的 label 本身（它的真实数据可能很少）
+    label_idx = classes.index(label) if label in classes else -1
+    other_counts = [c for i, c in enumerate(counts) if i != label_idx]
+    target = int(max(other_counts)) if other_counts else 0
+    print(f"  [auto_target] 各类训练窗口数: { {classes[i]: int(counts[i]) for i in range(len(classes))} }")
+    print(f"  [auto_target] 自动设置 target_windows = {target}（最大的其他类别窗口数）")
+    return target
+
+
 def main():
     parser = argparse.ArgumentParser(description="从 Label Studio JSON 生成指定类别的合成数据")
     parser.add_argument("--json",     required=True, help="Label Studio 导出的 JSON（支持 merged_tmp.json）")
@@ -223,8 +260,11 @@ def main():
     parser.add_argument("--window_s", type=float, default=2.0, help="窗口秒数（默认 2.0）")
     parser.add_argument("--stride_s", type=float, default=1.0, help="步长秒数（默认 1.0）")
     parser.add_argument("--n_aug",    type=int,   default=30,  help="每个原始片段生成的增强数量（默认 30）")
-    parser.add_argument("--target_windows", type=int, default=0,
-                        help="目标窗口总数（0=不限制，建议设为最大类别的训练窗口数）")
+    parser.add_argument("--target_windows", type=int, default=-1,
+                        help="目标窗口总数（默认-1=自动从 processed_dir 推算；0=不限制；正整数=手动指定）")
+    parser.add_argument("--processed_dir", default="",
+                        help="已预处理的数据目录，用于自动推算 target_windows（默认：自动推算时必填）")
+    parser.add_argument("--remap",    default="",   help="remap YAML 路径（用于自动推算时的类别映射）")
     parser.add_argument("--seed",     type=int,   default=42)
     args = parser.parse_args()
 
@@ -232,6 +272,24 @@ def main():
     window_size = int(args.window_s * args.hz)
     stride      = int(args.stride_s * args.hz)
     print(f"目标类别='{args.label}'  窗口={window_size}点  步长={stride}点  采样率={args.hz}Hz")
+
+    # 自动推算 target_windows
+    target_windows = args.target_windows
+    if target_windows == -1:
+        if args.processed_dir:
+            remap_cfg = None
+            if args.remap and os.path.exists(args.remap):
+                import yaml
+                with open(args.remap, encoding="utf-8") as f:
+                    remap_cfg = yaml.safe_load(f)
+            target_windows = _auto_target_from_processed(
+                args.processed_dir, args.hz, args.label, remap_cfg)
+            if target_windows == 0:
+                print("  [auto_target] 推算失败，将不限制窗口数")
+        else:
+            print("  [提示] 未指定 --processed_dir，无法自动推算 target_windows，将不限制窗口数")
+            print("         建议加上 --processed_dir data/processed_<DATE> 让脚本自动计算")
+            target_windows = 0
 
     with open(args.json, encoding="utf-8") as f:
         tasks = json.load(f)
@@ -262,12 +320,12 @@ def main():
         return
 
     # 按目标数量随机采样，避免合成数据压过真实数据
-    if args.target_windows > 0 and len(all_windows) > args.target_windows:
-        idx = rng.choice(len(all_windows), size=args.target_windows, replace=False)
+    if target_windows > 0 and len(all_windows) > target_windows:
+        idx = rng.choice(len(all_windows), size=target_windows, replace=False)
         all_windows = [all_windows[i] for i in idx]
         print(f"采样到目标窗口数: {len(all_windows)} 个（原 {len(raw_windows) + len(aug_windows)} 个）")
-    elif args.target_windows > 0:
-        print(f"[提示] 生成窗口数 {len(all_windows)} 少于目标 {args.target_windows}，可调大 --n_aug")
+    elif target_windows > 0:
+        print(f"[提示] 生成窗口数 {len(all_windows)} 少于目标 {target_windows}，可调大 --n_aug")
 
     X = np.stack(all_windows, axis=0)
     print(f"\n输出形状: {X.shape}")
