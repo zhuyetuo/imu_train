@@ -101,6 +101,54 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
             X_all[i_test],  y_all[i_test],  y_seq_all[i_test])
 
 
+def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
+    """按类别拼接所有片段后滑窗：同类别的所有片段拼在一起，边界处跳过跨片段窗口。"""
+    from collections import defaultdict as _dd
+    label_segments = _dd(list)   # label_id → list of (N,6) arrays
+
+    keep_enc = set(le.transform(list(keep_label_set))) if keep_label_set else None
+
+    for r in records:
+        data, labels = r["data"], r["labels"]
+        # 找出连续的同标签片段
+        i = 0
+        n = len(data)
+        while i < n:
+            lbl = labels[i]
+            if keep_label_set and lbl not in keep_label_set:
+                i += 1
+                continue
+            j = i + 1
+            while j < n and labels[j] == lbl:
+                j += 1
+            seg = data[i:j]
+            if len(seg) >= window_size:
+                lbl_id = le.transform([lbl])[0]
+                label_segments[lbl_id].append(seg)
+            i = j
+
+    X_all, y_all, y_seq_all = [], [], []
+    for lbl_id, segs in sorted(label_segments.items()):
+        for seg in segs:
+            wins = []
+            for start in range(0, len(seg) - window_size + 1, stride):
+                wins.append(seg[start:start + window_size])
+            if not wins:
+                continue
+            arr = np.array(wins, dtype=np.float32)
+            if use_gravity_align:
+                arr = gravity_align_batch(arr)
+            X_all.append(arr)
+            y_all.append(np.full(len(arr), lbl_id, dtype=np.int64))
+            y_seq_all.append(np.tile(
+                np.full(window_size, lbl_id, dtype=np.int64), (len(arr), 1)
+            ))
+
+    if not X_all:
+        return np.empty((0,)), np.empty((0,)), np.empty((0,))
+    return np.concatenate(X_all), np.concatenate(y_all), np.concatenate(y_seq_all)
+
+
 def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
     X_all, y_all, y_seq_all = [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
@@ -210,6 +258,9 @@ def main(args):
     if strategy == "subject":
         train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
         print(f"[preprocess] 按 subject 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
+    elif strategy == "label_concat":
+        train_ids = val_ids = test_ids = None
+        print(f"[preprocess] 按类别拼接滑窗: train={train_r:.0%} / val={val_r:.0%} / test={1-train_r-val_r:.0%}")
     else:
         train_ids = val_ids = test_ids = None
         print(f"[preprocess] 按窗口随机划分: train={train_r:.0%} / val={val_r:.0%} / test={1-train_r-val_r:.0%}")
@@ -235,6 +286,12 @@ def main(args):
             X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
             X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
             X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
+        elif strategy == "label_concat":
+            # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别
+            X_all, y_all, y_seq_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga)
+            (X_train, y_train, y_seq_train,
+             X_val,   y_val,   y_seq_val,
+             X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
         else:
             # 先把所有窗口提取出来，再随机划分
             all_ids = set(r["dog_id"] for r in ds_records)
@@ -294,6 +351,6 @@ if __name__ == "__main__":
     parser.add_argument("--no_gravity_align", action="store_true",
                         help="不做重力轴对齐（默认启用）")
     parser.add_argument("--split_strategy", default="auto",
-                        choices=["auto", "subject", "random"],
-                        help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分")
+                        choices=["auto", "subject", "random", "label_concat"],
+                        help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分, label_concat=按类别拼接片段后滑窗（充分利用短片段）")
     main(parser.parse_args())
