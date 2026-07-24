@@ -277,7 +277,8 @@ def main(args):
 
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
-    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}")
+    syn_tag     = "_syn" if args.synthetic else ""
+    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}{syn_tag}")
     os.makedirs(out_dir, exist_ok=True)
     per_class = classification_report(y_te, y_pred, labels=present_labels,
                                       target_names=present_names,

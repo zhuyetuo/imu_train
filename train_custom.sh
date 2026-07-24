@@ -19,7 +19,6 @@ LABEL="抓挠"
 REMAP="configs/remap_custom_3class.yaml"
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
-RESULTS_SYN_DIR="results_synthetic"
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -87,7 +86,7 @@ python src/ml/train.py --hz "$HZ" --model rf \
   --remap "$REMAP" \
   --synthetic "$SYNTHETIC" \
   --synthetic_label "$LABEL" \
-  --results_dir "$RESULTS_SYN_DIR" \
+  --results_dir "$RESULTS_DIR" \
   > /tmp/train_with_syn.log 2>&1 &
 PID_B=$!
 
@@ -119,4 +118,4 @@ _show_log /tmp/train_with_syn.log
 echo ""
 echo "模型路径:"
 echo "  纯标注: ${RESULTS_DIR}/processed_${DATE}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
-echo "  带合成: ${RESULTS_SYN_DIR}/processed_${DATE}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
+echo "  带合成: ${RESULTS_DIR}/processed_${DATE}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
