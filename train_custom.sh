@@ -60,7 +60,7 @@ python src/data/preprocess.py \
   --raw_csv_custom "$CSV" \
   --output_dir "$PROCESSED_DIR" \
   --config configs/data.yaml \
-  --split_strategy random \
+  --split_strategy subject \
   --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
