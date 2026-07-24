@@ -212,21 +212,41 @@ python src/ml/train.py --hz 16 --model rf \
 
 #### 步骤 4：训练
 
+两种模型都训练，方便对比效果：
+
 ```bash
 DATE=2026_7_23
 
+# ── 方案 A：不带合成数据（纯标注）──
+python src/ml/train.py --hz 16 --model rf \
+  --processed_dir "data/processed_${DATE}" \
+  --remap configs/remap_custom_3class.yaml
+# 模型保存至 results/processed_${DATE}/16hz_remap_custom_3class/ml_rf.pkl
+
+# ── 方案 B：带合成数据 ──
+# 先生成合成数据（--processed_dir 自动推算目标窗口数）
+python src/data/synthesize_scratch.py \
+  --json "data/raw_custom/${DATE}/merged_tmp.json" \
+  --csv_dir data/raw_wit/ \
+  --output "data/synthetic/scratch_${DATE}.npz" \
+  --processed_dir "data/processed_${DATE}" \
+  --remap configs/remap_custom_3class.yaml \
+  --label 抓挠 --hz 16 --n_aug 50
+
+# 再训练，保存到独立目录避免覆盖方案 A
 python src/ml/train.py --hz 16 --model rf \
   --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
   --synthetic "data/synthetic/scratch_${DATE}.npz" \
-  --synthetic_label 抓挠
-# 模型保存至 results/processed_${DATE}/16hz/ml_rf.pkl
+  --synthetic_label 抓挠 \
+  --results_dir results_synthetic
+# 模型保存至 results_synthetic/processed_${DATE}/16hz_remap_custom_3class/ml_rf.pkl
 ```
 
 > - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
 > - 数据集采集用 25Hz、部署用 16Hz 时：预处理加 `--source_hz 25`，训练和推理都用 `--hz 16`
 > - 补充新数据后只需换 JSON 文件名重跑，旧版本数据完整保留
-> - 抓挠数据足够多后可去掉 `--synthetic`，直接用标注数据训练
+> - 抓挠数据足够多后可去掉 `--synthetic`，直接用标注数据训练（方案 A 即为此情况）
 
 ### 标签映射（15类 → 3类）
 
