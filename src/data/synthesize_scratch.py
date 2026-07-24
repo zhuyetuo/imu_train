@@ -228,7 +228,10 @@ def _auto_target_from_processed(processed_dir, hz, label, remap_cfg=None):
         print(f"  [auto_target] 无法读取 processed_dir: {e}")
         return 0
 
+    import ast
     classes = meta.get("classes", [])
+    if isinstance(classes, str):
+        classes = ast.literal_eval(classes)
     if remap_cfg:
         # 应用 remap 后统计
         remap = {}
