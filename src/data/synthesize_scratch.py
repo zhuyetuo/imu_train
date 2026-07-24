@@ -152,7 +152,6 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
                 gyro = sub[gyro_cols].values.astype(np.float32) if gyro_cols \
                        else np.zeros((len(sub), 3), dtype=np.float32)
                 segments.append(np.concatenate([acc, gyro], axis=1))
-                print(f"  task{task_id} [{fn}] {target_label}: {t0_str} → {t1_str}  ({len(sub)} 行)")
 
     return segments
 
