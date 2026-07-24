@@ -105,7 +105,8 @@ def sliding_windows(data, window_size, stride):
 
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10):
+               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
+               output_dir=None):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -218,6 +219,52 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     print(f"  【片段】{seg_str}")
     print(f"  【合并】{merged_str}")
 
+    # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
+    if output_dir:
+        import json as _json
+        os.makedirs(output_dir, exist_ok=True)
+        ts_fmt = lambda t: t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if t is not None else None
+
+        # 逐窗口全概率
+        windows_out = []
+        for i, (pred_id, start_i) in enumerate(zip(preds, start_indices)):
+            t = idx_to_ts(start_i)
+            prob_vec = {classes[j]: float(probs[i, j]) for j in range(len(classes))}
+            windows_out.append({
+                "ts":    ts_fmt(t),
+                "label": classes[pred_id],
+                "conf":  float(probs[i, pred_id]),
+                "probs": prob_vec,
+            })
+
+        # 抓挠片段（合并后）
+        segs_out = []
+        for t0, t1, i0, i1 in merged:
+            seg_probs = [probs[k, classes.index("抓挠")]
+                         for k in range(len(preds))
+                         if start_indices[k] >= i0 and start_indices[k] <= i1
+                         and "抓挠" in classes]
+            segs_out.append({
+                "start_ts":  ts_fmt(t0),
+                "end_ts":    ts_fmt(t1),
+                "conf_max":  float(max(seg_probs)) if seg_probs else 0.0,
+                "conf_mean": float(sum(seg_probs) / len(seg_probs)) if seg_probs else 0.0,
+                "n_windows": len(seg_probs),
+            })
+
+        out = {
+            "csv_file":        os.path.abspath(path),
+            "csv_basename":    os.path.basename(path),
+            "n_windows":       len(preds),
+            "n_scratch":       n_scratch,
+            "windows":         windows_out,
+            "scratch_segments": segs_out,
+        }
+        stem = os.path.splitext(os.path.basename(path))[0]
+        out_path = os.path.join(output_dir, f"{stem}_infer.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            _json.dump(out, f, ensure_ascii=False, indent=2)
+
     return preds, classes, scratch_segs
 
 
@@ -245,6 +292,8 @@ def main():
                         help="合并相邻抓挠片段的最大间隔秒数（默认10s）")
     parser.add_argument("--workers", type=int, default=-1,
                         help="并行进程数（默认-1=用全部CPU核，1=单进程）")
+    parser.add_argument("--output_dir", default="",
+                        help="保存每个文件推理结果 JSON 的目录（留空不保存）")
     parser.add_argument("--no_gravity_align", action="store_true")
     args = parser.parse_args()
 
@@ -298,12 +347,14 @@ def main():
 
     def _run_one(path):
         try:
+            out_dir = args.output_dir or None
             return infer_file(path, model, classes, window_size, stride,
                               device_hz, model_hz, gravity_aligned,
                               confidence_threshold=args.confidence_threshold,
                               quiet=args.quiet,
                               scratch_only=args.scratch_only,
-                              merge_gap_s=args.merge_gap)
+                              merge_gap_s=args.merge_gap,
+                              output_dir=out_dir)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None
