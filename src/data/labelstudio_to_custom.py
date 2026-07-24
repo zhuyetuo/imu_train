@@ -84,7 +84,6 @@ def load_csv(path_or_url: str, csv_dir: str) -> pd.DataFrame:
         if os.path.exists(local):
             return pd.read_csv(local)
 
-    print(f"  [download] {path_or_url}", flush=True)
     tmp = f"/tmp/_ls_imu_{fname}"
     urllib.request.urlretrieve(path_or_url, tmp)
     return pd.read_csv(tmp)
