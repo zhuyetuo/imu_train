@@ -97,17 +97,24 @@ echo "⏳ 等待两个模型训练完成..."
 wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 /tmp/train_no_syn.log"
 wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 /tmp/train_with_syn.log"
 
-# ── 打印结果对比 ──────────────────────────────────────────
+# ── 打印结果对比（过滤进度条噪音）────────────────────────
+_show_log() {
+  # 显示数据分布表 + 测试集结果，去掉进度条行
+  grep -v "██\|提取特征\|step/s\|窗口/s" "$1" 2>/dev/null \
+    | grep -A 999 "数据集类别分布" \
+    || cat "$1"
+}
+
 echo ""
 echo "=================================================="
 echo "  训练结果对比"
 echo "=================================================="
 echo ""
 echo "── 方案 A（纯标注）──"
-grep -A 10 "测试集结果" /tmp/train_no_syn.log 2>/dev/null || cat /tmp/train_no_syn.log
+_show_log /tmp/train_no_syn.log
 echo ""
 echo "── 方案 B（带合成）──"
-grep -A 10 "测试集结果" /tmp/train_with_syn.log 2>/dev/null || cat /tmp/train_with_syn.log
+_show_log /tmp/train_with_syn.log
 
 echo ""
 echo "模型路径:"
