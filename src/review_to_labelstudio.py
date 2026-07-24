@@ -108,16 +108,18 @@ def build_tasks(infer_jsons, csv_url_prefix, mode, low_threshold, high_threshold
         main_csv  = main_data["csv_basename"]
         csv1_url, video1_url = build_urls(main_csv, csv_url_prefix)
 
-        # 构建 task data
-        task_data = {
-            "csv1":   csv1_url,
-            "video1": video1_url,
-        }
-        # cam2 提供 video2（可选）
+        # 构建 task data（video2 必须存在，Label Studio 项目配置要求）
         if "cam2" in cams:
             cam2_csv = cams["cam2"]["csv_basename"]
             _, video2_url = build_urls(cam2_csv, csv_url_prefix)
-            task_data["video2"] = video2_url
+        else:
+            video2_url = video1_url  # 没有 cam2 时用 cam1 视频占位
+
+        task_data = {
+            "csv1":   csv1_url,
+            "video1": video1_url,
+            "video2": video2_url,
+        }
 
         scratch_segs = main_data.get("scratch_segments", [])
         windows      = main_data.get("windows", [])
