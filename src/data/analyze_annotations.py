@@ -34,10 +34,9 @@ def main():
     with open(args.json, encoding="utf-8") as f:
         tasks = json.load(f)
 
-    # label → total_seconds, segment_count, list of durations
+    # label → total_seconds, segment_count
     label_sec   = defaultdict(float)
     label_count = defaultdict(int)
-    label_dur   = defaultdict(list)
     # sensor → label → seconds
     sensor_sec  = defaultdict(lambda: defaultdict(float))
 
@@ -67,7 +66,6 @@ def main():
                 if label in keep:
                     label_sec[label]   += dur
                     label_count[label] += 1
-                    label_dur[label].append(dur)
                     sensor_sec[sensor][label] += dur
                 else:
                     skipped_labels[label] += dur
@@ -121,17 +119,14 @@ def main():
             print(f"  {label}: {sec:.0f}s")
 
     # ── 估算窗口数 ────────────────────────────────────────
-    # 按片段逐个估算（每段独立滑窗），而非把总时长当一整块
     WINDOW_S, STRIDE_S = 2, 1
     print(f"\n【估算可用窗口数】(窗口={WINDOW_S}s, 步长={STRIDE_S}s, 采样率=16Hz)")
     win_counts = {}
     for label in sorted(label_sec):
-        est = sum(
-            max(0, int((dur - WINDOW_S) / STRIDE_S) + 1)
-            for dur in label_dur[label]
-        )
+        sec = label_sec[label]
+        est = max(0, int(sec - WINDOW_S) + 1)
         win_counts[label] = est
-        print(f"  {label}: ~{est} 个窗口（共 {len(label_dur[label])} 个片段）")
+        print(f"  {label}: ~{est} 个窗口")
 
     # ── 合成数据建议 ──────────────────────────────────────
     if win_counts:
