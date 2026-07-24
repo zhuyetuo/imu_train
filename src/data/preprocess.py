@@ -102,47 +102,34 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
 
 
 def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
-    """按类别拼接所有片段后滑窗：同类别的所有片段拼在一起，边界处跳过跨片段窗口。"""
+    """按类别拼接所有行后整体滑窗：全部同类别的行合并成一个大数组，再提取窗口。"""
     from collections import defaultdict as _dd
-    label_segments = _dd(list)   # label_id → list of (N,6) arrays
-
-    keep_enc = set(le.transform(list(keep_label_set))) if keep_label_set else None
+    label_rows = _dd(list)   # label_id → list of row arrays
 
     for r in records:
         data, labels = r["data"], r["labels"]
-        # 找出连续的同标签片段
-        i = 0
-        n = len(data)
-        while i < n:
-            lbl = labels[i]
+        for i, lbl in enumerate(labels):
             if keep_label_set and lbl not in keep_label_set:
-                i += 1
                 continue
-            j = i + 1
-            while j < n and labels[j] == lbl:
-                j += 1
-            seg = data[i:j]
-            if len(seg) >= window_size:
-                lbl_id = le.transform([lbl])[0]
-                label_segments[lbl_id].append(seg)
-            i = j
+            lbl_id = le.transform([lbl])[0]
+            label_rows[lbl_id].append(data[i])
 
     X_all, y_all, y_seq_all = [], [], []
-    for lbl_id, segs in sorted(label_segments.items()):
-        for seg in segs:
-            wins = []
-            for start in range(0, len(seg) - window_size + 1, stride):
-                wins.append(seg[start:start + window_size])
-            if not wins:
-                continue
-            arr = np.array(wins, dtype=np.float32)
-            if use_gravity_align:
-                arr = gravity_align_batch(arr)
-            X_all.append(arr)
-            y_all.append(np.full(len(arr), lbl_id, dtype=np.int64))
-            y_seq_all.append(np.tile(
-                np.full(window_size, lbl_id, dtype=np.int64), (len(arr), 1)
-            ))
+    for lbl_id in sorted(label_rows.keys()):
+        concat = np.array(label_rows[lbl_id], dtype=np.float32)
+        wins = []
+        for start in range(0, len(concat) - window_size + 1, stride):
+            wins.append(concat[start:start + window_size])
+        if not wins:
+            continue
+        arr = np.array(wins, dtype=np.float32)
+        if use_gravity_align:
+            arr = gravity_align_batch(arr)
+        X_all.append(arr)
+        y_all.append(np.full(len(arr), lbl_id, dtype=np.int64))
+        y_seq_all.append(np.tile(
+            np.full(window_size, lbl_id, dtype=np.int64), (len(arr), 1)
+        ))
 
     if not X_all:
         return np.empty((0,)), np.empty((0,)), np.empty((0,))
