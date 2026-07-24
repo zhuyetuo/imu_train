@@ -102,24 +102,39 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
 
 
 def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
-    """按类别拼接所有行后整体滑窗：全部同类别的行合并成一个大数组，再提取窗口。"""
+    """按类别汇总所有片段的窗口：每个连续片段内部各自滑窗，汇总后合并。
+    不跨片段边界取窗口，避免不同时间/动物的数据拼接产生无意义的假窗口。
+    """
     from collections import defaultdict as _dd
-    label_rows = _dd(list)   # label_id → list of row arrays
+    # label_id → list of continuous segment arrays
+    label_segs = _dd(list)
 
     for r in records:
         data, labels = r["data"], r["labels"]
-        for i, lbl in enumerate(labels):
+        # 找出每段连续的同类别行
+        i = 0
+        n = len(labels)
+        while i < n:
+            lbl = labels[i]
             if keep_label_set and lbl not in keep_label_set:
+                i += 1
                 continue
-            lbl_id = le.transform([lbl])[0]
-            label_rows[lbl_id].append(data[i])
+            # 找连续同标签的结束位置
+            j = i + 1
+            while j < n and labels[j] == lbl:
+                j += 1
+            seg = data[i:j]
+            if len(seg) >= window_size:
+                lbl_id = le.transform([lbl])[0]
+                label_segs[lbl_id].append(seg.astype(np.float32))
+            i = j
 
     X_all, y_all, y_seq_all = [], [], []
-    for lbl_id in sorted(label_rows.keys()):
-        concat = np.array(label_rows[lbl_id], dtype=np.float32)
+    for lbl_id in sorted(label_segs.keys()):
         wins = []
-        for start in range(0, len(concat) - window_size + 1, stride):
-            wins.append(concat[start:start + window_size])
+        for seg in label_segs[lbl_id]:
+            for start in range(0, len(seg) - window_size + 1, stride):
+                wins.append(seg[start:start + window_size])
         if not wins:
             continue
         arr = np.array(wins, dtype=np.float32)
