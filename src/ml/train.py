@@ -189,7 +189,8 @@ def main(args):
     counts_tr  = np.bincount(y_tr.astype(int),  minlength=len(classes))
     counts_val = np.bincount(y_val.astype(int), minlength=len(classes))
     counts_te  = np.bincount(y_te.astype(int),  minlength=len(classes))
-    print(f"\n[ml/train] ── 数据集类别分布（含合成数据）──")
+    dist_title = "含合成数据" if args.synthetic else "纯标注数据"
+    print(f"\n[ml/train] ── 数据集类别分布（{dist_title}）──")
     print(f"  {'类别':<10} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
     print(f"  {'-'*42}")
     for i, cls in enumerate(classes):
