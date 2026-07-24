@@ -212,7 +212,29 @@ python src/ml/train.py --hz 16 --model rf \
 
 #### 步骤 4：训练
 
-两种模型都训练，方便对比效果：
+**一键训练（推荐）**：预处理完成后直接跑脚本，自动并行训练两个模型并打印对比结果：
+
+```bash
+DATE=2026_7_23
+bash train_custom.sh --date $DATE
+```
+
+可选参数：
+```
+--hz     16      采样率（默认 16）
+--n_aug  50      每段原始片段的增强倍数（默认 50）
+--label  抓挠    要合成的少数类别（默认 抓挠）
+```
+
+输出：
+```
+results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl          ← 纯标注
+results_synthetic/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl ← 带合成
+```
+
+---
+
+**逐步训练（分析用）**：两种模型都训练，方便对比效果：
 
 ```bash
 DATE=2026_7_23
