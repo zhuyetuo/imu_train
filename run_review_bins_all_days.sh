@@ -103,17 +103,16 @@ done
 # ── 裁剪视频片段 ─────────────────────────────────────────
 if [[ "$EXTRACT_CLIPS" == "1" ]]; then
     echo ""
-    echo "▶ 裁剪抓挠视频片段..."
+    echo "▶ 按置信度区间裁剪视频片段..."
     for day in "${days[@]}"; do
         out_dir="$RESULT_ROOT/$day"
-        clip_dir="$out_dir/clips"
         video_dir="$DATA_ROOT/$day"
-        echo "  $day → $clip_dir"
+        echo "  $day ..."
         python src/extract_clips.py \
-            --infer_dir "$out_dir" \
-            --video_dir "$video_dir" \
-            --clip_dir  "$clip_dir" \
-            --context_s "$CONTEXT_S"
+            --infer_dir  "$out_dir" \
+            --video_dir  "$video_dir" \
+            --output_dir "$out_dir" \
+            --context_s  "$CONTEXT_S"
     done
 fi
 
