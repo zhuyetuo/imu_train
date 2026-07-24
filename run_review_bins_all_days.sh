@@ -171,7 +171,7 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
         # MP4 → MEDIA_DIR/transcoded/
         while IFS= read -r -d '' f; do
             _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
-        done < <(find "$csv_dir" -maxdepth 1 -name "*.mp4" -o -name "*.MP4" -print0 2>/dev/null)
+        done < <(find "$csv_dir" -maxdepth 1 \( -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
     done
     echo "  新复制: $n_copied 个，已存在跳过: $n_skip 个"
 fi
