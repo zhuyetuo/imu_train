@@ -162,13 +162,22 @@ python -c "import numpy as np; d=np.load('data/synthetic/scratch_${DATE}.npz'); 
 
 > 增强方式：加高斯噪声、幅值缩放（±15%）、轴向翻转、循环时移、时间拉伸。自动从 JSON 读取标注时间段，无需硬编码。
 
-#### 步骤 3.5：确认注入后的数据分布
+#### 步骤 3.5：确认数据分布
 
-合成数据注入后类别比例会变，先用 `--dry_run` 看分布，确认均衡再正式训练：
+先不带合成数据跑 `--dry_run`，看各类别的原始训练窗口数：
 
 ```bash
 DATE=2026_7_23
 
+python src/ml/train.py --hz 16 --model rf \
+  --processed_dir "data/processed_${DATE}" \
+  --remap configs/remap_custom_3class.yaml \
+  --dry_run
+```
+
+如果某个类别偏少（<其他类别 1/3），再加合成数据重新确认：
+
+```bash
 python src/ml/train.py --hz 16 --model rf \
   --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
