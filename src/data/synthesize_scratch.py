@@ -152,7 +152,6 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
                 gyro = sub[gyro_cols].values.astype(np.float32) if gyro_cols \
                        else np.zeros((len(sub), 3), dtype=np.float32)
                 segments.append(np.concatenate([acc, gyro], axis=1))
-                print(f"  task{task_id} [{fn}] {target_label}: {t0_str} → {t1_str}  ({len(sub)} 行)")
 
     return segments
 
@@ -229,7 +228,10 @@ def _auto_target_from_processed(processed_dir, hz, label, remap_cfg=None):
         print(f"  [auto_target] 无法读取 processed_dir: {e}")
         return 0
 
+    import ast
     classes = meta.get("classes", [])
+    if isinstance(classes, str):
+        classes = ast.literal_eval(classes)
     if remap_cfg:
         # 应用 remap 后统计
         remap = {}
