@@ -35,6 +35,8 @@ LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/trans
 LS_MODE="${LS_MODE:-scratch_only}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
+MEDIA_DIR="${MEDIA_DIR:-$HOME/label_infra/data/media}"  # Nginx 媒体目录（软链接目标）
+SYMLINK_CSV="${SYMLINK_CSV:-1}"     # 是否自动为 CSV 创建软链接（0=跳过）
 
 # ── 构建排除集合 ──────────────────────────────────────────
 declare -A EXCLUDE_SET
@@ -138,6 +140,29 @@ for day in "${days[@]}"; do
 
     echo "  $day → $ls_json"
 done
+
+# ── 软链接 CSV 到 Nginx 媒体目录 ─────────────────────────
+if [[ "$SYMLINK_CSV" == "1" ]]; then
+    echo ""
+    echo "▶ 软链接 CSV 到 Nginx 媒体目录 ($MEDIA_DIR)..."
+    mkdir -p "$MEDIA_DIR"
+    n_linked=0
+    n_skip=0
+    for day in "${days[@]}"; do
+        csv_dir="$DATA_ROOT/$day"
+        while IFS= read -r -d '' csv_file; do
+            base=$(basename "$csv_file")
+            dst="$MEDIA_DIR/$base"
+            if [[ -e "$dst" || -L "$dst" ]]; then
+                n_skip=$((n_skip + 1))
+            else
+                ln -s "$(realpath "$csv_file")" "$dst"
+                n_linked=$((n_linked + 1))
+            fi
+        done < <(find "$csv_dir" -maxdepth 1 -name "$PATTERN" -print0 2>/dev/null)
+    done
+    echo "  新建软链接: $n_linked 个，已存在跳过: $n_skip 个"
+fi
 
 # ── 汇总所有日期 ──────────────────────────────────────────
 echo ""
