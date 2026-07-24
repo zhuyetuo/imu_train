@@ -209,7 +209,6 @@ def main(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    source_hz = cfg["source_hz"]
     target_hz_list = [args.hz] if args.hz else cfg["target_hz_list"]
     window_sec = cfg["window_seconds"]
     stride_sec = cfg["stride_seconds"]
@@ -218,6 +217,7 @@ def main(args):
     val_r = cfg["val_ratio"]
 
     records, keep_label_set = load_records(args, cfg)
+    source_hz = cfg["source_hz"]  # load_records 可能修改 cfg["source_hz"]（如 custom 数据集），需在其后读取
 
     # 拟合标签编码器
     if keep_label_set:
