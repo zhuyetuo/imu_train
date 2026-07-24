@@ -30,7 +30,8 @@ WORKERS="${WORKERS:-8}"
 PATTERN="${PATTERN:-*.csv}"
 DEVICE_HZ="${DEVICE_HZ:-0}"
 MODEL_HZ="${MODEL_HZ:-0}"
-LS_URL_PREFIX="${LS_URL_PREFIX:-http://localhost:8080/data/local-files/?d=raw_wit}"
+LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
+LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
@@ -126,10 +127,13 @@ for day in "${days[@]}"; do
     out_dir="$RESULT_ROOT/$day"
     ls_json="$out_dir/labelstudio_review.json"
 
+    video_prefix_arg=""
+    [[ -n "$LS_VIDEO_URL_PREFIX" ]] && video_prefix_arg="--video_url_prefix $LS_VIDEO_URL_PREFIX"
     python src/review_to_labelstudio.py \
         --infer_dir "$out_dir/_infer" \
         --output "$ls_json" \
         --csv_url_prefix "$LS_URL_PREFIX" \
+        $video_prefix_arg \
         --mode "$LS_MODE"
 
     echo "  $day → $ls_json"

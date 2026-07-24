@@ -48,12 +48,11 @@ def parse_filename(basename: str):
     return session, cam_tag
 
 
-def build_urls(csv_basename: str, url_prefix: str):
+def build_urls(csv_basename: str, csv_url_prefix: str, video_url_prefix: str):
     """根据 CSV 文件名构建 CSV 和 MP4 的 URL。"""
     stem = os.path.splitext(csv_basename)[0]
-    prefix = url_prefix.rstrip("/")
-    csv_url = f"{prefix}/{csv_basename}"
-    mp4_url = f"{prefix}/{stem}.mp4"
+    csv_url = f"{csv_url_prefix.rstrip('/')}/{csv_basename}"
+    mp4_url = f"{video_url_prefix.rstrip('/')}/{stem}.mp4"
     return csv_url, mp4_url
 
 
@@ -75,8 +74,8 @@ def make_annotation(start_ts, end_ts, label):
 
 # ── 任务构建 ──────────────────────────────────────────────────────────────────
 
-def build_tasks(infer_jsons, csv_url_prefix, mode, low_threshold, high_threshold,
-                label_name):
+def build_tasks(infer_jsons, csv_url_prefix, video_url_prefix, mode, low_threshold,
+                high_threshold, label_name):
     """
     将推理 JSON 列表转换为 Label Studio 任务。
 
@@ -106,12 +105,12 @@ def build_tasks(infer_jsons, csv_url_prefix, mode, low_threshold, high_threshold
         # 优先使用 cam1 作为主摄像头（提供 csv1/video1）
         main_data = cams.get("cam1") or next(iter(cams.values()))
         main_csv  = main_data["csv_basename"]
-        csv1_url, video1_url = build_urls(main_csv, csv_url_prefix)
+        csv1_url, video1_url = build_urls(main_csv, csv_url_prefix, video_url_prefix)
 
         # 构建 task data（video2 必须存在，Label Studio 项目配置要求）
         if "cam2" in cams:
             cam2_csv = cams["cam2"]["csv_basename"]
-            _, video2_url = build_urls(cam2_csv, csv_url_prefix)
+            _, video2_url = build_urls(cam2_csv, csv_url_prefix, video_url_prefix)
         else:
             video2_url = video1_url  # 没有 cam2 时用 cam1 视频占位
 
@@ -166,8 +165,10 @@ def main():
                         help="包含 *_infer.json 的目录")
     parser.add_argument("--output",     required=True,
                         help="输出 Label Studio JSON 路径")
-    parser.add_argument("--csv_url_prefix", default="http://localhost:8080/data/local-files/?d=raw_wit",
-                        help="Label Studio 中文件的 URL 前缀（CSV 和 MP4 共用同一前缀）")
+    parser.add_argument("--csv_url_prefix", default="http://192.168.2.140:8182",
+                        help="CSV 文件的 URL 前缀（默认 http://192.168.2.140:8182）")
+    parser.add_argument("--video_url_prefix", default="",
+                        help="MP4 文件的 URL 前缀（默认为 csv_url_prefix/transcoded）")
     parser.add_argument("--mode", default="scratch_only",
                         choices=["scratch_only", "uncertain", "all"],
                         help="生成任务类型（默认 scratch_only）")
@@ -189,9 +190,12 @@ def main():
 
     print(f"找到 {len(infer_jsons)} 个推理结果文件")
 
+    video_url_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
+
     tasks = build_tasks(
         infer_jsons,
         csv_url_prefix=args.csv_url_prefix,
+        video_url_prefix=video_url_prefix,
         mode=args.mode,
         low_threshold=args.low_threshold,
         high_threshold=args.high_threshold,
