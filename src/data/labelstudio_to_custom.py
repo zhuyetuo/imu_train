@@ -82,10 +82,9 @@ def load_csv(path_or_url: str, csv_dir: str) -> pd.DataFrame:
     if csv_dir:
         local = os.path.join(csv_dir, fname)
         if os.path.exists(local):
-            print(f"  [local] {local}")
             return pd.read_csv(local)
 
-    print(f"  [download] {path_or_url}")
+    print(f"  [download] {path_or_url}", flush=True)
     tmp = f"/tmp/_ls_imu_{fname}"
     urllib.request.urlretrieve(path_or_url, tmp)
     return pd.read_csv(tmp)
@@ -118,7 +117,6 @@ def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str):
     if df["_ts"].isna().all():
         print(f"  [错误] {sensor_name}: 时间戳解析失败")
         return None
-    print(f"  {sensor_name}: acc={acc_cols}  gyro={gyro_cols}  ts={ts_col}  行数={len(df)}")
     return df, acc_cols, gyro_cols
 
 
@@ -134,7 +132,6 @@ def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
     if len(seg_df) == 0:
         print(f"  [警告] {label} {t_start_str}→{t_end_str} 无匹配行")
         return []
-    print(f"  {label}: {t_start_str} → {t_end_str}  ({len(seg_df)} 行)")
     acc = seg_df[acc_cols].values.astype(np.float64)
     if acc_unit == "g":
         acc = acc * G
@@ -161,12 +158,10 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
 
         annotations = task.get("annotations", [])
         if not annotations:
-            print(f"[跳过] task {task_id}：无标注")
-            continue
+                continue
 
         # ── 判断格式：单 csv 还是双 csv1/csv2 ───────────────────────
         is_multi = "csv1" in data or "csv2" in data
-        print(f"\n[task {task_id}]", "多传感器" if is_multi else "单传感器")
 
         if is_multi:
             # 双传感器：label1→csv1, label2→csv2
@@ -179,7 +174,6 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                         sensor_map[f"label{idx}"] = (res[0], res[1], res[2],
                                                       f"task{task_id}_imu{idx}")
             if not sensor_map:
-                print(f"  [跳过] 所有传感器 CSV 均加载失败")
                 continue
 
             for ann in annotations:
@@ -199,8 +193,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
             # 旧格式：单 csv
             csv_url = data.get("csv", "")
             if not csv_url:
-                print(f"[跳过] task {task_id}：无 csv 字段")
-                continue
+                    continue
             res = _load_sensor_df(csv_url, csv_dir, "imu")
             if not res:
                 continue

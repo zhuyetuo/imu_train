@@ -300,7 +300,6 @@ def main(args):
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
 
-        print(f"  train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
         out_dir = os.path.join(args.output_dir, f"{target_hz}hz")
         os.makedirs(out_dir, exist_ok=True)
