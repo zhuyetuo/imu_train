@@ -141,28 +141,37 @@ for day in "${days[@]}"; do
     echo "  $day → $ls_json"
 done
 
-# ── 复制 CSV 到 Nginx 媒体目录 ───────────────────────────
+# ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
 # 注意：Nginx 在 Docker 容器内运行，软链接目标不可见，需复制实体文件
 if [[ "$SYMLINK_CSV" == "1" ]]; then
     echo ""
-    echo "▶ 复制 CSV 到 Nginx 媒体目录 ($MEDIA_DIR)..."
+    echo "▶ 复制 CSV/MP4 到 Nginx 媒体目录 ($MEDIA_DIR)..."
     mkdir -p "$MEDIA_DIR"
+    mkdir -p "$MEDIA_DIR/transcoded"
     n_copied=0
     n_skip=0
+
+    _copy_file() {
+        local src="$1" dst="$2"
+        if [[ -f "$dst" ]]; then
+            n_skip=$((n_skip + 1))
+        else
+            [[ -L "$dst" ]] && rm "$dst"
+            cp "$src" "$dst"
+            n_copied=$((n_copied + 1))
+        fi
+    }
+
     for day in "${days[@]}"; do
         csv_dir="$DATA_ROOT/$day"
-        while IFS= read -r -d '' csv_file; do
-            base=$(basename "$csv_file")
-            dst="$MEDIA_DIR/$base"
-            if [[ -f "$dst" ]]; then
-                n_skip=$((n_skip + 1))
-            else
-                # 先删掉可能存在的失效软链接
-                [[ -L "$dst" ]] && rm "$dst"
-                cp "$csv_file" "$dst"
-                n_copied=$((n_copied + 1))
-            fi
+        # CSV → MEDIA_DIR/
+        while IFS= read -r -d '' f; do
+            _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
         done < <(find "$csv_dir" -maxdepth 1 -name "$PATTERN" -print0 2>/dev/null)
+        # MP4 → MEDIA_DIR/transcoded/
+        while IFS= read -r -d '' f; do
+            _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
+        done < <(find "$csv_dir" -maxdepth 1 -name "*.mp4" -o -name "*.MP4" -print0 2>/dev/null)
     done
     echo "  新复制: $n_copied 个，已存在跳过: $n_skip 个"
 fi
