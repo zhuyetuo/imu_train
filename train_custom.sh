@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 一键训练：合成数据 + 不带合成数据，两个模型并行跑
+# 一键预处理 + 训练：同时生成纯标注和带合成数据两个模型
 #
 # 用法:
 #   bash train_custom.sh --date 2026_7_23
 #   bash train_custom.sh --date 2026_7_23 --n_aug 30
 #
 # 输出:
-#   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl         ← 纯标注
-#   results_synthetic/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl ← 带合成
+#   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
+#   results/processed_<DATE>/16hz_remap_custom_3class_syn/ml_rf.pkl  ← 带合成
 
 set -e
 
@@ -23,10 +23,10 @@ RESULTS_DIR="results"
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --date)      DATE="$2";       shift 2 ;;
-    --hz)        HZ="$2";         shift 2 ;;
-    --n_aug)     N_AUG="$2";      shift 2 ;;
-    --label)     LABEL="$2";      shift 2 ;;
+    --date)   DATE="$2";  shift 2 ;;
+    --hz)     HZ="$2";    shift 2 ;;
+    --n_aug)  N_AUG="$2"; shift 2 ;;
+    --label)  LABEL="$2"; shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -37,24 +37,31 @@ if [[ -z "$DATE" ]]; then
 fi
 
 PROCESSED_DIR="data/processed_${DATE}"
+CSV="data/raw_custom/${DATE}/merged_${DATE}.csv"
 JSON="data/raw_custom/${DATE}/merged_tmp.json"
 SYNTHETIC="data/synthetic/scratch_${DATE}.npz"
 
 echo "=================================================="
 echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG"
-echo "  预处理目录: $PROCESSED_DIR"
 echo "=================================================="
 
-# ── 检查预处理数据 ────────────────────────────────────────
-if [[ ! -f "${PROCESSED_DIR}/${HZ}hz/train.npz" ]]; then
-  echo "[错误] 找不到预处理数据: ${PROCESSED_DIR}/${HZ}hz/train.npz"
-  echo "请先运行预处理:"
-  echo "  python src/data/preprocess.py --dataset custom \\"
-  echo "    --raw_csv_custom data/raw_custom/${DATE}/merged_${DATE}.csv \\"
-  echo "    --output_dir ${PROCESSED_DIR} --config configs/data.yaml \\"
-  echo "    --split_strategy label_concat --hz ${HZ}"
+# ── 检查输入文件 ──────────────────────────────────────────
+if [[ ! -f "$CSV" ]]; then
+  echo "[错误] 找不到训练 CSV: $CSV"
+  echo "请先运行步骤 1（labelstudio_to_custom.py）生成该文件"
   exit 1
 fi
+
+# ── 预处理（自动清除旧缓存）──────────────────────────────
+echo ""
+echo "▶ 预处理数据..."
+python src/data/preprocess.py \
+  --dataset custom \
+  --raw_csv_custom "$CSV" \
+  --output_dir "$PROCESSED_DIR" \
+  --config configs/data.yaml \
+  --split_strategy random \
+  --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
 echo ""
@@ -98,7 +105,6 @@ wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见
 
 # ── 打印结果对比（过滤进度条噪音）────────────────────────
 _show_log() {
-  # 显示数据分布表 + 测试集结果，去掉进度条行
   grep -v "██\|提取特征\|step/s\|窗口/s" "$1" 2>/dev/null \
     | grep -A 999 "数据集类别分布" \
     || cat "$1"
