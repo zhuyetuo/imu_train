@@ -85,13 +85,15 @@ for day in "${days[@]}"; do
     out_dir="$RESULT_ROOT/$day"
     mkdir -p "$out_dir"
 
+    infer_json_dir="$out_dir/_infer"
+    mkdir -p "$infer_json_dir"
     echo "▶ $day ..."
     python src/infer_csv_scratch.py \
         --csv_dir "$csv_dir" \
         --pattern "$PATTERN" \
         --model "$MODEL" \
         --workers "$WORKERS" \
-        --output_dir "$out_dir" \
+        --output_dir "$infer_json_dir" \
         --quiet \
         --scratch_only \
         $hz_args \
@@ -109,7 +111,7 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
         video_dir="$DATA_ROOT/$day"
         echo "  $day ..."
         python src/extract_clips.py \
-            --infer_dir  "$out_dir" \
+            --infer_dir  "$out_dir/_infer" \
             --video_dir  "$video_dir" \
             --output_dir "$out_dir" \
             --context_s  "$CONTEXT_S"
@@ -125,7 +127,7 @@ for day in "${days[@]}"; do
     ls_json="$out_dir/labelstudio_review.json"
 
     python src/review_to_labelstudio.py \
-        --infer_dir "$out_dir" \
+        --infer_dir "$out_dir/_infer" \
         --output "$ls_json" \
         --csv_url_prefix "$LS_URL_PREFIX" \
         --mode "$LS_MODE"
