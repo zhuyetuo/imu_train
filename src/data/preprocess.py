@@ -210,7 +210,7 @@ def main(args):
         cfg = yaml.safe_load(f)
 
     source_hz = cfg["source_hz"]
-    target_hz_list = cfg["target_hz_list"]
+    target_hz_list = [args.hz] if args.hz else cfg["target_hz_list"]
     window_sec = cfg["window_seconds"]
     stride_sec = cfg["stride_seconds"]
     seed = cfg["seed"]
@@ -339,4 +339,6 @@ if __name__ == "__main__":
     parser.add_argument("--split_strategy", default="auto",
                         choices=["auto", "subject", "random", "label_concat"],
                         help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分, label_concat=按类别拼接片段后滑窗（充分利用短片段）")
+    parser.add_argument("--hz", type=int, default=0,
+                        help="只处理指定采样率（0=处理所有，默认0）")
     main(parser.parse_args())

@@ -122,7 +122,8 @@ python src/data/preprocess.py \
   --raw_csv_custom "data/raw_custom/${DATE}/merged_${DATE}.csv" \
   --output_dir "data/processed_${DATE}" \
   --config configs/data.yaml \
-  --split_strategy label_concat
+  --split_strategy label_concat \
+  --hz 16
 
 # 查看类别分布（确认各类样本数是否均衡）
 python src/data/analyze_dataset.py \
