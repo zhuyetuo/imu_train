@@ -32,6 +32,8 @@ DEVICE_HZ="${DEVICE_HZ:-0}"
 MODEL_HZ="${MODEL_HZ:-0}"
 LS_URL_PREFIX="${LS_URL_PREFIX:-http://localhost:8080/data/local-files/?d=raw_wit}"
 LS_MODE="${LS_MODE:-scratch_only}"
+CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
+EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
 
 # ── 构建排除集合 ──────────────────────────────────────────
 declare -A EXCLUDE_SET
@@ -97,6 +99,23 @@ for day in "${days[@]}"; do
 
     echo "  结果已保存至 $out_dir/"
 done
+
+# ── 裁剪视频片段 ─────────────────────────────────────────
+if [[ "$EXTRACT_CLIPS" == "1" ]]; then
+    echo ""
+    echo "▶ 裁剪抓挠视频片段..."
+    for day in "${days[@]}"; do
+        out_dir="$RESULT_ROOT/$day"
+        clip_dir="$out_dir/clips"
+        video_dir="$DATA_ROOT/$day"
+        echo "  $day → $clip_dir"
+        python src/extract_clips.py \
+            --infer_dir "$out_dir" \
+            --video_dir "$video_dir" \
+            --clip_dir  "$clip_dir" \
+            --context_s "$CONTEXT_S"
+    done
+fi
 
 # ── 生成 Label Studio 复查任务 ────────────────────────────
 echo ""
