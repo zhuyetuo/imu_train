@@ -265,6 +265,10 @@ def main(args):
         np.savez_compressed(os.path.join(out_dir, "train.npz"), X=X_train, y=y_train, y_seq=y_seq_train, **meta)
         np.savez_compressed(os.path.join(out_dir, "val.npz"),   X=X_val,   y=y_val,   y_seq=y_seq_val,   **meta)
         np.savez_compressed(os.path.join(out_dir, "test.npz"),  X=X_test,  y=y_test,  y_seq=y_seq_test,  **meta)
+        feat_cache = os.path.join(out_dir, "ml_features.npz")
+        if os.path.exists(feat_cache):
+            os.remove(feat_cache)
+            print(f"  🗑  已删除旧特征缓存 {feat_cache}")
         print(f"  ✅ 保存至 {out_dir}/")
 
     print("\n[preprocess] 全部完成！")
