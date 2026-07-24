@@ -228,8 +228,8 @@ bash train_custom.sh --date $DATE
 
 输出：
 ```
-results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl          ← 纯标注
-results_synthetic/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl ← 带合成
+results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
+results/processed_<DATE>/16hz_remap_custom_3class_syn/ml_rf.pkl  ← 带合成
 ```
 
 ---
@@ -255,14 +255,13 @@ python src/data/synthesize_scratch.py \
   --remap configs/remap_custom_3class.yaml \
   --label 抓挠 --hz 16 --n_aug 50
 
-# 再训练，保存到独立目录避免覆盖方案 A
+# 再训练，自动在目录名后加 _syn 后缀，不覆盖方案 A
 python src/ml/train.py --hz 16 --model rf \
   --processed_dir "data/processed_${DATE}" \
   --remap configs/remap_custom_3class.yaml \
   --synthetic "data/synthetic/scratch_${DATE}.npz" \
-  --synthetic_label 抓挠 \
-  --results_dir results_synthetic
-# 模型保存至 results_synthetic/processed_${DATE}/16hz_remap_custom_3class/ml_rf.pkl
+  --synthetic_label 抓挠
+# 模型保存至 results/processed_${DATE}/16hz_remap_custom_3class_syn/ml_rf.pkl
 ```
 
 > - 采样率（`--hz`）必须与设备一致，推理时也要用同一个值
