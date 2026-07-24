@@ -151,7 +151,8 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
     keep_set = set(keep_labels) if keep_labels else None
     rows = []
 
-    for task in tasks:
+    from tqdm import tqdm
+    for task in tqdm(tasks, desc="转换标注", unit="task"):
         task_id = task["id"]
         data    = task.get("data", {})
 
