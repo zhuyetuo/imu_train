@@ -83,8 +83,8 @@ def csv_start_sec(csv_path: str) -> float:
 
 
 def sibling_stem(stem: str, target_cam: int) -> str:
-    """cam1_imu1 ↔ cam2_imu2"""
-    return re.sub(r"cam(\d)_imu(\d)", f"cam{target_cam}_imu{target_cam}", stem)
+    """cam1_imu1 → cam2_imu2（或反向），target_cam=1 或 2"""
+    return re.sub(r"cam\d_imu\d", f"cam{target_cam}_imu{target_cam}", stem)
 
 
 def cut_clip(video_path: str, start_abs: float, end_abs: float,
@@ -179,9 +179,10 @@ def _process_one(task: dict) -> dict:
     pad_start = max(0.0, start_sec - args.context_s)
     pad_end   = end_sec + args.context_s
 
+    detected_stem = task["detected_stem"]
     cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + ".mp4")
     cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
-    cam1_clip_csv = os.path.join(clip_dir, stem1 + suffix + ".csv")
+    cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + ".csv")  # 检测狗的 CSV
 
     ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0) if (cam1_mp4 and has_ffmpeg) else False
     ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
@@ -226,12 +227,17 @@ def main():
         if not segs:
             continue
 
-        # 只处理 cam1 文件，cam2 作为兄弟自动配对；跳过 cam2 避免重复
-        if re.search(r"cam[2-9]_imu[2-9]", csv_basename):
-            continue
-
-        stem1    = os.path.splitext(csv_basename)[0]
-        stem2    = sibling_stem(stem1, 2)
+        # 判断是哪只狗的 IMU：cam1_imu1=狗1，cam2_imu2=狗2
+        detected_stem = os.path.splitext(csv_basename)[0]
+        is_cam2 = bool(re.search(r"cam2_imu2", csv_basename))
+        if is_cam2:
+            # 狗2检测到抓挠：cam1=视角1(兄弟), cam2=检测狗
+            stem2 = detected_stem                  # cam2_imu2（检测狗）
+            stem1 = sibling_stem(detected_stem, 1) # cam1_imu1（视角1兄弟）
+        else:
+            # 狗1检测到抓挠：cam1=检测狗, cam2=视角2(兄弟)
+            stem1 = detected_stem                  # cam1_imu1（检测狗）
+            stem2 = sibling_stem(detected_stem, 2) # cam2_imu2（视角2兄弟）
         src_csv1 = os.path.join(args.video_dir, csv_basename)
         cam1_mp4 = find_video(stem1, args.video_dir)
         cam2_mp4 = find_video(stem2, args.video_dir)
@@ -258,6 +264,7 @@ def main():
             all_tasks.append({
                 "args": args, "has_ffmpeg": has_ffmpeg,
                 "stem1": stem1, "stem2": stem2,
+                "detected_stem": detected_stem,  # CSV clip 用检测狗的 stem
                 "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
