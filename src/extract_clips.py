@@ -99,9 +99,15 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         return False
 
     if HAS_CUDA:
-        encode_args = ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "23"]
+        encode_args = [
+            "-c:v", "h264_nvenc", "-preset", "fast", "-cq", "23",
+            "-profile:v", "main",
+        ]
     else:
-        encode_args = ["-c:v", "libx264", "-crf", "23", "-preset", "fast"]
+        encode_args = [
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+            "-profile:v", "main", "-pix_fmt", "yuv420p",
+        ]
 
     cmd = [
         "ffmpeg", "-y",
@@ -109,6 +115,7 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         "-i", video_path,
         "-t", f"{duration:.3f}",
         *encode_args,
+        "-movflags", "+faststart",   # moov atom 放到文件头，浏览器可流式播放
         "-avoid_negative_ts", "make_zero",
         "-map_metadata", "-1",
         out_path,
