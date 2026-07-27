@@ -49,6 +49,12 @@ def ts_to_hhmmss(ts_str: str) -> str:
     return ts_str[11:13] + ts_str[14:16] + ts_str[17:19]
 
 
+HAS_CUDA = subprocess.run(
+    ["ffmpeg", "-hide_banner", "-hwaccels"],
+    capture_output=True, text=True
+).stdout.find("cuda") >= 0
+
+
 def find_video(stem: str, video_dir: str) -> str:
     for ext in (".mp4", ".MP4", ".avi", ".mov"):
         p = os.path.join(video_dir, stem + ext)
@@ -57,24 +63,61 @@ def find_video(stem: str, video_dir: str) -> str:
     return ""
 
 
+def csv_start_sec(csv_path: str) -> float:
+    """读取 CSV 第一行数据的时间戳，作为视频 t=0 的绝对时间（秒）。"""
+    try:
+        with open(csv_path, encoding="utf-8") as f:
+            header = f.readline()
+            first  = f.readline()
+        cols = [c.strip().strip('"') for c in header.split(",")]
+        try:
+            ts_idx = next(i for i, c in enumerate(cols) if "timestamp" in c.lower())
+        except StopIteration:
+            ts_idx = 0
+        ts_str = first.split(",")[ts_idx].strip().strip('"')
+        return ts_to_sec(ts_str)
+    except Exception:
+        return 0.0
+
+
 def sibling_stem(stem: str, target_cam: int) -> str:
     """cam1_imu1 ↔ cam2_imu2"""
     return re.sub(r"cam(\d)_imu(\d)", f"cam{target_cam}_imu{target_cam}", stem)
 
 
-def cut_clip(video_path: str, start_sec: float, end_sec: float,
-             out_path: str, context_s: float) -> bool:
-    t_start  = max(0.0, start_sec - context_s)
-    duration = (end_sec + context_s) - t_start
+def cut_clip(video_path: str, start_abs: float, end_abs: float,
+             out_path: str, context_s: float, video_t0: float = 0.0) -> bool:
+    """
+    start_abs / end_abs: 午夜起始的绝对秒数
+    video_t0: 视频第一帧对应的绝对秒数（从 CSV 第一行读取）
+    """
+    rel_start = max(0.0, (start_abs - video_t0) - context_s)
+    rel_end   = (end_abs - video_t0) + context_s
+    duration  = rel_end - rel_start
+    if duration <= 0:
+        print(f"    [跳过] 时间偏移为负（video_t0={video_t0:.1f}, start={start_abs:.1f}）")
+        return False
+
+    if HAS_CUDA:
+        encode_args = ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "23"]
+    else:
+        encode_args = ["-c:v", "libx264", "-crf", "23", "-preset", "fast"]
+
     cmd = [
         "ffmpeg", "-y",
-        "-ss", f"{t_start:.3f}",
+        "-ss", f"{rel_start:.3f}",
         "-i", video_path,
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-an",
+        *encode_args,
+        "-avoid_negative_ts", "make_zero",
+        "-map_metadata", "-1",
         out_path,
     ]
-    return subprocess.run(cmd, capture_output=True).returncode == 0
+    ret = subprocess.run(cmd, capture_output=True)
+    if ret.returncode != 0:
+        err = ret.stderr.decode("utf-8", errors="replace")[-400:]
+        print(f"    [ffmpeg错误] {err}")
+    return ret.returncode == 0
 
 
 def slice_csv(src_csv: str, dst_csv: str,
@@ -149,6 +192,8 @@ def main():
         src_csv1  = os.path.join(args.video_dir, csv_basename)
         cam1_mp4  = find_video(stem1, args.video_dir)
         cam2_mp4  = find_video(stem2, args.video_dir)
+        # 从 CSV 读取视频起始绝对时间（用于计算 ffmpeg 相对偏移）
+        video_t0  = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
 
         for idx, seg in enumerate(segs, 1):
             conf     = seg.get("conf_mean", 0.0)
@@ -178,8 +223,8 @@ def main():
             cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
             cam1_clip_csv = os.path.join(clip_dir, stem1 + suffix + ".csv")
 
-            ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s) if (cam1_mp4 and has_ffmpeg) else False
-            ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s) if (cam2_mp4 and has_ffmpeg) else False
+            ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0) if (cam1_mp4 and has_ffmpeg) else False
+            ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
             ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
             parts = [
