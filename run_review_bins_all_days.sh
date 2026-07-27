@@ -132,10 +132,11 @@ for day in "${days[@]}"; do
     video_prefix_arg=""
     [[ -n "$LS_VIDEO_URL_PREFIX" ]] && video_prefix_arg="--video_url_prefix $LS_VIDEO_URL_PREFIX"
     python src/review_to_labelstudio.py \
-        --infer_dir "$out_dir/_infer" \
+        --infer_dir "$out_dir" \
         --output "$ls_json" \
         --csv_url_prefix "$LS_URL_PREFIX" \
         $video_prefix_arg \
+        --use_clips \
         --mode "$LS_MODE"
 
     echo "  $day → $ls_json"
@@ -163,15 +164,16 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
     }
 
     for day in "${days[@]}"; do
-        csv_dir="$DATA_ROOT/$day"
-        # CSV → MEDIA_DIR/
+        out_dir="$RESULT_ROOT/$day"
+        # clips_*/ 里的 CSV → MEDIA_DIR/，MP4 → MEDIA_DIR/transcoded/
         while IFS= read -r -d '' f; do
-            _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
-        done < <(find "$csv_dir" -maxdepth 1 -name "$PATTERN" -print0 2>/dev/null)
-        # MP4 → MEDIA_DIR/transcoded/
-        while IFS= read -r -d '' f; do
-            _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
-        done < <(find "$csv_dir" -maxdepth 1 \( -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+            ext="${f##*.}"
+            if [[ "${ext,,}" == "csv" ]]; then
+                _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
+            else
+                _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
+            fi
+        done < <(find "$out_dir"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
     done
     echo "  新复制: $n_copied 个，已存在跳过: $n_skip 个"
 fi

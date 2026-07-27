@@ -1,21 +1,28 @@
 """
-把推理结果 JSON 转换为 Label Studio 任务，用于人工复查和重新标注。
+把推理结果或裁剪片段转换为 Label Studio 任务。
 
-Label Studio 项目配置格式（单摄像头 + 双视频）:
-  数据键: csv1 (IMU TimeSeries), video1, video2 (可选)
-  标注:   from_name="label", to_name="ts"
+两种模式:
+  --use_clips   扫描 clips_*/ 目录，每个 clip 三件套(cam1.mp4 + cam2.mp4 + cam1.csv)
+                生成一个 Label Studio 任务（推荐，与 witmotion_imu 格式一致）
+  默认          从 *_infer.json 生成任务（引用完整录制文件）
 
-文件命名约定:
-  multicam_20260717_185620_cam1_imu1_resampled16hz.csv  → csv1
-  multicam_20260717_185620_cam1_imu1_resampled16hz.mp4  → video1
-  multicam_20260717_185620_cam2_imu2_resampled16hz.mp4  → video2
+Label Studio 项目配置:
+  video1 = cam1 视频, video2 = cam2 视频, csv1 = cam1 IMU CSV
+  from_name="label", to_name="ts"
 
 用法:
+  # 裁剪片段模式（推荐）
   python src/review_to_labelstudio.py \
-    --infer_dir infer_result/2026_7_15/_infer \
-    --output infer_result/2026_7_15/labelstudio_review.json \
-    --csv_url_prefix http://localhost:8080/data/local-files/?d=raw_wit \
-    --mode scratch_only
+    --infer_dir infer_result/2026_7_17 \
+    --output infer_result/2026_7_17/labelstudio_review.json \
+    --use_clips \
+    --csv_url_prefix http://192.168.2.140:8182
+
+  # 全录制模式
+  python src/review_to_labelstudio.py \
+    --infer_dir infer_result/2026_7_17/_infer \
+    --output infer_result/2026_7_17/labelstudio_review.json \
+    --csv_url_prefix http://192.168.2.140:8182
 """
 
 import argparse
@@ -27,39 +34,45 @@ import re
 
 # ── 文件名解析 ────────────────────────────────────────────────────────────────
 
-def parse_filename(basename: str):
-    """
-    解析多摄像头文件名，提取会话 key 和角色 (cam1/cam2)。
+def parse_cam(basename: str) -> str:
+    """返回 'cam1' / 'cam2' / ''"""
+    m = re.search(r"(cam\d)", basename, re.IGNORECASE)
+    return m.group(1).lower() if m else ""
 
-    示例:
-      multicam_20260717_185620_cam1_imu1_resampled16hz.csv
-        → session="multicam_20260717_185620", role="cam1"
-      multicam_20260717_185620_cam2_imu2_resampled16hz.csv
-        → session="multicam_20260717_185620", role="cam2"
-    """
+
+def session_key(basename: str) -> str:
+    """提取会话前缀（cam_tag 之前的部分）"""
     stem = os.path.splitext(basename)[0]
-    # 匹配 cam1 或 cam2
     m = re.search(r"(cam\d)", stem, re.IGNORECASE)
     if not m:
-        return stem, "cam1"  # 单摄像头文件，默认 cam1
-    cam_tag = m.group(1).lower()  # "cam1" / "cam2"
-    # 会话前缀 = cam_tag 之前的部分
-    session = stem[: m.start()].rstrip("_")
-    return session, cam_tag
+        return stem
+    return stem[: m.start()].rstrip("_")
 
 
-def build_urls(csv_basename: str, csv_url_prefix: str, video_url_prefix: str):
-    """根据 CSV 文件名构建 CSV 和 MP4 的 URL。"""
-    stem = os.path.splitext(csv_basename)[0]
-    csv_url = f"{csv_url_prefix.rstrip('/')}/{csv_basename}"
-    mp4_url = f"{video_url_prefix.rstrip('/')}/{stem}.mp4"
-    return csv_url, mp4_url
+def clip_key(basename: str) -> str:
+    """提取 clip 唯一键（去掉 cam1/cam2 差异）
+    multicam_20260717_185620_cam1_imu1_resampled16hz_clip01_185907-185910
+    → multicam_20260717_185620_clip01_185907-185910
+    """
+    stem = os.path.splitext(basename)[0]
+    stem = re.sub(r"_cam\d_imu\d", "", stem)
+    return stem
+
+
+# ── URL 构建 ──────────────────────────────────────────────────────────────────
+
+def csv_url(basename: str, csv_prefix: str) -> str:
+    return f"{csv_prefix.rstrip('/')}/{basename}"
+
+
+def video_url(basename: str, video_prefix: str) -> str:
+    stem = os.path.splitext(basename)[0]
+    return f"{video_prefix.rstrip('/')}/{stem}.mp4"
 
 
 # ── 标注生成 ──────────────────────────────────────────────────────────────────
 
 def make_annotation(start_ts, end_ts, label):
-    """生成一条 Label Studio timeserieslabels 标注。"""
     return {
         "type": "timeserieslabels",
         "from_name": "label",
@@ -72,84 +85,149 @@ def make_annotation(start_ts, end_ts, label):
     }
 
 
-# ── 任务构建 ──────────────────────────────────────────────────────────────────
+# ── 模式 1：clips_*/ 目录扫描 ─────────────────────────────────────────────────
 
-def build_tasks(infer_jsons, csv_url_prefix, video_url_prefix, mode, low_threshold,
-                high_threshold, label_name):
+def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_name):
     """
-    将推理 JSON 列表转换为 Label Studio 任务。
-
-    分组规则: 同一会话前缀（如 multicam_20260717_185620）的 cam1/cam2 合并为一个任务。
-
-    mode:
-      scratch_only  - 只上传检测到抓挠的片段
-      uncertain     - 只上传低置信度疑似抓挠窗口
-      all           - 两者都上传
+    扫描 infer_dir/clips_*/ 目录，按 clip 键分组：
+      cam1 mp4 → video1
+      cam2 mp4 → video2
+      cam1 csv → csv1 + 标注（覆盖整个 clip）
     """
-    # 按会话分组: session → {cam1: data, cam2: data}
+    tasks = []
+    task_id = 1
+
+    clip_dirs = sorted(glob.glob(os.path.join(infer_dir, "clips_*")))
+    if not clip_dirs:
+        print(f"[警告] {infer_dir} 下没有 clips_*/ 目录，请先运行 extract_clips.py")
+        return tasks
+
+    for clip_dir in clip_dirs:
+        # 按 clip_key 分组
+        groups = {}  # clip_key → {cam1_mp4, cam2_mp4, cam1_csv}
+
+        for fname in sorted(os.listdir(clip_dir)):
+            fpath = os.path.join(clip_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            cam = parse_cam(fname)
+            key = clip_key(fname)
+            if key not in groups:
+                groups[key] = {}
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in (".mp4", ".avi", ".mov"):
+                if cam in ("cam1", ""):
+                    groups[key]["cam1_mp4"] = fname
+                elif cam == "cam2":
+                    groups[key]["cam2_mp4"] = fname
+            elif ext == ".csv":
+                if cam in ("cam1", ""):
+                    groups[key]["cam1_csv"] = fname
+
+        for key in sorted(groups):
+            g = groups[key]
+            cam1_mp4_name = g.get("cam1_mp4", "")
+            cam2_mp4_name = g.get("cam2_mp4", "")
+            cam1_csv_name = g.get("cam1_csv", "")
+
+            if not cam1_mp4_name and not cam1_csv_name:
+                continue
+
+            v1_url = video_url(cam1_mp4_name, video_url_prefix) if cam1_mp4_name else ""
+            v2_url = video_url(cam2_mp4_name, video_url_prefix) if cam2_mp4_name else v1_url
+            c1_url = csv_url(cam1_csv_name, csv_url_prefix) if cam1_csv_name else ""
+
+            task_data = {
+                "video1": v1_url,
+                "video2": v2_url,
+                "csv1":   c1_url,
+            }
+
+            # clip 本身就是抓挠片段，标注覆盖整个 clip（无需精确时间戳）
+            # 从 key 解析时间标签（如 185907-185910）
+            m = re.search(r"(\d{6})-(\d{6})$", key)
+            if m:
+                def hms_to_ts(hms: str) -> str:
+                    return f"2000-01-01 {hms[:2]}:{hms[2:4]}:{hms[4:6]}.000"
+                start_ts = hms_to_ts(m.group(1))
+                end_ts   = hms_to_ts(m.group(2))
+                results = [make_annotation(start_ts, end_ts, label_name)]
+            else:
+                results = []
+
+            tasks.append({
+                "id":   task_id,
+                "data": task_data,
+                "annotations": [{"result": results}] if results else [],
+                "meta": {
+                    "clip_key": key,
+                    "bin":      os.path.basename(clip_dir),
+                    "note":     "模型检测到抓挠片段，请核实",
+                }
+            })
+            task_id += 1
+
+    return tasks
+
+
+# ── 模式 2：_infer.json 扫描（全录制文件）────────────────────────────────────
+
+def build_tasks_from_infer(infer_jsons, csv_url_prefix, video_url_prefix,
+                           mode, low_threshold, high_threshold, label_name):
     sessions = {}
     for infer_path in sorted(infer_jsons):
         with open(infer_path, encoding="utf-8") as f:
             data = json.load(f)
         csv_basename = data["csv_basename"]
-        session, cam_tag = parse_filename(csv_basename)
-        if session not in sessions:
-            sessions[session] = {}
-        sessions[session][cam_tag] = data
+        sess = session_key(csv_basename)
+        cam  = parse_cam(csv_basename)
+        if sess not in sessions:
+            sessions[sess] = {}
+        sessions[sess][cam or "cam1"] = data
 
     tasks = []
     task_id = 1
 
-    for session in sorted(sessions):
-        cams = sessions[session]
-        # 优先使用 cam1 作为主摄像头（提供 csv1/video1）
+    for sess in sorted(sessions):
+        cams = sessions[sess]
         main_data = cams.get("cam1") or next(iter(cams.values()))
         main_csv  = main_data["csv_basename"]
-        csv1_url, video1_url = build_urls(main_csv, csv_url_prefix, video_url_prefix)
+        stem1     = os.path.splitext(main_csv)[0]
+        stem2     = re.sub(r"cam1_imu1", "cam2_imu2", stem1)
 
-        # 构建 task data（video2 必须存在，Label Studio 项目配置要求）
-        if "cam2" in cams:
-            cam2_csv = cams["cam2"]["csv_basename"]
-            _, video2_url = build_urls(cam2_csv, csv_url_prefix, video_url_prefix)
-        else:
-            video2_url = video1_url  # 没有 cam2 时用 cam1 视频占位
+        c1_url = csv_url(main_csv, csv_url_prefix)
+        v1_url = f"{video_url_prefix.rstrip('/')}/{stem1}.mp4"
+        v2_url = f"{video_url_prefix.rstrip('/')}/{stem2}.mp4" if "cam2" in cams else v1_url
 
-        task_data = {
-            "csv1":   csv1_url,
-            "video1": video1_url,
-            "video2": video2_url,
-        }
+        task_data = {"csv1": c1_url, "video1": v1_url, "video2": v2_url}
 
         scratch_segs = main_data.get("scratch_segments", [])
         windows      = main_data.get("windows", [])
         results      = []
 
-        # ── 模式 1：检测到的抓挠片段 ──────────────────────────────────────
         if mode in ("scratch_only", "all") and scratch_segs:
             for seg in scratch_segs:
                 if seg.get("start_ts") and seg.get("end_ts"):
                     results.append(make_annotation(seg["start_ts"], seg["end_ts"], label_name))
 
-        # ── 模式 2：低置信度疑似抓挠 ──────────────────────────────────────
         if mode in ("uncertain", "all"):
             for w in windows:
-                scratch_prob = w.get("probs", {}).get(label_name, 0.0)
-                if w.get("label") != label_name and low_threshold < scratch_prob <= high_threshold:
+                prob = w.get("probs", {}).get(label_name, 0.0)
+                if w.get("label") != label_name and low_threshold < prob <= high_threshold:
                     if w.get("ts"):
                         results.append(make_annotation(w["ts"], w["ts"], f"{label_name}?"))
 
         if not results:
             continue
 
-        n_scratch = len(scratch_segs)
         tasks.append({
             "id":   task_id,
             "data": task_data,
             "annotations": [{"result": results}],
             "meta": {
-                "session":  session,
+                "session":  sess,
                 "csv_file": main_csv,
-                "note":     f"模型检测到 {n_scratch} 段抓挠，请核实",
+                "note":     f"模型检测到 {len(scratch_segs)} 段抓挠，请核实",
             }
         })
         task_id += 1
@@ -162,52 +240,45 @@ def build_tasks(infer_jsons, csv_url_prefix, video_url_prefix, mode, low_thresho
 def main():
     parser = argparse.ArgumentParser(description="推理结果 → Label Studio 复查任务")
     parser.add_argument("--infer_dir",  required=True,
-                        help="包含 *_infer.json 的目录")
+                        help="包含 *_infer.json 或 clips_*/ 的目录")
     parser.add_argument("--output",     required=True,
                         help="输出 Label Studio JSON 路径")
     parser.add_argument("--csv_url_prefix", default="http://192.168.2.140:8182",
-                        help="CSV 文件的 URL 前缀（默认 http://192.168.2.140:8182）")
+                        help="CSV 文件 URL 前缀")
     parser.add_argument("--video_url_prefix", default="",
-                        help="MP4 文件的 URL 前缀（默认为 csv_url_prefix/transcoded）")
+                        help="MP4 文件 URL 前缀（默认 csv_url_prefix/transcoded）")
+    parser.add_argument("--use_clips",  action="store_true",
+                        help="扫描 clips_*/ 目录（推荐），而非 _infer.json")
     parser.add_argument("--mode", default="scratch_only",
-                        choices=["scratch_only", "uncertain", "all"],
-                        help="生成任务类型（默认 scratch_only）")
-    parser.add_argument("--low_threshold",  type=float, default=0.3,
-                        help="疑似抓挠下限概率（默认 0.3）")
-    parser.add_argument("--high_threshold", type=float, default=0.65,
-                        help="疑似抓挠上限概率（默认 0.65）")
-    parser.add_argument("--label", default="抓挠",
-                        help="要复查的目标类别（默认 抓挠）")
+                        choices=["scratch_only", "uncertain", "all"])
+    parser.add_argument("--low_threshold",  type=float, default=0.3)
+    parser.add_argument("--high_threshold", type=float, default=0.65)
+    parser.add_argument("--label", default="抓挠")
     args = parser.parse_args()
 
-    infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
-    infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
-    infer_jsons = sorted(set(infer_jsons))
+    video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
 
-    if not infer_jsons:
-        print(f"[错误] {args.infer_dir} 下没有找到 *_infer.json 文件")
-        return
-
-    print(f"找到 {len(infer_jsons)} 个推理结果文件")
-
-    video_url_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
-
-    tasks = build_tasks(
-        infer_jsons,
-        csv_url_prefix=args.csv_url_prefix,
-        video_url_prefix=video_url_prefix,
-        mode=args.mode,
-        low_threshold=args.low_threshold,
-        high_threshold=args.high_threshold,
-        label_name=args.label,
-    )
+    if args.use_clips:
+        print("模式: clips 裁剪片段")
+        tasks = build_tasks_from_clips(
+            args.infer_dir, args.csv_url_prefix, video_prefix, args.label)
+    else:
+        infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
+        infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
+        infer_jsons = sorted(set(infer_jsons))
+        if not infer_jsons:
+            print(f"[错误] {args.infer_dir} 下没有找到 *_infer.json")
+            return
+        print(f"模式: 全录制文件，找到 {len(infer_jsons)} 个推理结果")
+        tasks = build_tasks_from_infer(
+            infer_jsons, args.csv_url_prefix, video_prefix,
+            args.mode, args.low_threshold, args.high_threshold, args.label)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(tasks, f, ensure_ascii=False, indent=2)
 
-    n_scratch   = sum(1 for t in tasks if "scratch" in t["meta"].get("note", ""))
-    print(f"共生成 {len(tasks)} 个 Label Studio 任务（{n_scratch} 个含抓挠标注）")
+    print(f"共生成 {len(tasks)} 个 Label Studio 任务")
     print(f"已保存: {args.output}")
     print(f"\n导入方式: Label Studio → Import → 选择上面的 JSON 文件")
 
