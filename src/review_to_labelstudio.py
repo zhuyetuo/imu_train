@@ -130,7 +130,8 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
             g = groups[key]
             cam1_mp4_name = g.get("cam1_mp4", "")
             cam2_mp4_name = g.get("cam2_mp4", "")
-            cam1_csv_name = g.get("cam1_csv", "") or g.get("cam2_csv", "")  # cam2 csv 作为 fallback
+            # csv1 = 检测狗的 CSV（cam1 或 cam2 均可）
+            cam1_csv_name = g.get("cam1_csv", "") or g.get("cam2_csv", "")
 
             if not cam1_mp4_name and not cam1_csv_name:
                 continue
