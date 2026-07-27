@@ -66,15 +66,21 @@ def cut_clip(video_path: str, start_sec: float, end_sec: float,
              out_path: str, context_s: float) -> bool:
     t_start  = max(0.0, start_sec - context_s)
     duration = (end_sec + context_s) - t_start
+    # -i 先于 -ss：精确 seek，避免快速 seek 产生损坏帧
     cmd = [
         "ffmpeg", "-y",
-        "-ss", f"{t_start:.3f}",
         "-i", video_path,
+        "-ss", f"{t_start:.3f}",
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-an",
+        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+        "-avoid_negative_ts", "make_zero",
+        "-map_metadata", "-1",
         out_path,
     ]
-    return subprocess.run(cmd, capture_output=True).returncode == 0
+    ret = subprocess.run(cmd, capture_output=True)
+    if ret.returncode != 0:
+        print(f"    [ffmpeg错误] {ret.stderr.decode('utf-8', errors='replace')[-300:]}")
+    return ret.returncode == 0
 
 
 def slice_csv(src_csv: str, dst_csv: str,
