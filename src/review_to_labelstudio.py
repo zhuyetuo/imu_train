@@ -123,12 +123,14 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
             elif ext == ".csv":
                 if cam in ("cam1", ""):
                     groups[key]["cam1_csv"] = fname
+                elif cam == "cam2":
+                    groups[key]["cam2_csv"] = fname
 
         for key in sorted(groups):
             g = groups[key]
             cam1_mp4_name = g.get("cam1_mp4", "")
             cam2_mp4_name = g.get("cam2_mp4", "")
-            cam1_csv_name = g.get("cam1_csv", "")
+            cam1_csv_name = g.get("cam1_csv", "") or g.get("cam2_csv", "")  # cam2 csv 作为 fallback
 
             if not cam1_mp4_name and not cam1_csv_name:
                 continue

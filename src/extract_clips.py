@@ -226,6 +226,10 @@ def main():
         if not segs:
             continue
 
+        # 只处理 cam1 文件，cam2 作为兄弟自动配对；跳过 cam2 避免重复
+        if re.search(r"cam[2-9]_imu[2-9]", csv_basename):
+            continue
+
         stem1    = os.path.splitext(csv_basename)[0]
         stem2    = sibling_stem(stem1, 2)
         src_csv1 = os.path.join(args.video_dir, csv_basename)
