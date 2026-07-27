@@ -155,13 +155,10 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
 
     _copy_file() {
         local src="$1" dst="$2"
-        if [[ -f "$dst" ]]; then
-            n_skip=$((n_skip + 1))
-        else
-            [[ -L "$dst" ]] && rm "$dst"
-            cp "$src" "$dst"
-            n_copied=$((n_copied + 1))
-        fi
+        # 始终覆盖，避免旧的损坏文件留在 Nginx 目录
+        [[ -L "$dst" ]] && rm "$dst"
+        cp -f "$src" "$dst"
+        n_copied=$((n_copied + 1))
     }
 
     for day in "${days[@]}"; do
