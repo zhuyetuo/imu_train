@@ -143,14 +143,16 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
                 "csv1":   c1_url,
             }
 
-            # clip 本身就是抓挠片段，标注覆盖整个 clip（无需精确时间戳）
-            # 从 key 解析时间标签（如 185907-185910）
-            m = re.search(r"(\d{6})-(\d{6})$", key)
-            if m:
+            # 从 key 解析日期和时间（如 multicam_20260717_185620_clip03_190408-190410）
+            # 日期从会话前缀中提取：multicam_YYYYMMDD_...
+            date_m = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", key)
+            time_m = re.search(r"(\d{6})-(\d{6})$", key)
+            if date_m and time_m:
+                date_str = f"{date_m.group(1)}-{date_m.group(2)}-{date_m.group(3)}"
                 def hms_to_ts(hms: str) -> str:
-                    return f"2000-01-01 {hms[:2]}:{hms[2:4]}:{hms[4:6]}.000"
-                start_ts = hms_to_ts(m.group(1))
-                end_ts   = hms_to_ts(m.group(2))
+                    return f"{date_str} {hms[:2]}:{hms[2:4]}:{hms[4:6]}.000"
+                start_ts = hms_to_ts(time_m.group(1))
+                end_ts   = hms_to_ts(time_m.group(2))
                 results = [make_annotation(start_ts, end_ts, label_name)]
             else:
                 results = []
