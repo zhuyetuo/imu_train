@@ -98,16 +98,11 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         print(f"    [跳过] 时间偏移为负（video_t0={video_t0:.1f}, start={start_abs:.1f}）")
         return False
 
+    # 与 label_infra/auto_transcode.py 完全一致的转码参数
     if HAS_CUDA:
-        encode_args = [
-            "-c:v", "h264_nvenc", "-preset", "fast", "-cq", "23",
-            "-profile:v", "main",
-        ]
+        encode_args = ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "23"]
     else:
-        encode_args = [
-            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
-            "-profile:v", "main", "-pix_fmt", "yuv420p",
-        ]
+        encode_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
     cmd = [
         "ffmpeg", "-y",
@@ -115,9 +110,8 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         "-i", video_path,
         "-t", f"{duration:.3f}",
         *encode_args,
-        "-movflags", "+faststart",   # moov atom 放到文件头，浏览器可流式播放
-        "-avoid_negative_ts", "make_zero",
-        "-map_metadata", "-1",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
         out_path,
     ]
     ret = subprocess.run(cmd, capture_output=True)
