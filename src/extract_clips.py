@@ -21,6 +21,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 BINS = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
@@ -156,12 +158,44 @@ def slice_csv(src_csv: str, dst_csv: str,
         return False
 
 
+def _process_one(task: dict) -> dict:
+    """处理单个 clip 任务（在线程池中运行）。"""
+    args       = task["args"]
+    has_ffmpeg = task["has_ffmpeg"]
+    stem1      = task["stem1"]
+    stem2      = task["stem2"]
+    src_csv1   = task["src_csv1"]
+    cam1_mp4   = task["cam1_mp4"]
+    cam2_mp4   = task["cam2_mp4"]
+    video_t0   = task["video_t0"]
+    clip_dir   = task["clip_dir"]
+    suffix     = task["suffix"]
+    seg        = task["seg"]
+
+    start_sec = ts_to_sec(seg["start_ts"])
+    end_sec   = ts_to_sec(seg["end_ts"]) if seg["end_ts"] else start_sec + 2.0
+    pad_start = max(0.0, start_sec - args.context_s)
+    pad_end   = end_sec + args.context_s
+
+    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + ".mp4")
+    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
+    cam1_clip_csv = os.path.join(clip_dir, stem1 + suffix + ".csv")
+
+    ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0) if (cam1_mp4 and has_ffmpeg) else False
+    ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
+    ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
+
+    return {**task, "ok_cam1": ok_cam1, "ok_cam2": ok_cam2, "ok_csv": ok_csv}
+
+
 def main():
     parser = argparse.ArgumentParser(description="按置信度区间裁剪抓挠视频片段（witmotion_imu 格式）")
     parser.add_argument("--infer_dir",  required=True)
     parser.add_argument("--video_dir",  required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--context_s",  type=float, default=3.0)
+    parser.add_argument("--workers",    type=int,   default=4,
+                        help="并行裁剪线程数（默认 4，有 CUDA 建议 2-4）")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -175,73 +209,90 @@ def main():
     if not has_ffmpeg:
         print("[警告] 找不到 ffmpeg，只裁剪 CSV")
 
-    bin_logs = {}
-    bin_dirs = {}
+    print(f"编码器: {'CUDA (h264_nvenc)' if HAS_CUDA else 'CPU (libx264)'}  并行线程: {args.workers}")
+
+    # ── 收集所有 clip 任务 ────────────────────────────────────────────────────
+    bin_dirs  = {}
+    lock      = threading.Lock()
+    all_tasks = []
 
     for infer_path in infer_jsons:
         with open(infer_path, encoding="utf-8") as f:
             data = json.load(f)
-
         csv_basename = data["csv_basename"]
         segs = data.get("scratch_segments", [])
         if not segs:
             continue
 
-        stem1 = os.path.splitext(csv_basename)[0]   # cam1 stem
-        stem2 = sibling_stem(stem1, 2)               # cam2 stem
-
-        src_csv1  = os.path.join(args.video_dir, csv_basename)
-        cam1_mp4  = find_video(stem1, args.video_dir)
-        cam2_mp4  = find_video(stem2, args.video_dir)
-        # 从 CSV 读取视频起始绝对时间（用于计算 ffmpeg 相对偏移）
-        video_t0  = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
+        stem1    = os.path.splitext(csv_basename)[0]
+        stem2    = sibling_stem(stem1, 2)
+        src_csv1 = os.path.join(args.video_dir, csv_basename)
+        cam1_mp4 = find_video(stem1, args.video_dir)
+        cam2_mp4 = find_video(stem2, args.video_dir)
+        video_t0 = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
 
         for idx, seg in enumerate(segs, 1):
-            conf     = seg.get("conf_mean", 0.0)
-            conf_max = seg.get("conf_max",  0.0)
-            t0_str   = seg.get("start_ts", "") or ""
-            t1_str   = seg.get("end_ts",   "") or ""
+            t0_str = seg.get("start_ts", "") or ""
+            t1_str = seg.get("end_ts",   "") or ""
             if not t0_str:
                 continue
 
-            start_sec = ts_to_sec(t0_str)
-            end_sec   = ts_to_sec(t1_str) if t1_str else start_sec + 2.0
-            pad_start = max(0.0, start_sec - args.context_s)
-            pad_end   = end_sec + args.context_s
-
+            conf      = seg.get("conf_mean", 0.0)
+            conf_max  = seg.get("conf_max",  0.0)
             bin_label = get_bin(conf)
-            if bin_label not in bin_dirs:
-                bin_logs[bin_label] = []
-                clip_dir = os.path.join(args.output_dir, f"clips_{bin_label}")
-                os.makedirs(clip_dir, exist_ok=True)
-                bin_dirs[bin_label] = clip_dir
-            clip_dir = bin_dirs[bin_label]
+            suffix    = f"_clip{idx:02d}_{ts_to_hhmmss(t0_str)}-{ts_to_hhmmss(t1_str or t0_str)}"
 
-            # 命名: {stem}_clip{N:02d}_{HHMMSS}-{HHMMSS}
-            suffix = f"_clip{idx:02d}_{ts_to_hhmmss(t0_str)}-{ts_to_hhmmss(t1_str or t0_str)}"
+            with lock:
+                if bin_label not in bin_dirs:
+                    clip_dir = os.path.join(args.output_dir, f"clips_{bin_label}")
+                    os.makedirs(clip_dir, exist_ok=True)
+                    bin_dirs[bin_label] = clip_dir
+                clip_dir = bin_dirs[bin_label]
 
-            cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + ".mp4")
-            cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
-            cam1_clip_csv = os.path.join(clip_dir, stem1 + suffix + ".csv")
+            all_tasks.append({
+                "args": args, "has_ffmpeg": has_ffmpeg,
+                "stem1": stem1, "stem2": stem2,
+                "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
+                "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
+                "seg": {"start_ts": t0_str, "end_ts": t1_str,
+                        "conf_mean": conf, "conf_max": conf_max},
+                "csv_basename": csv_basename, "bin_label": bin_label,
+            })
 
-            ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0) if (cam1_mp4 and has_ffmpeg) else False
-            ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
-            ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
+    print(f"共 {len(all_tasks)} 个 clip 任务，开始并行处理...")
+
+    # ── 并行执行 ─────────────────────────────────────────────────────────────
+    bin_logs  = {bl: [] for bl in bin_dirs}
+    done = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(_process_one, t): t for t in all_tasks}
+        for fut in as_completed(futures):
+            res = fut.result()
+            done += 1
+            seg       = res["seg"]
+            t0_str    = seg["start_ts"]
+            t1_str    = seg["end_ts"]
+            conf      = seg["conf_mean"]
+            conf_max  = seg["conf_max"]
+            bin_label = res["bin_label"]
+            stem1     = res["stem1"]
+            suffix    = res["suffix"]
 
             parts = [
-                "cam1✅" if ok_cam1 else ("cam1⚠️" if not cam1_mp4 else "cam1❌"),
-                "cam2✅" if ok_cam2 else ("cam2⚠️" if not cam2_mp4 else "cam2❌"),
-                "csv✅"  if ok_csv  else "csv❌",
+                "cam1✅" if res["ok_cam1"] else ("cam1⚠️" if not res["cam1_mp4"] else "cam1❌"),
+                "cam2✅" if res["ok_cam2"] else ("cam2⚠️" if not res["cam2_mp4"] else "cam2❌"),
+                "csv✅"  if res["ok_csv"]  else "csv❌",
             ]
             status = " ".join(parts)
-            print(f"  [{bin_label}] {csv_basename} #{idx}  "
+            print(f"  [{done}/{len(all_tasks)}] [{bin_label}] {res['csv_basename']}  "
                   f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
                   f"conf={conf:.2f}  {status}")
 
-            line = (f"{csv_basename}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
+            line = (f"{res['csv_basename']}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
                     f"\tconf_mean={conf:.3f}\tconf_max={conf_max:.3f}"
                     f"\t{stem1 + suffix + '.mp4'}\t{status}")
-            bin_logs[bin_label].append(line)
+            with lock:
+                bin_logs[bin_label].append(line)
 
     for bin_label, lines in sorted(bin_logs.items()):
         log_path = os.path.join(args.output_dir, f"scratch_log_review_{bin_label}.txt")

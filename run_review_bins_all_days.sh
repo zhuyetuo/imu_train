@@ -117,7 +117,8 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
             --infer_dir  "$out_dir/_infer" \
             --video_dir  "$video_dir" \
             --output_dir "$out_dir" \
-            --context_s  "$CONTEXT_S"
+            --context_s  "$CONTEXT_S" \
+            --workers    "${CLIP_WORKERS:-4}"
     done
 fi
 
