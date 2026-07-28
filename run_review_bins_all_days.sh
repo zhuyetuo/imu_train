@@ -34,6 +34,7 @@ LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
 LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
+MERGE_GAP="${MERGE_GAP:-3}"        # 合并相邻抓挠片段的最大间隔秒数（默认3s）
 EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
 MEDIA_DIR="${MEDIA_DIR:-$HOME/label_infra/data/media}"  # Nginx 媒体目录（软链接目标）
 SYMLINK_CSV="${SYMLINK_CSV:-1}"     # 是否自动为 CSV 创建软链接（0=跳过）
@@ -109,6 +110,7 @@ for day in "${days[@]}"; do
         --output_dir "$infer_json_dir" \
         --quiet \
         --scratch_only \
+        --merge_gap "$MERGE_GAP" \
         $hz_args \
         2>&1 | tee "$out_dir/infer.log"
 
