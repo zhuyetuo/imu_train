@@ -37,11 +37,16 @@ CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
 MEDIA_DIR="${MEDIA_DIR:-$HOME/label_infra/data/media}"  # Nginx 媒体目录（软链接目标）
 SYMLINK_CSV="${SYMLINK_CSV:-1}"     # 是否自动为 CSV 创建软链接（0=跳过）
+INCLUDE_DAYS="${INCLUDE_DAYS:-}"    # 空格分隔的白名单，非空时只处理列出的日期
 
-# ── 构建排除集合 ──────────────────────────────────────────
+# ── 构建排除/包含集合 ─────────────────────────────────────
 declare -A EXCLUDE_SET
 for day in $EXCLUDE_DAYS; do
     EXCLUDE_SET["$day"]=1
+done
+declare -A INCLUDE_SET
+for day in $INCLUDE_DAYS; do
+    INCLUDE_SET["$day"]=1
 done
 
 echo "=============================================="
@@ -49,6 +54,7 @@ echo "  批量推理"
 echo "  数据根目录: $DATA_ROOT"
 echo "  模型: $MODEL"
 echo "  结果目录: $RESULT_ROOT"
+echo "  仅处理: ${INCLUDE_DAYS:-（全部）}"
 echo "  排除: ${EXCLUDE_DAYS:-（无）}"
 echo "=============================================="
 
@@ -56,6 +62,10 @@ echo "=============================================="
 days=()
 for d in "$DATA_ROOT"/*/; do
     day=$(basename "$d")
+    # 白名单过滤（INCLUDE_DAYS 非空时生效）
+    if [[ ${#INCLUDE_SET[@]} -gt 0 && -z "${INCLUDE_SET[$day]}" ]]; then
+        continue
+    fi
     if [[ -n "${EXCLUDE_SET[$day]}" ]]; then
         echo "  跳过: $day"
         continue
