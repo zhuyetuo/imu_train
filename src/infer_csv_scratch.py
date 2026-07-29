@@ -106,7 +106,7 @@ def sliding_windows(data, window_size, stride):
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
-               output_dir=None):
+               output_dir=None, min_windows=1, **kwargs):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -205,6 +205,15 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
                 continue
         merged.append([t0, t1, i0, i1])
 
+    # 过滤窗口数不足的短片段
+    if min_windows > 1:
+        before = len(merged)
+        merged = [s for s in merged
+                  if sum(1 for k in range(len(preds))
+                         if start_indices[k] >= s[2] and start_indices[k] <= s[3]) >= min_windows]
+        if not scratch_only and before != len(merged):
+            print(f"  [过滤] 丢弃 {before - len(merged)} 段（窗口数 < {min_windows}）")
+
     def fmt(t, i, suffix=""):
         return t.strftime(f"%H:%M:%S{suffix}") if t else f"帧{i}"
 
@@ -290,6 +299,8 @@ def main():
                         help="只输出检测到抓挠的文件，忽略无抓挠的文件")
     parser.add_argument("--merge_gap", type=float, default=10.0,
                         help="合并相邻抓挠片段的最大间隔秒数（默认10s）")
+    parser.add_argument("--min_windows", type=int, default=1,
+                        help="片段最少窗口数，不足则丢弃（默认1=不过滤）")
     parser.add_argument("--workers", type=int, default=-1,
                         help="并行进程数（默认-1=用全部CPU核，1=单进程）")
     parser.add_argument("--output_dir", default="",
@@ -354,6 +365,7 @@ def main():
                               quiet=args.quiet,
                               scratch_only=args.scratch_only,
                               merge_gap_s=args.merge_gap,
+                              min_windows=args.min_windows,
                               output_dir=out_dir)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
