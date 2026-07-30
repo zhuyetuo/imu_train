@@ -296,7 +296,7 @@ def main(args):
     result = {
         "hz": args.hz, "model": args.model,
         "accuracy": acc, "macro_f1": f1,
-        "classes": present_names,
+        "classes": classes,  # 全部训练类别，而非仅测试集出现的类别
         "gravity_aligned": gravity_aligned,
         "window_size": window_size,
         "stride": stride,
