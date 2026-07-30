@@ -147,9 +147,10 @@ def main(args):
         # 按与真实数据相同的比例分配合成数据到 train/val/test
         syn_train_r = float(meta.get("train_ratio", 0.8))
         syn_val_r   = float(meta.get("val_ratio",   0.1))
+        syn_test_r  = float(meta.get("test_ratio",  max(0.0, 1.0 - syn_train_r - syn_val_r)))
         n = len(X_syn)
         n_val = max(1, int(n * syn_val_r))
-        n_te  = max(0, int(n * (1.0 - syn_train_r - syn_val_r)))
+        n_te  = max(0, int(n * syn_test_r))
         n_tr  = n - n_val - n_te
         rng = np.random.default_rng(42)
         idx = rng.permutation(n)
