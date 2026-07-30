@@ -228,8 +228,8 @@ def main(args):
     window_sec = cfg["window_seconds"]
     stride_sec = cfg["stride_seconds"]
     seed = cfg["seed"]
-    train_r = cfg["train_ratio"]
-    val_r = cfg["val_ratio"]
+    train_r = args.train_ratio if args.train_ratio > 0 else cfg["train_ratio"]
+    val_r   = args.val_ratio   if args.val_ratio   > 0 else cfg["val_ratio"]
 
     records, keep_label_set = load_records(args, cfg)
     source_hz = cfg["source_hz"]  # load_records 可能修改 cfg["source_hz"]（如 custom 数据集），需在其后读取
@@ -354,6 +354,10 @@ if __name__ == "__main__":
     parser.add_argument("--split_strategy", default="auto",
                         choices=["auto", "subject", "random", "label_concat"],
                         help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分, label_concat=按类别拼接片段后滑窗（充分利用短片段）")
+    parser.add_argument("--train_ratio", type=float, default=0.0,
+                        help="训练集比例（0=从 configs/data.yaml 读取，默认0）")
+    parser.add_argument("--val_ratio", type=float, default=0.0,
+                        help="验证集比例（0=从 configs/data.yaml 读取，默认0）；test=1-train-val")
     parser.add_argument("--hz", type=int, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
     main(parser.parse_args())
