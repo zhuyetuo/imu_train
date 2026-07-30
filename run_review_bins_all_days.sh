@@ -207,7 +207,7 @@ for day in "${days[@]}"; do
     n_scratch=$(python -c "
 import glob, json, sys
 total = 0
-for f in glob.glob('$out_dir/*_infer.json'):
+for f in glob.glob('$out_dir/**/*_infer.json', recursive=True):
     d = json.load(open(f))
     total += len(d.get('scratch_segments', []))
 print(total)
