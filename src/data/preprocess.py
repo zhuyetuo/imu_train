@@ -311,6 +311,8 @@ def main(args):
             "n_channels": str(X_train.shape[2] if X_train.ndim == 3 else 6),
             "classes": str(classes),
             "split_strategy": strategy,
+            "train_ratio": str(train_r),
+            "val_ratio":   str(val_r),
             "train_dog_ids": str(list(train_ids)) if train_ids is not None else "[]",
             "val_dog_ids":   str(list(val_ids))   if val_ids   is not None else "[]",
             "test_dog_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
