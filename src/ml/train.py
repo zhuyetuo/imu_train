@@ -144,10 +144,12 @@ def main(args):
             syn_label_id = len(classes)               # 追加为新类别
             classes      = classes + [syn_label]
 
-        # 按 8:1:1 分配合成数据到 train/val/test
+        # 按与真实数据相同的比例分配合成数据到 train/val/test
+        syn_train_r = float(meta.get("train_ratio", 0.8))
+        syn_val_r   = float(meta.get("val_ratio",   0.1))
         n = len(X_syn)
-        n_val = max(1, n // 10)
-        n_te  = max(1, n // 10)
+        n_val = max(1, int(n * syn_val_r))
+        n_te  = max(0, int(n * (1.0 - syn_train_r - syn_val_r)))
         n_tr  = n - n_val - n_te
         rng = np.random.default_rng(42)
         idx = rng.permutation(n)
