@@ -225,6 +225,8 @@ bash train_custom.sh --date $DATE
 --n_aug           50      每段原始片段的增强倍数（默认 50）
 --label           抓挠    要合成的少数类别（默认 抓挠）
 --split_strategy  random  训练/验证/测试划分策略（默认 random，见下）
+--train_ratio     0.9     训练集比例（默认 0.9）
+--val_ratio       0.1     验证集比例（默认 0.1，test = 1 - train - val）
 ```
 
 **`--split_strategy` 说明**
@@ -235,6 +237,15 @@ bash train_custom.sh --date $DATE
 | `subject` | 按狗 ID 划分，同一条狗只出现在一个集合里 | 狗的数量足够多时推荐。能真实评估模型对**未见过的新狗**的泛化能力，但若某几条狗的行为分布偏斜，验证集指标会出现类别严重不均的情况 |
 
 > 狗的数量少时用 `subject` 会导致验证集某些类别样本极少（例如只有15个活动窗口），指标失去参考价值，因此默认 `random`。数据积累到覆盖20条以上的狗时，建议切换到 `subject` 以获得更真实的泛化评估。
+
+**`--train_ratio` / `--val_ratio` 说明**
+
+`test = 1 - train_ratio - val_ratio`，设为 0 即无测试集。
+
+| 阶段 | 推荐比例 | 原因 |
+|---|---|---|
+| 纠错循环阶段（默认） | `--train_ratio 0.9 --val_ratio 0.1` | 数据量少，纠错样本应尽量全部进训练集；测试集意义不大，验证集用于监控过拟合即可 |
+| 模型成熟、准备上线 | `--train_ratio 0.8 --val_ratio 0.1` | 留出 10% 测试集做最终无偏评估 |
 
 输出：
 ```
