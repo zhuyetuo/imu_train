@@ -199,6 +199,8 @@ def main():
     parser.add_argument("--context_s",  type=float, default=3.0)
     parser.add_argument("--workers",    type=int,   default=4,
                         help="并行裁剪线程数（默认 4，有 CUDA 建议 2-4）")
+    parser.add_argument("--bin_by", default="conf_max", choices=["conf_max", "conf_mean"],
+                        help="置信度分桶依据：conf_max=片段内最高置信度（默认），conf_mean=片段内平均置信度")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -249,9 +251,10 @@ def main():
             if not t0_str:
                 continue
 
-            conf      = seg.get("conf_mean", 0.0)
+            conf_mean = seg.get("conf_mean", 0.0)
             conf_max  = seg.get("conf_max",  0.0)
-            bin_label = get_bin(conf)
+            bin_conf  = conf_max if args.bin_by == "conf_max" else conf_mean
+            bin_label = get_bin(bin_conf)
             suffix    = f"_clip{idx:02d}_{ts_to_hhmmss(t0_str)}-{ts_to_hhmmss(t1_str or t0_str)}"
 
             with lock:
@@ -268,8 +271,9 @@ def main():
                 "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
-                        "conf_mean": conf, "conf_max": conf_max},
+                        "conf_mean": conf_mean, "conf_max": conf_max},
                 "csv_basename": csv_basename, "bin_label": bin_label,
+                "bin_by": args.bin_by,
             })
 
     print(f"共 {len(all_tasks)} 个 clip 任务，开始并行处理...")
@@ -285,11 +289,12 @@ def main():
             seg       = res["seg"]
             t0_str    = seg["start_ts"]
             t1_str    = seg["end_ts"]
-            conf      = seg["conf_mean"]
+            conf_mean = seg["conf_mean"]
             conf_max  = seg["conf_max"]
             bin_label = res["bin_label"]
             stem1     = res["stem1"]
             suffix    = res["suffix"]
+            bin_by    = res["bin_by"]
 
             parts = [
                 "cam1✅" if res["ok_cam1"] else ("cam1⚠️" if not res["cam1_mp4"] else "cam1❌"),
@@ -297,12 +302,13 @@ def main():
                 "csv✅"  if res["ok_csv"]  else "csv❌",
             ]
             status = " ".join(parts)
+            bin_conf = conf_max if bin_by == "conf_max" else conf_mean
             print(f"  [{done}/{len(all_tasks)}] [{bin_label}] {res['csv_basename']}  "
                   f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
-                  f"conf={conf:.2f}  {status}")
+                  f"{bin_by}={bin_conf:.2f}  {status}")
 
             line = (f"{res['csv_basename']}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
-                    f"\tconf_mean={conf:.3f}\tconf_max={conf_max:.3f}"
+                    f"\tconf_mean={conf_mean:.3f}\tconf_max={conf_max:.3f}"
                     f"\t{stem1 + suffix + '.mp4'}\t{status}")
             with lock:
                 bin_logs[bin_label].append(line)

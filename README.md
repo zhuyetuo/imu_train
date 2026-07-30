@@ -392,6 +392,67 @@ python src/infer_csv_scratch.py \
 
 详细用法见各文档页。
 
+**`infer_csv_scratch.py` 片段过滤参数**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--merge_gap` | 3 | 相邻抓挠片段间隔 ≤ N 秒时合并为一段 |
+| `--min_windows` | 1 | 片段包含的窗口数不足时丢弃（1=不过滤） |
+| `--no_keep_isolated` | 不传 | 传此参数则丢弃**孤立单窗口片段**（见下方说明） |
+
+**孤立单窗口片段**：前一个窗口和后一个窗口均不是抓挠，只有中间这1个窗口被判为抓挠。由于相邻窗口有1秒重叠，真实抓挠（通常持续2秒以上）几乎必然触发连续多个窗口；孤立单窗口通常意味着动作持续时间不足1秒，可能是瞬时晃动误报，也可能是真实的极短抓挠。默认**保留**，依靠置信度分桶来区分优先级。如果发现低置信度孤立窗口大量出现，可加 `--no_keep_isolated` 过滤。
+
+---
+
+### 批量推理 + 视频裁剪 + Label Studio 复查
+
+```bash
+DATA_ROOT=data/raw_custom/data \
+MODEL=results/processed_2026_7_23/16hz_remap_custom_3class_syn/ml_rf.pkl \
+WORKERS=16 RESULT_ROOT=infer_result \
+PATTERN="*resampled16hz.csv" DEVICE_HZ=16 \
+./run_review_bins_all_days.sh
+```
+
+只处理特定日期：
+```bash
+INCLUDE_DAYS="2026_7_24" \
+DATA_ROOT=... MODEL=... \
+./run_review_bins_all_days.sh
+```
+
+**`run_review_bins_all_days.sh` 环境变量**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MERGE_GAP` | 3 | 合并相邻片段的最大间隔秒数 |
+| `MIN_WINDOWS` | 1 | 片段最少窗口数（1=不过滤） |
+| `KEEP_ISOLATED` | 1 | 1=保留孤立单窗口片段，0=丢弃 |
+| `BIN_BY` | conf_max | 置信度分桶依据（见下方说明） |
+| `CONTEXT_S` | 3 | 裁剪片段前后保留秒数 |
+| `CLIP_WORKERS` | 4 | 视频裁剪并行线程数 |
+| `INCLUDE_DAYS` | （空=全部） | 空格分隔的白名单，只处理列出的日期 |
+| `EXCLUDE_DAYS` | （空） | 空格分隔的跳过日期列表 |
+
+**`BIN_BY`：置信度分桶依据**
+
+每段抓挠片段同时记录 `conf_max`（段内最高置信度）和 `conf_mean`（段内平均置信度）。
+
+| 值 | 行为 | 适用场景 |
+|---|---|---|
+| `conf_max`（默认） | 按段内**最高**置信度分桶 | 复查优先：只要片段内有一个窗口模型非常确定，就放入高优先级桶，不会因为前后犹豫窗口被降级 |
+| `conf_mean` | 按段内**平均**置信度分桶 | 保守优先：要求整段都持续高置信度才进高桶，适合已知误报率较低时使用 |
+
+两个值都会保存在 `_infer.json` 里，无论用哪个分桶，另一个仍可在日志中查看。
+
+**复查优先级建议**（适用于两种 `BIN_BY`）：
+
+```
+clips_0.8-1.0/  ← 先看，模型最确定，漏掉真实抓挠代价最高
+clips_0.6-0.8/  ← 次看，边界案例，修正后对模型提升最大
+clips_0.3-0.6/  ← 数量多时可抽样，主要用于捡漏和分析误报类型
+```
+
 ---
 
 ## 参考论文
