@@ -266,16 +266,26 @@ def main(args):
         model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
 
     from sklearn.metrics import accuracy_score, f1_score, classification_report
-    y_pred = np.array(model.predict(X_te_f)).flatten().astype(int)
-    acc = accuracy_score(y_te, y_pred)
-    f1 = f1_score(y_te, y_pred, average="macro")
 
-    print(f"\n[ml/train] 测试集结果:")
+    has_test = len(X_te_f) > 0
+    if has_test:
+        eval_tag = "测试集"
+        X_eval_f, y_eval = X_te_f, y_te
+    else:
+        # test_ratio=0 时无测试集，改用验证集汇报指标（仅供参考，验证集参与了早停/模型选择）
+        eval_tag = "验证集（无测试集，仅供参考）"
+        X_eval_f, y_eval = X_val_f, y_val
+
+    y_pred = np.array(model.predict(X_eval_f)).flatten().astype(int)
+    acc = accuracy_score(y_eval, y_pred)
+    f1 = f1_score(y_eval, y_pred, average="macro")
+
+    print(f"\n[ml/train] {eval_tag}结果:")
     print(f"  Accuracy: {acc:.4f}")
     print(f"  Macro F1: {f1:.4f}")
-    present_labels = sorted(set(y_te) | set(y_pred))
+    present_labels = sorted(set(y_eval) | set(y_pred))
     present_names = [classes[i] for i in present_labels]
-    print(classification_report(y_te, y_pred, labels=present_labels, target_names=present_names,
+    print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
 
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
@@ -283,7 +293,7 @@ def main(args):
     syn_tag     = "_syn" if args.synthetic else ""
     out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}{syn_tag}")
     os.makedirs(out_dir, exist_ok=True)
-    per_class = classification_report(y_te, y_pred, labels=present_labels,
+    per_class = classification_report(y_eval, y_pred, labels=present_labels,
                                       target_names=present_names,
                                       zero_division=0, output_dict=True)
     gravity_aligned = meta.get("gravity_aligned", "True")
