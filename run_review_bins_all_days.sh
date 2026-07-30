@@ -34,8 +34,10 @@ LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
 LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
-MERGE_GAP="${MERGE_GAP:-3}"        # 合并相邻抓挠片段的最大间隔秒数（默认3s）
-MIN_WINDOWS="${MIN_WINDOWS:-1}"    # 片段最少窗口数，不足则丢弃（默认1=不过滤）
+MERGE_GAP="${MERGE_GAP:-3}"            # 合并相邻抓挠片段的最大间隔秒数（默认3s）
+MIN_WINDOWS="${MIN_WINDOWS:-1}"        # 片段最少窗口数，不足则丢弃（默认1=不过滤）
+KEEP_ISOLATED="${KEEP_ISOLATED:-1}"    # 是否保留孤立单窗口片段（默认1=保留）
+BIN_BY="${BIN_BY:-conf_max}"           # 置信度分桶依据：conf_max（默认）或 conf_mean
 EXTRACT_CLIPS="${EXTRACT_CLIPS:-1}" # 是否裁剪视频（0=跳过）
 MEDIA_DIR="${MEDIA_DIR:-$HOME/label_infra/data/media}"  # Nginx 媒体目录（软链接目标）
 SYMLINK_CSV="${SYMLINK_CSV:-1}"     # 是否自动为 CSV 创建软链接（0=跳过）
@@ -113,6 +115,7 @@ for day in "${days[@]}"; do
         --scratch_only \
         --merge_gap "$MERGE_GAP" \
         --min_windows "$MIN_WINDOWS" \
+        $( [[ "$KEEP_ISOLATED" == "0" ]] && echo "--no_keep_isolated" ) \
         $hz_args \
         2>&1 | tee "$out_dir/infer.log"
 
@@ -132,7 +135,8 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
             --video_dir  "$video_dir" \
             --output_dir "$out_dir" \
             --context_s  "$CONTEXT_S" \
-            --workers    "${CLIP_WORKERS:-4}"
+            --workers    "${CLIP_WORKERS:-4}" \
+            --bin_by     "$BIN_BY"
     done
 fi
 
