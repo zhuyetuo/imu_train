@@ -88,10 +88,13 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
     n = len(X_all)
     idx = rng.permutation(n)
     n_train = int(n * train_r)
-    n_val = int(n * val_r)
-    # 保证 val/test 各至少 1 个窗口
-    n_val  = max(1, n_val)  if n >= 3 else n_val
-    n_test = max(1, n - n_train - n_val) if n >= 3 else n - n_train - n_val
+    n_val   = int(n * val_r)
+    n_test  = n - n_train - n_val
+    # 只有当 val_r > 0 / test_r > 0 时才保证至少1个样本
+    if val_r > 0 and n >= 3:
+        n_val = max(1, n_val)
+    if (1.0 - train_r - val_r) > 0 and n >= 3:
+        n_test = max(1, n_test)
     n_train = n - n_val - n_test
     i_train = idx[:n_train]
     i_val   = idx[n_train:n_train + n_val]
