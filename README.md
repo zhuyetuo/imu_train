@@ -226,7 +226,8 @@ bash train_custom.sh --date $DATE
 --label           抓挠    要合成的少数类别（默认 抓挠）
 --split_strategy  random  训练/验证/测试划分策略（默认 random，见下）
 --train_ratio     0.9     训练集比例（默认 0.9）
---val_ratio       0.1     验证集比例（默认 0.1，test = 1 - train - val）
+--val_ratio       0.1     验证集比例（默认 0.1）
+--test_ratio      0.0     测试集比例（默认 0.0=无测试集）
 ```
 
 **`--split_strategy` 说明**
@@ -244,8 +245,8 @@ bash train_custom.sh --date $DATE
 
 | 阶段 | 推荐比例 | 原因 |
 |---|---|---|
-| 纠错循环阶段（默认） | `--train_ratio 0.9 --val_ratio 0.1` | 数据量少，纠错样本应尽量全部进训练集；测试集意义不大，验证集用于监控过拟合即可 |
-| 模型成熟、准备上线 | `--train_ratio 0.8 --val_ratio 0.1` | 留出 10% 测试集做最终无偏评估 |
+| 纠错循环阶段（默认） | `--train_ratio 0.9 --val_ratio 0.1 --test_ratio 0.0` | 数据量少，纠错样本应尽量全部进训练集；测试集不参与训练也不影响训练决策，此阶段意义不大 |
+| 模型成熟、准备上线 | `--train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1` | 留出 10% 测试集做最终无偏评估，评估结果完全独立于训练过程 |
 
 输出：
 ```

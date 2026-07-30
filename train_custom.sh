@@ -20,8 +20,9 @@ REMAP="configs/remap_custom_3class.yaml"
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
 SPLIT_STRATEGY="random"   # random=混合所有狗后按窗口划分（默认），subject=按狗ID划分
-TRAIN_RATIO="0.9"         # 训练集比例（默认0.9，纠错循环阶段无需测试集）
-VAL_RATIO="0.1"           # 验证集比例（默认0.1，test=1-train-val=0）
+TRAIN_RATIO="0.9"         # 训练集比例（默认0.9）
+VAL_RATIO="0.1"           # 验证集比例（默认0.1）
+TEST_RATIO="0.0"          # 测试集比例（默认0=无测试集，纠错循环阶段不需要）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
     --train_ratio)    TRAIN_RATIO="$2";    shift 2 ;;
     --val_ratio)      VAL_RATIO="$2";      shift 2 ;;
+    --test_ratio)     TEST_RATIO="$2";     shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -69,6 +71,7 @@ python src/data/preprocess.py \
   --split_strategy "$SPLIT_STRATEGY" \
   --train_ratio "$TRAIN_RATIO" \
   --val_ratio "$VAL_RATIO" \
+  --test_ratio "$TEST_RATIO" \
   --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────

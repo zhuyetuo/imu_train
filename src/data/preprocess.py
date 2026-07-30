@@ -230,6 +230,13 @@ def main(args):
     seed = cfg["seed"]
     train_r = args.train_ratio if args.train_ratio > 0 else cfg["train_ratio"]
     val_r   = args.val_ratio   if args.val_ratio   > 0 else cfg["val_ratio"]
+    if args.test_ratio >= 0:
+        test_r = args.test_ratio
+        # 用户显式指定了测试集比例，重新归一化 train/val
+        total = train_r + val_r + test_r
+        if abs(total - 1.0) > 1e-6:
+            print(f"[preprocess] 警告: train+val+test={total:.3f}，自动归一化")
+            train_r, val_r = train_r / total, val_r / total
 
     records, keep_label_set = load_records(args, cfg)
     source_hz = cfg["source_hz"]  # load_records 可能修改 cfg["source_hz"]（如 custom 数据集），需在其后读取
@@ -313,6 +320,7 @@ def main(args):
             "split_strategy": strategy,
             "train_ratio": str(train_r),
             "val_ratio":   str(val_r),
+            "test_ratio":  str(round(1.0 - train_r - val_r, 6)),
             "train_dog_ids": str(list(train_ids)) if train_ids is not None else "[]",
             "val_dog_ids":   str(list(val_ids))   if val_ids   is not None else "[]",
             "test_dog_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
@@ -357,9 +365,11 @@ if __name__ == "__main__":
                         choices=["auto", "subject", "random", "label_concat"],
                         help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分, label_concat=按类别拼接片段后滑窗（充分利用短片段）")
     parser.add_argument("--train_ratio", type=float, default=0.0,
-                        help="训练集比例（0=从 configs/data.yaml 读取，默认0）")
+                        help="训练集比例（0=从 configs/data.yaml 读取）")
     parser.add_argument("--val_ratio", type=float, default=0.0,
-                        help="验证集比例（0=从 configs/data.yaml 读取，默认0）；test=1-train-val")
+                        help="验证集比例（0=从 configs/data.yaml 读取）")
+    parser.add_argument("--test_ratio", type=float, default=-1.0,
+                        help="测试集比例（-1=由 1-train-val 推导，0=无测试集）")
     parser.add_argument("--hz", type=int, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
     main(parser.parse_args())
