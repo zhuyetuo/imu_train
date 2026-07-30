@@ -19,14 +19,16 @@ LABEL="抓挠"
 REMAP="configs/remap_custom_3class.yaml"
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
+SPLIT_STRATEGY="random"   # random=混合所有狗后按窗口划分（默认），subject=按狗ID划分
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --date)   DATE="$2";  shift 2 ;;
-    --hz)     HZ="$2";    shift 2 ;;
-    --n_aug)  N_AUG="$2"; shift 2 ;;
-    --label)  LABEL="$2"; shift 2 ;;
+    --date)           DATE="$2";           shift 2 ;;
+    --hz)             HZ="$2";             shift 2 ;;
+    --n_aug)          N_AUG="$2";          shift 2 ;;
+    --label)          LABEL="$2";          shift 2 ;;
+    --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -60,7 +62,7 @@ python src/data/preprocess.py \
   --raw_csv_custom "$CSV" \
   --output_dir "$PROCESSED_DIR" \
   --config configs/data.yaml \
-  --split_strategy subject \
+  --split_strategy "$SPLIT_STRATEGY" \
   --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
