@@ -87,15 +87,18 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
     rng = np.random.default_rng(seed)
     n = len(X_all)
     idx = rng.permutation(n)
-    n_train = int(n * train_r)
-    n_val   = int(n * val_r)
-    n_test  = n - n_train - n_val
-    # 只有当 val_r > 0 / test_r > 0 时才保证至少1个样本
+    test_r = max(0.0, 1.0 - train_r - val_r)
+    n_val  = int(round(n * val_r))
+    n_test = int(round(n * test_r))
+    # 只有当 val_r > 0 / test_r > 0 时才保证至少1个样本；
+    # test_r 基本为0时强制清零，避免取整误差把剩余样本漏进测试集
     if val_r > 0 and n >= 3:
         n_val = max(1, n_val)
-    if (1.0 - train_r - val_r) > 0 and n >= 3:
+    if test_r > 1e-9 and n >= 3:
         n_test = max(1, n_test)
-    n_train = n - n_val - n_test
+    else:
+        n_test = 0
+    n_train = n - n_val - n_test  # 训练集吸收取整后的剩余样本
     i_train = idx[:n_train]
     i_val   = idx[n_train:n_train + n_val]
     i_test  = idx[n_train + n_val:]
