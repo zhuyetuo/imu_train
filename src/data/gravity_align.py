@@ -65,3 +65,35 @@ def gravity_align_batch(X: np.ndarray) -> np.ndarray:
     if len(X) == 0:
         return X
     return np.stack([gravity_align(w) for w in X])
+
+
+def raw_tilt(acc: np.ndarray) -> np.ndarray:
+    """
+    Per-sample pitch/roll (radians) from RAW, un-rotated accelerometer.
+
+    Must be computed BEFORE gravity_align: that function rotates each
+    window so its mean acc vector points to +Z, which forces every
+    window's average tilt to ~0 and destroys absolute-posture information
+    (lying vs sitting vs standing). This function is meant to be called
+    on the original per-window acc slice, with the result concatenated
+    as extra channels alongside the (separately) gravity-aligned acc/gyro.
+
+    Args:
+        acc: (T, 3) raw accelerometer.
+    Returns:
+        (T, 2) float32 array of [pitch, roll].
+    """
+    ax, ay, az = acc[:, 0], acc[:, 1], acc[:, 2]
+    pitch = np.arctan2(-ax, np.sqrt(ay ** 2 + az ** 2))
+    roll  = np.arctan2(ay, az)
+    return np.stack([pitch, roll], axis=1).astype(np.float32)
+
+
+def append_raw_tilt_batch(X: np.ndarray) -> np.ndarray:
+    """X: (N, T, C>=3) raw (pre-alignment) window batch, acc in cols 0:3.
+    Returns X with 2 extra trailing channels [pitch, roll] appended."""
+    if len(X) == 0:
+        n_ch = X.shape[2] if X.ndim == 3 else 6
+        return np.empty((0, X.shape[1] if X.ndim == 3 else 0, n_ch + 2), dtype=np.float32)
+    tilt = np.stack([raw_tilt(w[:, :3]) for w in X], axis=0)
+    return np.concatenate([X, tilt], axis=2).astype(np.float32)

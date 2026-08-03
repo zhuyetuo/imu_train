@@ -13,7 +13,7 @@ import numpy as np
 import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
-from gravity_align import gravity_align_batch
+from gravity_align import gravity_align_batch, append_raw_tilt_batch
 
 
 def downsample(data, labels, source_hz, target_hz):
@@ -144,8 +144,10 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
         if not wins:
             continue
         arr = np.array(wins, dtype=np.float32)
+        tilt = append_raw_tilt_batch(arr)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             arr = gravity_align_batch(arr)
+        arr = np.concatenate([arr, tilt], axis=2)
         X_all.append(arr)
         y_all.append(np.full(len(arr), lbl_id, dtype=np.int64))
         y_seq_all.append(np.tile(
@@ -170,8 +172,10 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
         if len(X) == 0:
             continue
+        tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             X = gravity_align_batch(X)
+        X = np.concatenate([X, tilt], axis=2)
         X_all.append(X)
         y_all.append(y)
         y_seq_all.append(y_seq)

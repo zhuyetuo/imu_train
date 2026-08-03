@@ -12,6 +12,7 @@
 | [training.md](docs/training.md) | ML/DL 训练、批量实验、实验结果、SHAP 分析 |
 | [inference.md](docs/inference.md) | 离线推理、规则推理、实时 BLE 推理 |
 | [vision.md](docs/vision.md) | 视觉行为识别（CLIP / 豆包 / YOLO26） |
+| [features.md](docs/features.md) | 特征工程说明（每个特征对应的物理/行为意义）、行为分类体系（当前3分类 + 规划中的瘙痒细分类） |
 
 ---
 
