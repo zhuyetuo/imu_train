@@ -1,5 +1,5 @@
 """
-手工特征提取（时域 + 频域 + 跨轴 + 姿态），供 ML 模型使用。
+手工特征提取（时域 + 频域 + 跨轴 + 姿态 + 模长 + Jerk），供 ML 模型使用。
 
 输入通道约定（固定顺序）：
   0:3  acc_x, acc_y, acc_z   （重力对齐后）
@@ -18,22 +18,47 @@ from scipy import stats, signal
 FREQ_BANDS = [(0.0, 0.125), (0.125, 0.375), (0.375, 0.75), (0.75, 1.0)]
 
 
+def _time_stats_1d(x: np.ndarray) -> list:
+    """单个一维信号的10个时域统计量，供逐通道特征和模长/Jerk特征共用"""
+    std = np.std(x)
+    q1, q3 = np.percentile(x, [25, 75])
+    return [
+        np.mean(x),
+        std,
+        np.min(x),
+        np.max(x),
+        np.max(x) - np.min(x),                      # 极差
+        np.sqrt(np.mean(x ** 2)),                    # RMS
+        stats.skew(x) if std > 1e-8 else 0.0,
+        stats.kurtosis(x) if std > 1e-8 else 0.0,
+        np.sum(np.diff(np.sign(x)) != 0),            # 过零率
+        q3 - q1,                                      # IQR，比std更抗突发尖峰噪声
+    ]
+
+
+def _freq_stats_1d(x: np.ndarray, hz: int) -> list:
+    """单个一维信号的频域统计量：4个统计量 + 4个分频段能量占比"""
+    freqs, psd = signal.welch(x, fs=hz, nperseg=min(len(x), 32))
+    psd_norm = psd / (psd.sum() + 1e-8)
+    spec_mean = np.sum(freqs * psd_norm)
+    feats = [
+        spec_mean,                                                # 频谱均值
+        np.sqrt(np.sum((freqs - spec_mean) ** 2 * psd_norm)),     # 频谱标准差
+        freqs[np.argmax(psd)],                                    # 主频
+        -np.sum(psd_norm * np.log(psd_norm + 1e-8)),              # 频谱熵
+    ]
+    nyq = hz / 2.0
+    for lo_frac, hi_frac in FREQ_BANDS:
+        mask = (freqs >= lo_frac * nyq) & (freqs < hi_frac * nyq)
+        feats.append(float(psd_norm[mask].sum()))                 # 分频段能量占比
+    return feats
+
+
 def _time_features(window: np.ndarray) -> np.ndarray:
     """window: (window_size, n_channels) → 1D 特征向量，逐通道提取"""
     feats = []
     for ch in range(window.shape[1]):
-        x = window[:, ch]
-        feats.extend([
-            np.mean(x),
-            np.std(x),
-            np.min(x),
-            np.max(x),
-            np.max(x) - np.min(x),
-            np.sqrt(np.mean(x ** 2)),                   # RMS
-            stats.skew(x) if np.std(x) > 1e-8 else 0.0,
-            stats.kurtosis(x) if np.std(x) > 1e-8 else 0.0,
-            np.sum(np.diff(np.sign(x)) != 0),           # zero crossing rate
-        ])
+        feats.extend(_time_stats_1d(window[:, ch]))
     return np.array(feats, dtype=np.float32)
 
 
@@ -41,20 +66,7 @@ def _freq_features(window: np.ndarray, hz: int, n_ch: int) -> np.ndarray:
     """频域特征：只对前 n_ch 个通道（acc+gyro）提取，姿态角通道跳过（非振荡信号）"""
     feats = []
     for ch in range(min(n_ch, window.shape[1])):
-        x = window[:, ch]
-        freqs, psd = signal.welch(x, fs=hz, nperseg=min(len(x), 32))
-        psd_norm = psd / (psd.sum() + 1e-8)
-        spec_mean = np.sum(freqs * psd_norm)
-        feats.extend([
-            spec_mean,                                                     # 频谱均值
-            np.sqrt(np.sum((freqs - spec_mean) ** 2 * psd_norm)),          # 频谱标准差
-            freqs[np.argmax(psd)],                                        # 主频
-            -np.sum(psd_norm * np.log(psd_norm + 1e-8)),                  # 频谱熵
-        ])
-        nyq = hz / 2.0
-        for lo_frac, hi_frac in FREQ_BANDS:
-            mask = (freqs >= lo_frac * nyq) & (freqs < hi_frac * nyq)
-            feats.append(float(psd_norm[mask].sum()))                     # 分频段能量占比
+        feats.extend(_freq_stats_1d(window[:, ch], hz))
     return np.array(feats, dtype=np.float32)
 
 
@@ -89,6 +101,34 @@ def _global_features(window: np.ndarray) -> np.ndarray:
     return np.array(feats, dtype=np.float32)
 
 
+def _magnitude(triplet: np.ndarray) -> np.ndarray:
+    """三轴合成模长 sqrt(x²+y²+z²)，旋转不变，抗项圈朝向漂移"""
+    return np.sqrt(np.sum(triplet ** 2, axis=1))
+
+
+def _magnitude_features(window: np.ndarray, hz: int) -> np.ndarray:
+    """acc模长、gyro模长各自的时域+频域特征（各10+8=18维）"""
+    feats = []
+    for triplet in (window[:, 0:3], window[:, 3:6]):
+        mag = _magnitude(triplet)
+        feats.extend(_time_stats_1d(mag))
+        feats.extend(_freq_stats_1d(mag, hz))
+    return np.array(feats, dtype=np.float32)
+
+
+def _jerk_features(window: np.ndarray, hz: int) -> np.ndarray:
+    """
+    加速度的加加速度（Jerk）模长的时域统计量，捕捉动作的"突然性"。
+    平缓行走 jerk 小；惊吓反应、甩头、抓挠回位等瞬时动作 jerk 会有明显尖峰，
+    这是均值/标准差/峰度都容易漏掉的维度。
+    只对加速度算（角加速度可类推，暂不加，避免维度膨胀）。
+    """
+    acc = window[:, 0:3]
+    jerk = np.diff(acc, axis=0) * hz  # 近似导数：Δacc / Δt
+    jerk_mag = _magnitude(jerk)
+    return np.array(_time_stats_1d(jerk_mag), dtype=np.float32)
+
+
 def _feature_dim(window_size: int, n_channels: int, hz: int) -> int:
     dummy = np.zeros((window_size, n_channels), dtype=np.float32)
     return len(_extract_one(dummy, hz))
@@ -98,6 +138,8 @@ def _extract_one(window: np.ndarray, hz: int) -> np.ndarray:
     parts = [_time_features(window), _freq_features(window, hz, n_ch=6)]
     if window.shape[1] >= 6:
         parts.append(_global_features(window))
+        parts.append(_magnitude_features(window, hz))
+        parts.append(_jerk_features(window, hz))
     return np.concatenate(parts)
 
 
