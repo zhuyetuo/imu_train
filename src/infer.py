@@ -34,7 +34,7 @@ import json
 import numpy as np
 import pandas as pd
 import yaml
-from gravity_align import gravity_align_batch
+from gravity_align import gravity_align_batch, append_raw_tilt_batch
 
 SOURCE_HZ = 50   # TXT 文件采样率
 SENSOR_COLS = ["AX", "AY", "AZ", "GX", "GY", "GZ"]
@@ -263,8 +263,10 @@ def main(args):
             print(f"  [跳过] {fname}: 数据太短，无法生成窗口（需至少 {window_size} 帧）")
             continue
 
+        tilt = append_raw_tilt_batch(windows)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             windows = gravity_align_batch(windows)
+        windows = np.concatenate([windows, tilt], axis=2)
 
         preds, confidences = predict_fn(windows)
         if remap_cfg:

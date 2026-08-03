@@ -15,6 +15,7 @@ import joblib
 
 from dataset import load_all_splits
 from features import extract_features
+from gravity_align import gravity_align_batch, append_raw_tilt_batch
 from models.random_forest import build_rf
 from models.xgboost_model import build_xgb
 from models.lightgbm_model import build_lgbm
@@ -135,7 +136,14 @@ def main(args):
     # 合成数据注入（如抓挠伪数据）
     if args.synthetic:
         syn = np.load(args.synthetic)
-        X_syn = syn["X"]                          # (N, window_size, 6)
+        X_syn = syn["X"]                          # (N, window_size, 6) 原始未对齐 acc+gyro
+        # 合成数据历史上从未做过重力对齐，真实数据现在是 8 通道（对齐acc/gyro + 原始tilt），
+        # 这里补齐同样的处理，否则和真实数据的特征空间不一致，且通道数拼接会直接报错
+        gravity_aligned_meta = str(meta.get("gravity_aligned", "True")).lower() == "true"
+        tilt_syn = append_raw_tilt_batch(X_syn)[:, :, 6:8]
+        if gravity_aligned_meta:
+            X_syn = gravity_align_batch(X_syn)
+        X_syn = np.concatenate([X_syn, tilt_syn], axis=2)
         syn_label    = args.synthetic_label
         if syn_label in classes:
             syn_label_id = classes.index(syn_label)   # 合并到已有类别
@@ -212,12 +220,16 @@ def main(args):
     feat_dir = os.path.join(args.processed_dir, f"{args.hz}hz")
     feat_cache = os.path.join(feat_dir, "ml_features.npz")
 
+    expected_dim = extract_features(X_tr[:1], args.hz, show_progress=False).shape[1] if len(X_tr) else None
+
     if os.path.exists(feat_cache):
         cache = np.load(feat_cache)
         X_tr_f, X_val_f, X_te_f = cache["X_tr"], cache["X_val"], cache["X_te"]
-        # 缓存与当前 npz 样本数不一致说明数据已重新预处理，需重建缓存
-        if len(X_tr_f) != len(X_tr) or len(X_te_f) != len(X_te):
-            print(f"[ml/train] 缓存样本数与数据不符，重建缓存: {feat_cache}")
+        # 缓存与当前 npz 样本数或特征维度不一致，说明数据/特征工程已变化，需重建缓存
+        dim_mismatch = expected_dim is not None and X_tr_f.shape[1] != expected_dim
+        if len(X_tr_f) != len(X_tr) or len(X_te_f) != len(X_te) or dim_mismatch:
+            reason = "特征维度变化" if dim_mismatch else "样本数与数据不符"
+            print(f"[ml/train] 缓存{reason}，重建缓存: {feat_cache}")
             os.remove(feat_cache)
             X_tr_f = extract_features(X_tr, args.hz)
             X_val_f = extract_features(X_val, args.hz)

@@ -37,7 +37,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
 
-from gravity_align import gravity_align
+from gravity_align import gravity_align, append_raw_tilt_batch
 from features import extract_features
 
 import joblib
@@ -144,10 +144,12 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     if len(X) == 0:
         return
 
+    tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
     if gravity_aligned:
         X_aligned = np.stack([gravity_align(X[i]) for i in range(len(X))])
     else:
         X_aligned = X
+    X_aligned = np.concatenate([X_aligned, tilt], axis=2)
 
     # 提取特征 + 预测
     feats = extract_features(X_aligned, model_hz, show_progress=not quiet and not scratch_only)
