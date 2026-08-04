@@ -549,6 +549,25 @@ def main():
     print(f"  验算: C+D+F+FM+M = {c_count + d_count + f_count + fm_count + m_count}"
           f"  （应等于真实事件总数 {n_gt}）")
 
+    # ── F1e 计算过程明细：TP=C, FN=D+F+FM+M, FP=M'+FM'+F'+I' ──────────────
+    mp_count = detailed_best["M'"]
+    fmp_count = detailed_best["FM'"]
+    fp_count_label = detailed_best["F'"]
+    tp = c_count
+    fn = d_count + f_count + fm_count + m_count
+    fp = mp_count + fmp_count + fp_count_label + insert_count
+    f1e_p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    f1e_r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1e_val = 2 * f1e_p * f1e_r / (f1e_p + f1e_r) if (f1e_p + f1e_r) > 0 else 0.0
+    print(f"\n  F1e 计算过程：")
+    print(f"    TP = C = {tp}")
+    print(f"    FN = D+F+FM+M = {d_count}+{f_count}+{fm_count}+{m_count} = {fn}")
+    print(f"    FP = M'+FM'+F'+I' = {mp_count}+{fmp_count}+{fp_count_label}+{insert_count} = {fp}"
+          f"  （M'/FM'/F' 是造成合并/碎片化的那些预测片段本身，I'是纯误报）")
+    print(f"    precision_e = TP/(TP+FP) = {tp}/{tp+fp} = {f1e_p:.3f}")
+    print(f"    recall_e    = TP/(TP+FN) = {tp}/{tp+fn} = {f1e_r:.3f}")
+    print(f"    F1e = 2×P×R/(P+R) = {f1e_val:.3f}")
+
     # ── 全部真实事件逐条对应表：每一条的类别 + 匹配到的预测区间 + project信息 ──
     print(f"\n{'='*90}")
     print(f"  全部 {n_gt} 个真实事件逐条对应表（供逐条去 Label Studio 复查）")
