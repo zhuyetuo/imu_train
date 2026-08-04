@@ -143,6 +143,37 @@ def _extract_one(window: np.ndarray, hz: int) -> np.ndarray:
     return np.concatenate(parts)
 
 
+CHANNEL_NAMES = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z", "pitch", "roll"]
+
+TIME_FEAT_NAMES = ["mean", "std", "min", "max", "range", "rms", "skew", "kurtosis", "zcr", "iqr"]
+FREQ_FEAT_NAMES = ["spec_mean", "spec_std", "peak_freq", "spec_entropy",
+                    "band_energy_0", "band_energy_1", "band_energy_2", "band_energy_3"]
+GLOBAL_FEAT_NAMES = ["sma_acc", "sma_gyro",
+                      "corr_acc_xy", "corr_acc_yz", "corr_acc_xz",
+                      "corr_gyro_xy", "corr_gyro_yz", "corr_gyro_xz"]
+MAG_FEAT_NAMES = [f"acc_mag_{f}" for f in TIME_FEAT_NAMES] + [f"acc_mag_{f}" for f in FREQ_FEAT_NAMES] \
+                + [f"gyro_mag_{f}" for f in TIME_FEAT_NAMES] + [f"gyro_mag_{f}" for f in FREQ_FEAT_NAMES]
+JERK_FEAT_NAMES = [f"acc_jerk_mag_{f}" for f in TIME_FEAT_NAMES]
+
+
+def feature_names(n_channels: int) -> list:
+    """特征名列表，顺序必须与 _extract_one 的拼接顺序完全一致：
+    时域(全部通道) → 频域(仅前6通道 acc+gyro) → 全局(SMA+轴间相关)
+    → acc/gyro模长(时域+频域) → acc-jerk模长(时域)，后三组仅当 n_channels>=6"""
+    names = []
+    for ch in range(n_channels):
+        ch_name = CHANNEL_NAMES[ch] if ch < len(CHANNEL_NAMES) else f"ch{ch}"
+        names.extend(f"{ch_name}_{feat}" for feat in TIME_FEAT_NAMES)
+    for ch in range(min(6, n_channels)):
+        ch_name = CHANNEL_NAMES[ch] if ch < len(CHANNEL_NAMES) else f"ch{ch}"
+        names.extend(f"{ch_name}_{feat}" for feat in FREQ_FEAT_NAMES)
+    if n_channels >= 6:
+        names.extend(GLOBAL_FEAT_NAMES)
+        names.extend(MAG_FEAT_NAMES)
+        names.extend(JERK_FEAT_NAMES)
+    return names
+
+
 def extract_features(X: np.ndarray, hz: int, show_progress: bool = True) -> np.ndarray:
     """
     X: (N, window_size, n_channels)，n_channels 为 6（acc+gyro）或 8（+pitch/roll）
