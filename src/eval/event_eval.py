@@ -6,21 +6,28 @@
 依赖: pip install ward-metrics   （import 名是 wardmetrics，注意不一致）
 
 用法:
-  # 对比不同 merge_gap 取值对碎片化/合并的影响
+  # 扫描不同置信度阈值，看预测事件的可信度分布 + 各阈值下的事件级表现
   python src/eval/event_eval.py \\
     --labeled_csv data/raw_custom/2026_7_30/merged_all_labels_2026_7_30.csv \\
     --model results/processed_2026_7_30/16hz_remap_custom_3class_syn/ml_rf.pkl \\
     --hz 16 --target_label 抓挠 \\
-    --merge_gap 0 3 10
+    --confidence_threshold 0.0 0.4 0.5 0.6 0.7 0.8 0.9
+
+  # 对比不同 merge_gap 取值（固定置信度阈值为0）
+  python src/eval/event_eval.py \\
+    --labeled_csv ... --model ... --confidence_threshold 0.0 \\
+    --merge_gap 0 1 3 10   # 传给 --merge_gap 的仍是单值时忽略，见下方参数说明
 
 原理:
   1. 从已标注CSV按 dog_id 提取真实的目标行为连续片段（事件），单位转成秒。
-  2. 用给定模型对同一份数据做滑窗推理，得到逐窗口预测，合并成预测片段
-     （按不同 merge_gap 值分别合并，复现 infer_csv_scratch.py 的合并逻辑）。
-  3. 把真实事件和预测事件喂给 wardmetrics.eval_events，得到事件级
-     precision/recall，以及漏检/碎片化/合并/误报的具体数量。
-  4. 跨多个 merge_gap 值对比，直接回答"调大/调小 merge_gap 对碎片化和
-     合并谁更有利"这个问题，而不是凭感觉猜。
+  2. 用给定模型对同一份数据做滑窗推理，取每个窗口 argmax 标签 + 该标签的
+     置信度（predict_proba 最大值），逻辑与 infer_csv_scratch.py 一致。
+  3. 先打印"窗口级置信度分布"：预测为 target_label 的窗口里，有多少落在
+     各置信度阈值以上——直接回答"预测抓挠的窗口是不是大多集中在高置信度
+     区间"这个问题，不需要先转成事件。
+  4. 再对每个置信度阈值，只保留 conf>=阈值 的目标窗口合并成预测事件
+     （merge_gap 固定，默认1s），喂给 wardmetrics.eval_events，看事件级的
+     漏检/碎片化/合并/误报数量随阈值如何变化。
 """
 
 import argparse
@@ -40,7 +47,6 @@ from features import extract_features
 
 try:
     from wardmetrics.core_methods import eval_events
-    from wardmetrics.utils import print_standard_event_metrics, print_detailed_event_metrics
 except ImportError:
     print("[错误] 未安装 ward-metrics，请先: pip install ward-metrics")
     sys.exit(1)
@@ -80,17 +86,20 @@ def sliding_windows(data, window_size, stride):
 
 
 def predict_dog(data6, model, classes, window_size, stride, hz):
-    """对单条狗的完整原始信号做滑窗推理，返回 (pred_labels, start_indices)"""
+    """对单条狗的完整原始信号做滑窗推理，返回 (pred_labels, pred_confs, start_indices)。
+    pred_confs 是每个窗口 argmax 类别自身的概率（与 infer_csv_scratch.py 语义一致）。"""
     X, starts = sliding_windows(data6, window_size, stride)
     if len(X) == 0:
-        return [], []
+        return [], [], []
     tilt = append_raw_tilt_batch(X)[:, :, 6:8]
     X_aligned = gravity_align_batch(X)
     X_full = np.concatenate([X_aligned, tilt], axis=2)
     feats = extract_features(X_full, hz, show_progress=False)
-    preds = model.predict(feats)
-    pred_labels = [classes[int(p)] for p in preds]
-    return pred_labels, starts
+    probs = model.predict_proba(feats)
+    pred_ids = np.argmax(probs, axis=1)
+    pred_confs = probs[np.arange(len(probs)), pred_ids]
+    pred_labels = [classes[int(p)] for p in pred_ids]
+    return pred_labels, pred_confs, starts
 
 
 def merge_segments(intervals, merge_gap):
@@ -106,16 +115,18 @@ def merge_segments(intervals, merge_gap):
     return [tuple(x) for x in merged]
 
 
-def pred_windows_to_segments(pred_labels, starts, window_size, hz, target_label):
-    """把逐窗口预测里等于 target_label 的窗口，合并成连续的原始片段（未做 merge_gap 合并）"""
+def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, target_label, conf_threshold):
+    """把逐窗口预测里 label==target_label 且 conf>=conf_threshold 的窗口，
+    合并成连续的原始片段（未做 merge_gap 合并）"""
     raw_segs = []
     in_seg = False
     seg_start = None
     prev_end = None
-    for lbl, s in zip(pred_labels, starts):
+    for lbl, conf, s in zip(pred_labels, pred_confs, starts):
+        hit = (lbl == target_label) and (conf >= conf_threshold)
         start_sec = s / hz
         end_sec = (s + window_size) / hz
-        if lbl == target_label:
+        if hit:
             if not in_seg:
                 in_seg = True
                 seg_start = start_sec
@@ -129,6 +140,16 @@ def pred_windows_to_segments(pred_labels, starts, window_size, hz, target_label)
     return raw_segs
 
 
+def eval_at_merge_gap(gt_events, raw_segs, merge_gap):
+    det_events = merge_segments(sorted(raw_segs), merge_gap)
+    if not det_events:
+        return len(det_events), 0.0, 0.0, 0.0, len(gt_events), 0, 0, 0
+    gt_scores, det_scores, detailed, standard = eval_events(gt_events, det_events)
+    p, r = standard["precision"], standard["recall"]
+    f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    return len(det_events), p, r, f1, detailed["D"], detailed["F"], detailed["M"], detailed["I'"]
+
+
 def main():
     ap = argparse.ArgumentParser(description="事件级评估：真实标注 vs 模型预测的目标行为片段对应关系")
     ap.add_argument("--labeled_csv", required=True)
@@ -137,8 +158,11 @@ def main():
     ap.add_argument("--target_label", default="抓挠")
     ap.add_argument("--dog_id_col", default="dog_id")
     ap.add_argument("--label_col", default="label")
-    ap.add_argument("--merge_gap", type=float, nargs="+", default=[0, 3, 10],
-                     help="要对比的 merge_gap 取值列表（秒），默认对比 0/3/10")
+    ap.add_argument("--merge_gap", type=float, default=1.0,
+                     help="事件级评估用的合并间隔秒数（默认1s，单值，见 README 说明）")
+    ap.add_argument("--confidence_threshold", type=float, nargs="+",
+                     default=[0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+                     help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9）")
     args = ap.parse_args()
 
     model = joblib.load(args.model)
@@ -147,9 +171,9 @@ def main():
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
-        classes    = meta.get("classes", [])
-        window_s   = float(meta.get("window_s", 2.0))
-        stride_s   = float(meta.get("stride_s", 1.0))
+        classes  = meta.get("classes", [])
+        window_s = float(meta.get("window_s", 2.0))
+        stride_s = float(meta.get("stride_s", 1.0))
     else:
         classes = list(model.classes_) if hasattr(model, "classes_") else []
     if args.target_label not in classes:
@@ -157,7 +181,7 @@ def main():
         return
     window_size = int(window_s * args.hz)
     stride = max(1, int(stride_s * args.hz))
-    print(f"[模型] 类别={classes}  窗口={window_s}s  步长={stride_s}s")
+    print(f"[模型] 类别={classes}  窗口={window_s}s  步长={stride_s}s  merge_gap={args.merge_gap}s")
 
     df = pd.read_csv(args.labeled_csv)
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
@@ -167,8 +191,9 @@ def main():
         print(f"[错误] 找不到 acc/gyro 列: {list(df.columns)}")
         return
 
-    gt_events_all = []       # 拼接所有狗的真实事件（带偏移）
-    raw_pred_segs_all = []   # 拼接所有狗的"原始"预测片段（未合并，带偏移）
+    gt_events_all = []             # 拼接所有狗的真实事件（带偏移）
+    target_window_confs_all = []   # 所有 argmax==target_label 窗口的置信度（不带偏移，纯统计用）
+    dog_window_records = []        # [(pred_labels, pred_confs, starts, offset), ...] 每条狗，供后续按阈值重建片段
 
     dog_ids = sorted(df[args.dog_id_col].unique())
     print(f"共 {len(dog_ids)} 条狗，逐条推理中...")
@@ -185,60 +210,64 @@ def main():
         data6 = np.concatenate(
             [sub[acc_cols].values, sub[gyro_cols].values], axis=1
         ).astype(np.float32)
-        pred_labels, starts = predict_dog(data6, model, classes, window_size, stride, args.hz)
-        raw_segs = pred_windows_to_segments(pred_labels, starts, window_size, args.hz, args.target_label)
-        raw_pred_segs_all.extend((s + offset, e + offset) for s, e in raw_segs)
+        pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, args.hz)
+        dog_window_records.append((pred_labels, pred_confs, starts, offset))
+        target_window_confs_all.extend(
+            c for lbl, c in zip(pred_labels, pred_confs) if lbl == args.target_label
+        )
 
     gt_events_all = sorted(gt_events_all)
-    raw_pred_segs_all = sorted(raw_pred_segs_all)
+    target_window_confs_all = np.array(target_window_confs_all)
     print(f"\n真实 '{args.target_label}' 事件数: {len(gt_events_all)}")
-    print(f"模型原始预测片段数（合并前）: {len(raw_pred_segs_all)}")
+    print(f"模型预测为 '{args.target_label}' 的窗口总数（未按置信度过滤）: {len(target_window_confs_all)}")
 
     if not gt_events_all:
         print("[警告] 没有真实事件，无法评估")
         return
 
+    # ── 窗口级置信度分布 ──────────────────────────────────────────────────
     print(f"\n{'='*78}")
-    print(f"  不同 merge_gap 取值下的事件级评估对比")
+    print(f"  窗口级置信度分布（预测为 '{args.target_label}' 的窗口，按阈值累计保留比例）")
     print(f"{'='*78}")
-    header = f"  {'merge_gap':>10}{'预测事件数':>10}{'precision':>12}{'recall':>10}{'F1':>8}" \
+    print(f"  {'阈值>=':>8}{'保留窗口数':>12}{'占比':>10}")
+    n_total_windows = len(target_window_confs_all)
+    for thr in args.confidence_threshold:
+        n_keep = int((target_window_confs_all >= thr).sum()) if n_total_windows else 0
+        pct = n_keep / n_total_windows * 100 if n_total_windows else 0.0
+        print(f"  {thr:>8.2f}{n_keep:>12}{pct:>9.1f}%")
+
+    # ── 事件级评估，按置信度阈值扫描 ──────────────────────────────────────
+    print(f"\n{'='*78}")
+    print(f"  不同置信度阈值下的事件级评估（merge_gap={args.merge_gap}s 固定）")
+    print(f"{'='*78}")
+    header = f"  {'阈值>=':>8}{'预测事件数':>10}{'precision':>12}{'recall':>10}{'F1':>8}" \
              f"{'漏检D':>8}{'碎片F':>8}{'合并M':>8}{'误报I‘':>8}"
     print(header)
 
-    for mg in args.merge_gap:
-        det_events = merge_segments(raw_pred_segs_all, mg)
-        if not det_events:
-            # wardmetrics 对空预测列表直接报错，手动兜底：全部真实事件都算漏检
-            p, r, f1 = 0.0, 0.0, 0.0
-            n_d, n_f, n_m, n_insert = len(gt_events_all), 0, 0, 0
-        else:
-            gt_scores, det_scores, detailed, standard = eval_events(gt_events_all, det_events)
-            p, r = standard["precision"], standard["recall"]
-            f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
-            n_d, n_f, n_m, n_insert = detailed["D"], detailed["F"], detailed["M"], detailed["I'"]
-        row = (f"  {mg:>10.1f}{len(det_events):>10}{p:>12.3f}{r:>10.3f}{f1:>8.3f}"
+    for thr in args.confidence_threshold:
+        raw_segs = []
+        for pred_labels, pred_confs, starts, offset in dog_window_records:
+            segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
+                                            args.hz, args.target_label, thr)
+            raw_segs.extend((s + offset, e + offset) for s, e in segs)
+        n_det, p, r, f1, n_d, n_f, n_m, n_insert = eval_at_merge_gap(gt_events_all, raw_segs, args.merge_gap)
+        row = (f"  {thr:>8.2f}{n_det:>10}{p:>12.3f}{r:>10.3f}{f1:>8.3f}"
                f"{n_d:>8}{n_f:>8}{n_m:>8}{n_insert:>8}")
         print(row)
 
     print(f"""
 {'='*78}
-  列说明：
-    precision/recall/F1  ward-metrics库内置的事件级指标——⚠️ 注意：这个
-                          precision/recall 把"合并"(M)当作命中处理，不算
-                          错误，所以 merge_gap 很大、把好几次抓挠合并成一次
-                          时，precision/recall 依然会显示很高（如上面例子），
-                          不能只看这两个数字判断好坏。
-    漏检D   真实事件完全没被检测到
-    碎片F   一个真实事件被切成多个预测片段（merge_gap太小容易出现）
-    合并M   多个真实事件被错误合并成一个预测片段（merge_gap太大容易出现，
-            但不计入库自带的precision/recall，需要单独盯着这一列看）
-    误报I'  预测出来但根本不存在对应真实事件的纯虚警
-
-  实际判断 merge_gap 好不好，主要看 D/F/M/I' 这四列的绝对数量，而不是
-  precision/recall——如果你关心"统计每天抓挠次数"，合并(M)对你来说是
-  实实在在的错误（次数被低估了），但库自带指标不会体现这一点。
-  典型规律：merge_gap 增大 → 碎片F减少，但合并M可能增加，需要根据下游
-  用途（比如次数统计 vs 只关心有没有发生）权衡选择。
+  怎么解读：
+  - 窗口级分布表：如果预测为目标行为的窗口大量集中在低置信度区间（比如
+    阈值0.5时保留比例已经腰斩），说明模型对这个类别整体不够自信，提高
+    阈值虽然能过滤掉一部分误报，但可能连带砍掉不少真实检测。
+  - 事件级表：⚠️ precision/recall 由 ward-metrics 库计算，把"合并"(M)
+    当命中处理，不算错误，不能只看这两个数字。重点看 D/F/M/I' 的绝对
+    数量随阈值提高怎么变化——理想情况下，阈值提高时 I'（纯误报）应该
+    明显下降，而 D（漏检）不应该涨得太快；如果阈值刚提到0.5、0.6，D就
+    涨得很猛，说明模型对真实抓挠的置信度普遍也不高，问题不是"阈值没调
+    好"，而是训练数据/特征本身对这个类别的区分度还不够，需要回到标注
+    数据质量和数量上想办法，而不是靠调阈值解决。
 {'='*78}
 """)
 
