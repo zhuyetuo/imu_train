@@ -6,28 +6,25 @@
 依赖: pip install ward-metrics   （import 名是 wardmetrics，注意不一致）
 
 用法:
-  # 扫描不同置信度阈值，看预测事件的可信度分布 + 各阈值下的事件级表现
+  # 网格搜索：置信度阈值 × merge_gap，自动找出综合最优组合
+  # （每次换新模型/新数据重新跑一遍即可，不用每次手动试）
   python src/eval/event_eval.py \\
     --labeled_csv data/raw_custom/2026_7_30/merged_all_labels_2026_7_30.csv \\
     --model results/processed_2026_7_30/16hz_remap_custom_3class_syn/ml_rf.pkl \\
     --hz 16 --target_label 抓挠 \\
-    --confidence_threshold 0.0 0.4 0.5 0.6 0.7 0.8 0.9
-
-  # 对比不同 merge_gap 取值（固定置信度阈值为0）
-  python src/eval/event_eval.py \\
-    --labeled_csv ... --model ... --confidence_threshold 0.0 \\
-    --merge_gap 0 1 3 10   # 传给 --merge_gap 的仍是单值时忽略，见下方参数说明
+    --confidence_threshold 0.0 0.4 0.5 0.6 0.7 0.8 0.9 \\
+    --merge_gap 1 1.5 2 2.5 3
 
 原理:
   1. 从已标注CSV按 dog_id 提取真实的目标行为连续片段（事件），单位转成秒。
-  2. 用给定模型对同一份数据做滑窗推理，取每个窗口 argmax 标签 + 该标签的
-     置信度（predict_proba 最大值），逻辑与 infer_csv_scratch.py 一致。
+  2. 用给定模型对同一份数据做滑窗推理一次，取每个窗口 argmax 标签 + 该标签
+     的置信度（predict_proba 最大值），逻辑与 infer_csv_scratch.py 一致。
   3. 先打印"窗口级置信度分布"：预测为 target_label 的窗口里，有多少落在
-     各置信度阈值以上——直接回答"预测抓挠的窗口是不是大多集中在高置信度
-     区间"这个问题，不需要先转成事件。
-  4. 再对每个置信度阈值，只保留 conf>=阈值 的目标窗口合并成预测事件
-     （merge_gap 固定，默认1s），喂给 wardmetrics.eval_events，看事件级的
-     漏检/碎片化/合并/误报数量随阈值如何变化。
+     各置信度阈值以上——不需要先转成事件就能看出模型整体自不自信。
+  4. 对 (置信度阈值, merge_gap) 的每一种组合都跑一遍事件级评估，打印完整
+     网格，并按论文里定义的 F1e 指标（把碎片化F、合并M都算作错误，不像
+     ward-metrics库自带的precision/recall那样把M当命中）自动挑出最优组合，
+     直接给出下次推理该用的参数，而不是人工盯着表格猜。
 """
 
 import argparse
@@ -140,14 +137,32 @@ def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, t
     return raw_segs
 
 
+def compute_f1e(detailed):
+    """按论文定义的事件级 F1e：TP=C，FN=D+F+FM+M（碎片化/合并都算错误），
+    FP=M'+FM'+F'+I'。与 ward-metrics 库自带、把"合并"当命中的 precision/
+    recall 不同，这个才是自动选参数时该用的指标。"""
+    tp = detailed["C"]
+    fn = detailed["D"] + detailed["F"] + detailed["FM"] + detailed["M"]
+    fp = detailed["M'"] + detailed["FM'"] + detailed["F'"] + detailed["I'"]
+    p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1e = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    return p, r, f1e
+
+
 def eval_at_merge_gap(gt_events, raw_segs, merge_gap):
+    """返回 (n_det, lib_p, lib_r, lib_f1, D, F, M, I', f1e_p, f1e_r, f1e)"""
     det_events = merge_segments(sorted(raw_segs), merge_gap)
+    n_gt = len(gt_events)
     if not det_events:
-        return len(det_events), 0.0, 0.0, 0.0, len(gt_events), 0, 0, 0
+        return 0, 0.0, 0.0, 0.0, n_gt, 0, 0, 0, 0.0, 0.0, 0.0
     gt_scores, det_scores, detailed, standard = eval_events(gt_events, det_events)
-    p, r = standard["precision"], standard["recall"]
-    f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
-    return len(det_events), p, r, f1, detailed["D"], detailed["F"], detailed["M"], detailed["I'"]
+    lib_p, lib_r = standard["precision"], standard["recall"]
+    lib_f1 = 2 * lib_p * lib_r / (lib_p + lib_r) if (lib_p + lib_r) > 0 else 0.0
+    f1e_p, f1e_r, f1e = compute_f1e(detailed)
+    return (len(det_events), lib_p, lib_r, lib_f1,
+            detailed["D"], detailed["F"], detailed["M"], detailed["I'"],
+            f1e_p, f1e_r, f1e)
 
 
 def main():
@@ -158,8 +173,9 @@ def main():
     ap.add_argument("--target_label", default="抓挠")
     ap.add_argument("--dog_id_col", default="dog_id")
     ap.add_argument("--label_col", default="label")
-    ap.add_argument("--merge_gap", type=float, default=1.0,
-                     help="事件级评估用的合并间隔秒数（默认1s，单值，见 README 说明）")
+    ap.add_argument("--merge_gap", type=float, nargs="+",
+                     default=[1.0, 1.5, 2.0, 2.5, 3.0],
+                     help="要扫描的 merge_gap 取值列表（秒，默认 1 1.5 2 2.5 3）")
     ap.add_argument("--confidence_threshold", type=float, nargs="+",
                      default=[0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
                      help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9）")
@@ -181,7 +197,7 @@ def main():
         return
     window_size = int(window_s * args.hz)
     stride = max(1, int(stride_s * args.hz))
-    print(f"[模型] 类别={classes}  窗口={window_s}s  步长={stride_s}s  merge_gap={args.merge_gap}s")
+    print(f"[模型] 类别={classes}  窗口={window_s}s  步长={stride_s}s")
 
     df = pd.read_csv(args.labeled_csv)
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
@@ -236,39 +252,62 @@ def main():
         pct = n_keep / n_total_windows * 100 if n_total_windows else 0.0
         print(f"  {thr:>8.2f}{n_keep:>12}{pct:>9.1f}%")
 
-    # ── 事件级评估，按置信度阈值扫描 ──────────────────────────────────────
-    print(f"\n{'='*78}")
-    print(f"  不同置信度阈值下的事件级评估（merge_gap={args.merge_gap}s 固定）")
-    print(f"{'='*78}")
-    header = f"  {'阈值>=':>8}{'预测事件数':>10}{'precision':>12}{'recall':>10}{'F1':>8}" \
-             f"{'漏检D':>8}{'碎片F':>8}{'合并M':>8}{'误报I‘':>8}"
+    # ── 事件级评估：置信度阈值 × merge_gap 全网格 ──────────────────────────
+    print(f"\n{'='*90}")
+    print(f"  网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×{len(args.merge_gap)}"
+          f"={len(args.confidence_threshold)*len(args.merge_gap)} 组合）")
+    print(f"{'='*90}")
+    header = (f"  {'阈值>=':>7}{'gap':>6}{'预测数':>7}{'漏检D':>7}{'碎片F':>7}{'合并M':>7}{'误报I‘':>7}"
+              f"{'F1e':>8}{'lib_P':>8}{'lib_R':>8}")
     print(header)
 
+    results = []  # (thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r)
     for thr in args.confidence_threshold:
         raw_segs = []
         for pred_labels, pred_confs, starts, offset in dog_window_records:
             segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
                                             args.hz, args.target_label, thr)
             raw_segs.extend((s + offset, e + offset) for s, e in segs)
-        n_det, p, r, f1, n_d, n_f, n_m, n_insert = eval_at_merge_gap(gt_events_all, raw_segs, args.merge_gap)
-        row = (f"  {thr:>8.2f}{n_det:>10}{p:>12.3f}{r:>10.3f}{f1:>8.3f}"
-               f"{n_d:>8}{n_f:>8}{n_m:>8}{n_insert:>8}")
-        print(row)
+        raw_segs = sorted(raw_segs)
+        for mg in args.merge_gap:
+            (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
+             f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
+            results.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
+            row = (f"  {thr:>7.2f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}"
+                   f"{f1e:>8.3f}{lib_p:>8.3f}{lib_r:>8.3f}")
+            print(row)
 
+    # ── 自动推荐：按 F1e 排序 ────────────────────────────────────────────
+    results_sorted = sorted(results, key=lambda x: -x[9])
+    print(f"\n{'='*90}")
+    print(f"  按 F1e 排序 Top 5（F1e 把碎片化F、合并M都算作错误，不像库自带precision/recall那样纵容合并）")
+    print(f"{'='*90}")
+    print(f"  {'排名':<4}{'阈值>=':>7}{'gap':>6}{'预测数':>7}{'漏检D':>7}{'碎片F':>7}{'合并M':>7}{'误报I‘':>7}{'F1e':>8}")
+    for rank, r in enumerate(results_sorted[:5], 1):
+        thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r = r
+        print(f"  {rank:<4}{thr:>7.2f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}{f1e:>8.3f}")
+
+    best = results_sorted[0]
     print(f"""
-{'='*78}
+{'='*90}
+  推荐配置: confidence_threshold={best[0]:.2f}  merge_gap={best[1]:.1f}s  (F1e={best[9]:.3f})
+  对应到实际推理命令：
+    python src/infer_csv_scratch.py ... --confidence_threshold {best[0]:.2f} --merge_gap {best[1]:.1f}
+
   怎么解读：
   - 窗口级分布表：如果预测为目标行为的窗口大量集中在低置信度区间（比如
     阈值0.5时保留比例已经腰斩），说明模型对这个类别整体不够自信，提高
     阈值虽然能过滤掉一部分误报，但可能连带砍掉不少真实检测。
-  - 事件级表：⚠️ precision/recall 由 ward-metrics 库计算，把"合并"(M)
-    当命中处理，不算错误，不能只看这两个数字。重点看 D/F/M/I' 的绝对
-    数量随阈值提高怎么变化——理想情况下，阈值提高时 I'（纯误报）应该
-    明显下降，而 D（漏检）不应该涨得太快；如果阈值刚提到0.5、0.6，D就
-    涨得很猛，说明模型对真实抓挠的置信度普遍也不高，问题不是"阈值没调
-    好"，而是训练数据/特征本身对这个类别的区分度还不够，需要回到标注
-    数据质量和数量上想办法，而不是靠调阈值解决。
-{'='*78}
+  - 网格表里的 lib_P/lib_R 是 ward-metrics 库自带的事件级 precision/
+    recall，⚠️ 它把"合并"(M)当命中处理，不算错误，数值会偏乐观，仅供
+    参考；真正用来挑参数的是 F1e（论文定义，把D/F/M都算错误）。
+  - "推荐配置"是网格里 F1e 最高的一组，不代表绝对最优（毕竟只在你当前
+    这批标注数据上评估），换新数据/重训模型后建议重新跑一遍这个脚本，
+    不要一直沿用旧的推荐值。
+  - 如果 Top5 里 F1e 普遍不高（比如都低于0.5），说明问题的瓶颈不在
+    confidence_threshold/merge_gap 这两个后处理参数上，而是模型本身对
+    这个类别的区分度不够，需要回到标注数据质量和数量上想办法。
+{'='*90}
 """)
 
 
