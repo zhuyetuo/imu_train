@@ -13,3 +13,4 @@ shap>=0.44
 matplotlib>=3.7
 ultralytics>=8.0.0
 opencv-python>=4.8.0
+ward-metrics>=0.9.5
