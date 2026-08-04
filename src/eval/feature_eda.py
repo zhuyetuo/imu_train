@@ -125,11 +125,12 @@ def main():
 
     print("\n提取特征（重力对齐 + 姿态角 + 182维完整特征）...")
     label_feats = {}
-    for lbl, X in label_X.items():
+    from tqdm import tqdm
+    for lbl, X in tqdm(label_X.items(), desc="按类别提取特征", unit="类别"):
         tilt = append_raw_tilt_batch(X)[:, :, 6:8]
         X_aligned = gravity_align_batch(X)
         X_full = np.concatenate([X_aligned, tilt], axis=2)
-        label_feats[lbl] = extract_features(X_full, args.hz, show_progress=False)
+        label_feats[lbl] = extract_features(X_full, args.hz, show_progress=True)
 
     names = feature_names(8)
     n_feat = len(names)
