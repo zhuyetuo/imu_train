@@ -107,6 +107,57 @@ def window_majority_labels(labels, starts, window_size):
     return [Counter(labels[s:s + window_size]).most_common(1)[0][0] for s in starts]
 
 
+def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
+                  model, classes, window_size, stride, hz, target_label):
+    """对全部狗跑一遍推理 + 提取真实事件，返回本次评估需要的全部中间数据。
+    每次调用都会重新做完整的特征提取+模型推理，换 stride 时必须重新调用
+    （跟 confidence_threshold/merge_gap 不同，那两个可以复用同一份推理结果）。"""
+    gt_events_all = []
+    gt_events_meta = []
+    target_window_confs_all = []
+    dog_window_records = []
+    y_true_windows = []
+    y_pred_windows = []
+
+    for i, dog_id in enumerate(dog_ids):
+        sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
+        labels = sub[label_col].values
+        offset = i * DOG_TIME_OFFSET
+
+        gt_segs = find_contiguous_segments(labels)
+        for start, end, lbl in gt_segs:
+            if lbl == target_label:
+                local_start, local_end = start / hz, end / hz
+                gt_events_all.append((local_start + offset, local_end + offset))
+                gt_events_meta.append((dog_id, local_start, local_end,
+                                       local_start + offset, local_end + offset))
+
+        data6 = np.concatenate(
+            [sub[acc_cols].values, sub[gyro_cols].values], axis=1
+        ).astype(np.float32)
+        pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, hz)
+        dog_window_records.append((pred_labels, pred_confs, starts, offset))
+        target_window_confs_all.extend(
+            c for lbl, c in zip(pred_labels, pred_confs) if lbl == target_label
+        )
+        y_true_windows.extend(window_majority_labels(labels, starts, window_size))
+        y_pred_windows.extend(pred_labels)
+
+    order = sorted(range(len(gt_events_all)), key=lambda i: gt_events_all[i][0])
+    gt_events_all = [gt_events_all[i] for i in order]
+    gt_events_meta = [gt_events_meta[i] for i in order]
+    target_window_confs_all = np.array(target_window_confs_all)
+
+    return {
+        "gt_events_all": gt_events_all,
+        "gt_events_meta": gt_events_meta,
+        "target_window_confs_all": target_window_confs_all,
+        "dog_window_records": dog_window_records,
+        "y_true_windows": y_true_windows,
+        "y_pred_windows": y_pred_windows,
+    }
+
+
 def predict_dog(data6, model, classes, window_size, stride, hz):
     """对单条狗的完整原始信号做滑窗推理，返回 (pred_labels, pred_confs, start_indices)。
     pred_confs 是每个窗口 argmax 类别自身的概率（与 infer_csv_scratch.py 语义一致）。"""
@@ -335,6 +386,14 @@ def main():
     ap.add_argument("--log_file", default="",
                      help="可选：把完整输出（含逐条事件对应表）同时保存到这个文件，"
                           "方便去 Label Studio 复查时对照")
+    ap.add_argument("--infer_stride_s", type=float, default=None,
+                     help="推理步长（秒），跟训练步长解耦，不传则沿用模型meta里的训练步长。"
+                          "步长越小，事件边界定位越精细，但要重新做一遍完整推理，成本按比例上升")
+    ap.add_argument("--stride_compare", type=float, nargs="+", default=None,
+                     help="步长对比模式：给出多个候选步长（秒），每个都重新推理一遍并各自做"
+                          "网格搜索，最后对比哪个步长的最优F1e最高。例: --stride_compare 1.0 0.5 0.25 0.0625"
+                          "（0.0625s=16Hz下1个采样点，是能做到的最细步长）。传了这个参数会跳过"
+                          "正常的单步长完整分析，只输出步长对比汇总")
     args = ap.parse_args()
 
     if args.log_file:
@@ -358,8 +417,11 @@ def main():
         print(f"[错误] 模型类别中没有 '{args.target_label}': {classes}")
         return
     window_size = int(window_s * args.hz)
-    stride = max(1, int(stride_s * args.hz))
-    print(f"[模型] 类别={classes}  窗口={window_s}s  步长={stride_s}s")
+    # 推理步长可以跟训练步长解耦：--infer_stride_s 显式覆盖，不传则沿用训练meta里的stride_s
+    infer_stride_s = args.infer_stride_s if args.infer_stride_s is not None else stride_s
+    stride = max(1, round(infer_stride_s * args.hz))
+    print(f"[模型] 类别={classes}  窗口={window_s}s  训练步长={stride_s}s  "
+          f"推理步长={infer_stride_s}s（{stride}个采样点）")
 
     df = pd.read_csv(args.labeled_csv)
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
@@ -368,46 +430,73 @@ def main():
     if acc_cols is None or gyro_cols is None:
         print(f"[错误] 找不到 acc/gyro 列: {list(df.columns)}")
         return
-
-    gt_events_all = []             # 拼接所有狗的真实事件（带偏移，供 eval_events 用）
-    gt_events_meta = []            # [(dog_id, local_start_s, local_end_s, global_start, global_end), ...]
-    target_window_confs_all = []   # 所有 argmax==target_label 窗口的置信度（不带偏移，纯统计用）
-    dog_window_records = []        # [(pred_labels, pred_confs, starts, offset), ...] 每条狗，供后续按阈值重建片段
-    y_true_windows = []            # 全部窗口的真实标签（多数投票），跟 y_pred_windows 一一对应
-    y_pred_windows = []            # 全部窗口的模型预测标签（argmax，不做置信度过滤）
-
     dog_ids = sorted(df[args.dog_id_col].unique())
-    print(f"共 {len(dog_ids)} 条狗，逐条推理中...")
-    for i, dog_id in enumerate(dog_ids):
-        sub = df[df[args.dog_id_col] == dog_id].reset_index(drop=True)
-        labels = sub[args.label_col].values
-        offset = i * DOG_TIME_OFFSET
 
-        gt_segs = find_contiguous_segments(labels)
-        for start, end, lbl in gt_segs:
-            if lbl == args.target_label:
-                local_start, local_end = start / args.hz, end / args.hz
-                gt_events_all.append((local_start + offset, local_end + offset))
-                gt_events_meta.append((dog_id, local_start, local_end,
-                                       local_start + offset, local_end + offset))
+    # ── stride 对比模式：每个候选步长都要重新做一遍完整推理（不能复用），
+    # 所以只跑网格搜索拿到每个 stride 的最优 F1e 做对比，不打印逐条明细 ──
+    if args.stride_compare:
+        print(f"\n[stride对比] 候选步长: {args.stride_compare}（每个都要重新推理，比较耗时）")
+        stride_results = []
+        for si, cand_stride_s in enumerate(args.stride_compare, 1):
+            cand_stride = max(1, round(cand_stride_s * args.hz))
+            print(f"\n[{si}/{len(args.stride_compare)}] 步长={cand_stride_s}s（{cand_stride}个采样点）推理中...")
+            ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
+                               model, classes, window_size, cand_stride, args.hz, args.target_label)
+            if not ds["gt_events_all"]:
+                print("  [警告] 没有真实事件，跳过")
+                continue
+            n_windows = sum(len(r[0]) for r in ds["dog_window_records"])
+            grid_results = run_grid(args.confidence_threshold, args.merge_gap, ds["dog_window_records"],
+                                    ds["gt_events_all"], args.target_label, window_size, args.hz,
+                                    desc=f"  阈值×gap网格(stride={cand_stride_s}s)")
+            best = sorted(grid_results, key=lambda x: -x[9])[0]
+            thr, mg, n_det, n_d, n_f, n_m, n_insert = best[0], best[1], best[2], best[3], best[4], best[5], best[6]
+            f1e = best[9]
+            stride_results.append((cand_stride_s, n_windows, thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e))
+            print(f"  该步长下最优: thr={thr:.2f} gap={mg:.1f}s  F1e={f1e:.3f}  "
+                  f"(D={n_d} F={n_f} M={n_m} I'={n_insert})")
 
-        data6 = np.concatenate(
-            [sub[acc_cols].values, sub[gyro_cols].values], axis=1
-        ).astype(np.float32)
-        pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, args.hz)
-        dog_window_records.append((pred_labels, pred_confs, starts, offset))
-        target_window_confs_all.extend(
-            c for lbl, c in zip(pred_labels, pred_confs) if lbl == args.target_label
-        )
-        y_true_windows.extend(window_majority_labels(labels, starts, window_size))
-        y_pred_windows.extend(pred_labels)
+        print(f"\n{'='*90}")
+        print(f"  步长对比汇总（每个步长各自网格搜索后的最优表现）")
+        print(f"{'='*90}")
+        insert_label = "I'"
+        print(f"  {'stride_s':>10}{'n_windows':>12}{'best_thr':>10}{'best_gap':>10}{'n_pred':>8}"
+              f"{'D':>5}{'F':>5}{'M':>5}{insert_label:>5}{'F1e':>8}")
+        for r in stride_results:
+            cand_stride_s, n_windows, thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e = r
+            print(f"  {cand_stride_s:>10.4f}{n_windows:>12}{thr:>10.2f}{mg:>10.1f}{n_det:>8}"
+                  f"{n_d:>5}{n_f:>5}{n_m:>5}{n_insert:>5}{f1e:>8.3f}")
 
-    # gt_events_all 和 gt_events_meta 必须按同一顺序排序（wardmetrics 要求输入按时间排好序，
-    # 且返回的 gt_scores 顺序与输入顺序一一对应，两个列表如果各自排序会错位）
-    order = sorted(range(len(gt_events_all)), key=lambda i: gt_events_all[i][0])
-    gt_events_all = [gt_events_all[i] for i in order]
-    gt_events_meta = [gt_events_meta[i] for i in order]
-    target_window_confs_all = np.array(target_window_confs_all)
+        if stride_results:
+            best_stride = max(stride_results, key=lambda r: r[-1])
+            print(f"\n  推荐步长: {best_stride[0]}s（F1e={best_stride[-1]:.3f}）")
+            print(f"  对应命令: --infer_stride_s {best_stride[0]} --confidence_threshold {best_stride[2]:.2f}"
+                  f" --merge_gap {best_stride[3]:.1f}")
+        print(f"""
+{'='*90}
+  怎么解读：
+  - 这里每个步长都只跑了一次网格搜索找最优 (thr, gap)，没有像单步长模式
+    那样再做二次精细网格，是为了控制总耗时；如果某个步长看起来明显更好，
+    建议单独用 --infer_stride_s 那个值重跑一次完整流程（不加 --stride_compare），
+    拿到更精细的推荐参数和逐条对应表。
+  - n_windows 是这个步长下总共产生的窗口数，直接反映计算量差异，步长越小
+    这个数字涨得越快，可以对照实际跑的时间感受一下代价。
+  - 如果 F1e 随步长变小并没有实质提升，说明当前瓶颈不在步长，不需要为了
+    这点收益长期承受更高的计算成本。
+{'='*90}
+""")
+        return
+
+    # ── 单一步长模式（默认，跟原来一样）──────────────────────────────────
+    ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
+                       model, classes, window_size, stride, args.hz, args.target_label)
+    gt_events_all = ds["gt_events_all"]
+    gt_events_meta = ds["gt_events_meta"]
+    target_window_confs_all = ds["target_window_confs_all"]
+    dog_window_records = ds["dog_window_records"]
+    y_true_windows = ds["y_true_windows"]
+    y_pred_windows = ds["y_pred_windows"]
+
     print(f"\n真实 '{args.target_label}' 事件数: {len(gt_events_all)}")
     print(f"模型预测为 '{args.target_label}' 的窗口总数（未按置信度过滤）: {len(target_window_confs_all)}")
 
