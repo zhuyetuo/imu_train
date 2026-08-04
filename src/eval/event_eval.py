@@ -332,7 +332,7 @@ def main():
     print(f"\n{'='*78}")
     print(f"  窗口级置信度分布（预测为 '{args.target_label}' 的窗口，按阈值累计保留比例）")
     print(f"{'='*78}")
-    print(f"  {'阈值>=':>8}{'保留窗口数':>12}{'占比':>10}")
+    print(f"  {'thr>=':>8}{'n_keep':>12}{'pct':>10}")
     n_total_windows = len(target_window_confs_all)
     for thr in args.confidence_threshold:
         n_keep = int((target_window_confs_all >= thr).sum()) if n_total_windows else 0
@@ -344,7 +344,8 @@ def main():
     print(f"  网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×{len(args.merge_gap)}"
           f"={len(args.confidence_threshold)*len(args.merge_gap)} 组合）")
     print(f"{'='*90}")
-    header = (f"  {'阈值>=':>7}{'gap':>6}{'预测数':>7}{'漏检D':>7}{'碎片F':>7}{'合并M':>7}{'误报I‘':>7}"
+    insert_label = "I'"
+    header = (f"  {'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}"
               f"{'F1e':>8}{'lib_P':>8}{'lib_R':>8}")
     print(header)
 
@@ -369,7 +370,7 @@ def main():
     print(f"\n{'='*90}")
     print(f"  按 F1e 排序 Top 5（F1e 把碎片化F、合并M都算作错误，不像库自带precision/recall那样纵容合并）")
     print(f"{'='*90}")
-    print(f"  {'排名':<4}{'阈值>=':>7}{'gap':>6}{'预测数':>7}{'漏检D':>7}{'碎片F':>7}{'合并M':>7}{'误报I‘':>7}{'F1e':>8}")
+    print(f"  {'rank':<4}{'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}{'F1e':>8}")
     for rank, r in enumerate(results_sorted[:5], 1):
         thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r = r
         print(f"  {rank:<4}{thr:>7.2f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}{f1e:>8.3f}")
@@ -422,16 +423,20 @@ def main():
     print(f"\n{'='*90}")
     print(f"  全部 {n_gt} 个真实事件逐条对应表（供逐条去 Label Studio 复查）")
     print(f"{'='*90}")
-    score_name = {"C": "精确匹配", "D": "漏检", "F": "碎片化", "M": "合并", "FM": "碎片且合并"}
-    printed_dogs = set()
+    print("  图例: C=精确匹配 D=漏检 F=碎片化 M=合并 FM=碎片且合并")
+    # gt_events_meta 按全局时间排序，同一条狗的事件天然连续排在一起，
+    # 所以只需检测 dog_id 变化就能正确分块（不需要重新分组）
+    last_dog_id = None
     for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best):
+        if dog_id != last_dog_id:
+            print(f"\n  {'-'*86}")
+            print(f"  dog_id={dog_id}")
+            if project_lookup is not None:
+                print_project_info(dog_id, project_lookup)
+            last_dog_id = dog_id
         overlaps = [(ds - (gs - ls), de - (ge - le)) for ds, de in det_events_best if ds < ge and de > gs]
-        overlap_str = ", ".join(f"{ds:.2f}s→{de:.2f}s" for ds, de in overlaps) if overlaps else "(无)"
-        print(f"  [{score:>2}={score_name.get(score, score):<6}] {dog_id:<20}"
-              f"  真实:{ls:>8.2f}s→{le:>8.2f}s   预测:{overlap_str}")
-        if project_lookup is not None and dog_id not in printed_dogs:
-            print_project_info(dog_id, project_lookup)
-            printed_dogs.add(dog_id)
+        overlap_str = ", ".join(f"{ds:.2f}s-{de:.2f}s" for ds, de in overlaps) if overlaps else "(none)"
+        print(f"    [{score:>3}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
 
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
