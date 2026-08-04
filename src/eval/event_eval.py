@@ -416,12 +416,30 @@ def main():
         return
 
     # ── 窗口级（逐帧）分类报告：不合并成事件，就是标准的多分类precision/recall/f1 ──
+    # 只保留真实标签属于模型已知类别的窗口：标注CSV可能包含模型没训练过的类别（比如
+    # 啃身体/奔跑/舔身体等），拿这些去跟模型预测比较没有意义（模型压根不认识这个类，
+    # 结果必然是0，只会拉低总体指标、把报告搅乱），所以先过滤掉。
+    n_before = len(y_true_windows)
+    filtered = [(t, p) for t, p in zip(y_true_windows, y_pred_windows) if t in classes]
+    n_skipped = n_before - len(filtered)
+    y_true_eval = [t for t, p in filtered]
+    y_pred_eval = [p for t, p in filtered]
+
     print(f"\n{'='*78}")
     print("  窗口级分类报告（逐帧/逐窗口，未合并成事件，argmax预测，不做置信度过滤）")
     print(f"{'='*78}")
-    labels_present = sorted(set(y_true_windows) | set(y_pred_windows))
-    print(classification_report(y_true_windows, y_pred_windows, labels=labels_present,
-                                zero_division=0))
+    if n_skipped:
+        print(f"  [说明] 跳过 {n_skipped} 个真实标签不在模型类别 {classes} 内的窗口"
+              f"（比如啃身体/奔跑等模型没训练过的类别，比较没有意义）")
+    print(classification_report(y_true_eval, y_pred_eval, labels=classes, zero_division=0))
+    print("  指标含义：")
+    print("    precision  预测为该类的窗口里，真的是该类的比例（预测准不准）")
+    print("    recall     真实为该类的窗口里，被正确预测出来的比例（有没有漏）")
+    print("    f1-score   precision 和 recall 的调和平均，兼顾两者")
+    print("    support    该类别在真实标签里的窗口数量")
+    print("    accuracy   全部窗口里预测完全正确的比例")
+    print("    macro avg    各类别指标的简单平均，不考虑样本量多少（小类别权重被拉高）")
+    print("    weighted avg 按各类别样本量加权平均，更能反映整体实际表现")
 
     # ── 窗口级置信度分布 ──────────────────────────────────────────────────
     print(f"\n{'='*78}")
