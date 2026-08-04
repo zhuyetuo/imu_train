@@ -568,24 +568,54 @@ def main():
     print(f"    recall_e    = TP/(TP+FN) = {tp}/{tp+fn} = {f1e_r:.3f}")
     print(f"    F1e = 2×P×R/(P+R) = {f1e_val:.3f}")
 
-    # ── 全部真实事件逐条对应表：每一条的类别 + 匹配到的预测区间 + project信息 ──
+    # ── 全部真实事件 + 纯误报逐条对应表：每一条的类别 + 匹配区间 + project信息 ──
+    SCORE_INFO = {
+        "C":  ("✅", "精确匹配"),
+        "D":  ("❌", "漏检"),
+        "F":  ("🔀", "碎片化"),
+        "M":  ("🔗", "合并"),
+        "FM": ("🔀🔗", "碎片且合并"),
+        "I'": ("👻", "纯误报"),
+    }
+
+    def score_tag(score):
+        emoji, name = SCORE_INFO.get(score, ("", score))
+        return f"{emoji} {score}={name}" if emoji else f"{score}"
+
+    # 把纯误报（I'）也定位到所属 dog_id + 局部时间，混入同一份逐条表里一起按时间/dog展示
+    insertion_rows = []  # (dog_id, local_start, local_end, global_start)
+    for (ds, de), dscore in zip(det_events_best, det_scores_best):
+        if dscore == "I'":
+            dog_idx = int(ds // DOG_TIME_OFFSET)
+            d_id = dog_ids[dog_idx] if 0 <= dog_idx < len(dog_ids) else f"(未知,offset={ds:.0f})"
+            offset = dog_idx * DOG_TIME_OFFSET
+            insertion_rows.append((d_id, ds - offset, de - offset, ds))
+
+    all_rows = [(dog_id, ls, gs, "event", score, le, ge)
+                for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best)] + \
+               [(dog_id, ls, gs, "insertion", "I'", le, None)
+                for dog_id, ls, le, gs in insertion_rows]
+    all_rows.sort(key=lambda r: r[2])  # 按全局时间排（天然按 dog 分块）
+
     print(f"\n{'='*90}")
-    print(f"  全部 {n_gt} 个真实事件逐条对应表（供逐条去 Label Studio 复查）")
+    print(f"  全部 {n_gt} 个真实事件 + {len(insertion_rows)} 个纯误报逐条对应表（供逐条去 Label Studio 复查）")
     print(f"{'='*90}")
-    print("  图例: C=精确匹配 D=漏检 F=碎片化 M=合并 FM=碎片且合并")
-    # gt_events_meta 按全局时间排序，同一条狗的事件天然连续排在一起，
-    # 所以只需检测 dog_id 变化就能正确分块（不需要重新分组）
+    print("  图例: " + "  ".join(f"{v[0]} {k}={v[1]}" for k, v in SCORE_INFO.items()))
     last_dog_id = None
-    for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best):
+    for dog_id, ls, gs, kind, score, le, ge in all_rows:
         if dog_id != last_dog_id:
             print(f"\n  {'-'*86}")
             print(f"  dog_id={dog_id}")
             if project_lookup is not None:
                 print_project_info(dog_id, project_lookup)
             last_dog_id = dog_id
-        overlaps = [(ds - (gs - ls), de - (ge - le)) for ds, de in det_events_best if ds < ge and de > gs]
-        overlap_str = ", ".join(f"{ds:.2f}s-{de:.2f}s" for ds, de in overlaps) if overlaps else "(none)"
-        print(f"    [{score:>3}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
+        if kind == "event":
+            overlaps = [(ds2 - (gs - ls), de2 - (ge - le)) for ds2, de2 in det_events_best if ds2 < ge and de2 > gs]
+            overlap_str = ", ".join(f"{ds2:.2f}s-{de2:.2f}s" for ds2, de2 in overlaps) if overlaps else "(none)"
+            print(f"    [{score_tag(score)}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
+        else:
+            print(f"    [{score_tag(score)}]  real:(none)              pred:{ls:.2f}s-{le:.2f}s"
+                  f"  ← 模型预测但没有对应真实事件，建议核实是不是漏标")
 
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
