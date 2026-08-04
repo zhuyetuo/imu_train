@@ -472,6 +472,15 @@ clips_0.3-0.6/  ← 数量多时可抽样，主要用于捡漏和分析误报类
 
 - Kumpulainen et al. (2021). *Dog behaviour classification with movement sensors placed on the harness and the collar.* Applied Animal Behaviour Science. https://doi.org/10.1016/j.applanim.2021.105393
 - Chambers & Yoder (2020). *FilterNet: A Many-to-Many Deep Learning Architecture for Time Series Classification.* Sensors. https://doi.org/10.3390/s20092498
+  （开放获取: MDPI https://www.mdpi.com/1424-8220/20/9/2498 ｜ PMC https://pmc.ncbi.nlm.nih.gov/articles/PMC7249062/）
 - van Herwijnen et al. (2021). *Deep Learning Classification of Canine Behavior Using a Single Collar-Mounted Accelerometer: Real-World Validation.* Animals. https://doi.org/10.3390/ani11061549
 - Dunford et al. (2024). *Predicting cat behaviour using accelerometer data.* Ecology and Evolution. https://doi.org/10.1002/ece3.11368
 - Smit et al. (2023). *Behaviour Classification of Extensively Kept Goats and Sheep Using Raw Accelerometer Data.* Sensors. https://doi.org/10.3390/s23052404
+
+## 参考代码仓库
+
+- [WhistleLabs/FilterNet](https://github.com/WhistleLabs/FilterNet) — 上面 FilterNet 论文的官方仓库（Whistle/Pet Insight Project 发布，组织现显示为 "Former Whistle Labs" 但仓库仍可访问）。`pip install -e .` 安装，`scripts/` 复现论文实验，`notebooks/` 复现论文图表。当前项目未直接使用其深度学习模型，但预处理/窗口切分思路和事件级评估方法论值得借鉴（见下方讨论）。
+  - 非官方衍生版本（仅供参考，命名容易混淆，注意区分）：
+    [vlainic/FilterNet-Keras](https://github.com/vlainic/FilterNet-Keras)（第三方 Keras 复现，仅模型结构）、
+    [Mikata-Project/FilterNet](https://github.com/Mikata-Project/FilterNet)（同名但不同项目，PyTorch + fastai 的 1D CNN，灵感来自 WaveNet，与 Whistle 的 FilterNet 无关）
+- [ward-metrics](https://pypi.org/project/ward-metrics/) — 事件级别（而非逐帧）分类评估指标库，实现 Ward et al. 提出的事件对应关系分类法（正确匹配/漏检/碎片化/合并/插入误报等）。与模型架构无关，可直接用在当前的随机森林输出上，见下方讨论。
