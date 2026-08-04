@@ -423,15 +423,20 @@ def main():
     print(f"\n{'='*90}")
     print(f"  全部 {n_gt} 个真实事件逐条对应表（供逐条去 Label Studio 复查）")
     print(f"{'='*90}")
-    print("  图例: C=精确匹配 D=漏检 F=碎片化 M=合并 FM=碎片且合并\n")
-    printed_dogs = set()
+    print("  图例: C=精确匹配 D=漏检 F=碎片化 M=合并 FM=碎片且合并")
+    # gt_events_meta 按全局时间排序，同一条狗的事件天然连续排在一起，
+    # 所以只需检测 dog_id 变化就能正确分块（不需要重新分组）
+    last_dog_id = None
     for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best):
+        if dog_id != last_dog_id:
+            print(f"\n  {'-'*86}")
+            print(f"  dog_id={dog_id}")
+            if project_lookup is not None:
+                print_project_info(dog_id, project_lookup)
+            last_dog_id = dog_id
         overlaps = [(ds - (gs - ls), de - (ge - le)) for ds, de in det_events_best if ds < ge and de > gs]
         overlap_str = ", ".join(f"{ds:.2f}s-{de:.2f}s" for ds, de in overlaps) if overlaps else "(none)"
-        print(f"  [{score:>3}] {dog_id:<20}  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
-        if project_lookup is not None and dog_id not in printed_dogs:
-            print_project_info(dog_id, project_lookup)
-            printed_dogs.add(dog_id)
+        print(f"    [{score:>3}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
 
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
