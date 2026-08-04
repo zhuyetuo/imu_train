@@ -37,6 +37,7 @@ import sys
 import numpy as np
 import pandas as pd
 import joblib
+from sklearn.metrics import classification_report
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../ml"))
@@ -97,6 +98,13 @@ def sliding_windows(data, window_size, stride):
     if not starts:
         return np.empty((0, window_size, data.shape[1]), dtype=np.float32), []
     return np.stack([data[s:s + window_size] for s in starts]), starts
+
+
+def window_majority_labels(labels, starts, window_size):
+    """每个窗口内真实标签的多数投票，与 preprocess.py 的 sliding_window 逻辑一致，
+    用于跟模型的逐窗口预测对齐，算窗口级（逐帧）分类报告"""
+    from collections import Counter
+    return [Counter(labels[s:s + window_size]).most_common(1)[0][0] for s in starts]
 
 
 def predict_dog(data6, model, classes, window_size, stride, hz):
@@ -345,6 +353,8 @@ def main():
     gt_events_meta = []            # [(dog_id, local_start_s, local_end_s, global_start, global_end), ...]
     target_window_confs_all = []   # 所有 argmax==target_label 窗口的置信度（不带偏移，纯统计用）
     dog_window_records = []        # [(pred_labels, pred_confs, starts, offset), ...] 每条狗，供后续按阈值重建片段
+    y_true_windows = []            # 全部窗口的真实标签（多数投票），跟 y_pred_windows 一一对应
+    y_pred_windows = []            # 全部窗口的模型预测标签（argmax，不做置信度过滤）
 
     dog_ids = sorted(df[args.dog_id_col].unique())
     print(f"共 {len(dog_ids)} 条狗，逐条推理中...")
@@ -369,6 +379,8 @@ def main():
         target_window_confs_all.extend(
             c for lbl, c in zip(pred_labels, pred_confs) if lbl == args.target_label
         )
+        y_true_windows.extend(window_majority_labels(labels, starts, window_size))
+        y_pred_windows.extend(pred_labels)
 
     # gt_events_all 和 gt_events_meta 必须按同一顺序排序（wardmetrics 要求输入按时间排好序，
     # 且返回的 gt_scores 顺序与输入顺序一一对应，两个列表如果各自排序会错位）
@@ -382,6 +394,14 @@ def main():
     if not gt_events_all:
         print("[警告] 没有真实事件，无法评估")
         return
+
+    # ── 窗口级（逐帧）分类报告：不合并成事件，就是标准的多分类precision/recall/f1 ──
+    print(f"\n{'='*78}")
+    print("  窗口级分类报告（逐帧/逐窗口，未合并成事件，argmax预测，不做置信度过滤）")
+    print(f"{'='*78}")
+    labels_present = sorted(set(y_true_windows) | set(y_pred_windows))
+    print(classification_report(y_true_windows, y_pred_windows, labels=labels_present,
+                                zero_division=0))
 
     # ── 窗口级置信度分布 ──────────────────────────────────────────────────
     print(f"\n{'='*78}")
