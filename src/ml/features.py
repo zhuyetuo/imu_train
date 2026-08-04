@@ -13,15 +13,17 @@
 
 import numpy as np
 from scipy import stats, signal
+from scipy.signal import find_peaks
 
 # 频段边界，按 Nyquist 频率的比例给出，兼容不同采样率
 FREQ_BANDS = [(0.0, 0.125), (0.125, 0.375), (0.375, 0.75), (0.75, 1.0)]
 
 
 def _time_stats_1d(x: np.ndarray) -> list:
-    """单个一维信号的10个时域统计量，供逐通道特征和模长/Jerk特征共用"""
+    """单个一维信号的11个时域统计量，供逐通道特征和模长/Jerk特征共用"""
     std = np.std(x)
     q1, q3 = np.percentile(x, [25, 75])
+    x_centered = x - np.mean(x)
     return [
         np.mean(x),
         std,
@@ -31,8 +33,12 @@ def _time_stats_1d(x: np.ndarray) -> list:
         np.sqrt(np.mean(x ** 2)),                    # RMS
         stats.skew(x) if std > 1e-8 else 0.0,
         stats.kurtosis(x) if std > 1e-8 else 0.0,
-        np.sum(np.diff(np.sign(x)) != 0),            # 过零率
+        np.sum(np.diff(np.sign(x_centered)) != 0),   # 均值穿越率(mcr)：穿越窗口自身均值的次数，
+                                                       # 而非绝对0——通道有直流偏置（如对齐后的acc_z
+                                                       # 恒受重力影响）时，穿越绝对0没有意义
         q3 - q1,                                      # IQR，比std更抗突发尖峰噪声
+        len(find_peaks(x)[0]),                        # 局部极值(峰值)计数：直接量化"动了几次"，
+                                                       # 是mcr的补充而非重复——波形不对称时两者不等价
     ]
 
 
@@ -145,7 +151,7 @@ def _extract_one(window: np.ndarray, hz: int) -> np.ndarray:
 
 CHANNEL_NAMES = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z", "pitch", "roll"]
 
-TIME_FEAT_NAMES = ["mean", "std", "min", "max", "range", "rms", "skew", "kurtosis", "zcr", "iqr"]
+TIME_FEAT_NAMES = ["mean", "std", "min", "max", "range", "rms", "skew", "kurtosis", "mcr", "iqr", "peak_count"]
 FREQ_FEAT_NAMES = ["spec_mean", "spec_std", "peak_freq", "spec_entropy",
                     "band_energy_0", "band_energy_1", "band_energy_2", "band_energy_3"]
 GLOBAL_FEAT_NAMES = ["sma_acc", "sma_gyro",
