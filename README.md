@@ -468,6 +468,61 @@ clips_0.3-0.6/  ← 数量多时可抽样，主要用于捡漏和分析误报类
 
 ---
 
+## 事件级评估与参数自动调优（`event_eval.py`）
+
+`ml/train.py` 打印的准确率/F1 是**逐窗口**指标，看不出"一次完整的抓挠有没有被切碎成好几段"或"两次独立抓挠有没有被错误粘成一段"这类问题——这类信息只有把窗口预测拼回连续事件、跟真实标注按事件对比才能看到。`src/eval/event_eval.py` 用 [ward-metrics](https://pypi.org/project/ward-metrics/) 库做这件事，同时会自动网格搜索出当前模型最合适的 `--confidence_threshold` 和 `--merge_gap`。
+
+```bash
+pip install ward-metrics   # import 名是 wardmetrics，注意不一致
+
+python src/eval/event_eval.py \
+  --labeled_csv data/raw_custom/2026_7_30/merged_all_labels_2026_7_30.csv \
+  --model results/processed_2026_7_30/16hz_remap_custom_3class_syn/ml_rf.pkl \
+  --hz 16 --target_label 抓挠 \
+  --scan_mode full \
+  --json_dir data/raw_custom/2026_7_30 \
+  --log_file logs/event_eval_2026_7_30.log
+```
+
+`--labeled_csv` 要用**未按 `--keep_labels` 过滤的全量标注CSV**（用 `labelstudio_to_custom.py --keep_labels` 不传值生成，见上文"标注分析"一节），这样窗口级分类报告和事件提取才有完整的真实标签可用。
+
+### 输出内容（按顺序）
+
+1. **窗口级分类报告**：标准的多分类 precision/recall/f1-score，只统计真实标签在模型已知类别内的窗口（比如标注CSV里的"啃身体"模型没训练过，会被跳过，不会拉低指标）
+2. **窗口级置信度分布**：预测为目标行为的窗口，有多少落在各置信度阈值以上
+3. **网格搜索**：扫描 `(置信度阈值, merge_gap)` 组合，用论文定义的 **F1e**（把碎片化F、合并M都算作错误，跟 ward-metrics 库自带、把"合并"当命中处理的 precision/recall 不同）挑出最优组合
+4. **推荐配置详细拆解**：真实事件总数 = 精确匹配C + 漏检D + 碎片F + 合并M（+FM），带验算
+5. **全部真实事件逐条对应表**：每条事件的类别、真实时间、匹配到的预测区间，按 `dog_id` 分块，方便逐条去 Label Studio 复查
+6. **被合并的真实事件组**：单独摘出"合并"这类问题，附上间隔秒数——间隔很短（<1秒）通常是标注切碎了同一个连续动作；间隔一两秒甚至更长，更可能是模型/参数层面的问题，也可能是真实的"多次独立动作间隔很近"（需要人工核实，见下方案例）
+
+### 网格搜索两种模式
+
+| `--scan_mode` | 行为 | 适用场景 |
+|---|---|---|
+| `auto`（默认） | 先用 `--confidence_threshold`/`--merge_gap` 列表跑一遍粗网格，取 Top5 后在其范围附近（默认阈值±0.05、gap±0.5s）自动做精细网格 | 想快速拿到一个还不错的参数；数据量大、粗网格能覆盖到真实最优附近时用 |
+| `full` | 直接在 `--full_thr_start/stop/step`、`--full_gap_start/stop/step` 指定的完整范围内做一次精细网格（默认阈值0~1步长0.01、gap 0.5~5s步长0.1，约4600组合） | 想保证找到全局最优，不想因为粗网格没覆盖到真实最优所在区间而错过。模型推理只做一次、缓存复用，网格本身是纯Python比对，通常几秒到几十秒能跑完，代价不大，**推荐默认用这个** |
+
+网格搜索会显示 `tqdm` 进度条（走 stderr，不会污染 `--log_file` 保存的日志内容）。
+
+### 其他参数
+
+| 参数 | 说明 |
+|---|---|
+| `--json_dir` | Label Studio `project-*.json` 所在目录，传了的话逐条对应表/被合并事件组会顺带打印每个事件对应的 project 文件、video/csv 链接，不用再单独跑 `find_task_project.py` |
+| `--log_file` | 把完整输出另存一份到文件（每次覆盖写，不追加），方便复查时对照 |
+
+### 反查 dog_id 对应的 Label Studio project（`find_task_project.py`）
+
+事件表里的 `dog_id`（形如 `task496_imu1`）只保留了 Label Studio 的 task_id，丢失了来自哪个 project 导出文件这个信息。`--json_dir` 已经把这一步自动接进 `event_eval.py` 了；如果只是想单独查几个 task_id，也可以直接跑：
+
+```bash
+python src/eval/find_task_project.py \
+  --task_ids task496_imu1 task539_imu1 \
+  --json_dir data/raw_custom/2026_7_30
+```
+
+---
+
 ## 参考论文
 
 - Kumpulainen et al. (2021). *Dog behaviour classification with movement sensors placed on the harness and the collar.* Applied Animal Behaviour Science. https://doi.org/10.1016/j.applanim.2021.105393
