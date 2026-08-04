@@ -34,7 +34,8 @@ LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
 LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
-MERGE_GAP="${MERGE_GAP:-3}"            # 合并相邻抓挠片段的最大间隔秒数（默认3s）
+MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
+                                        # 3s会导致约一半真实事件被错误合并，1s已能消除碎片化且合并更少）
 MIN_WINDOWS="${MIN_WINDOWS:-1}"        # 片段最少窗口数，不足则丢弃（默认1=不过滤）
 KEEP_ISOLATED="${KEEP_ISOLATED:-1}"    # 是否保留孤立单窗口片段（默认1=保留）
 BIN_BY="${BIN_BY:-conf_max}"           # 置信度分桶依据：conf_max（默认）或 conf_mean

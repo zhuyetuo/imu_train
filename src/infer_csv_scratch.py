@@ -314,8 +314,9 @@ def main():
                         help="只输出每个文件的汇总行，不打印逐窗口详情")
     parser.add_argument("--scratch_only", action="store_true",
                         help="只输出检测到抓挠的文件，忽略无抓挠的文件")
-    parser.add_argument("--merge_gap", type=float, default=10.0,
-                        help="合并相邻抓挠片段的最大间隔秒数（默认10s）")
+    parser.add_argument("--merge_gap", type=float, default=1.0,
+                        help="合并相邻抓挠片段的最大间隔秒数（默认1s，"
+                             "event_eval.py 验证过3s会导致约一半真实事件被错误合并）")
     parser.add_argument("--min_windows", type=int, default=1,
                         help="片段最少窗口数，不足则丢弃（默认1=不过滤）")
     parser.add_argument("--no_keep_isolated", action="store_true",
