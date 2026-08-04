@@ -31,7 +31,7 @@ from features import extract_features
 
 CHANNEL_NAMES = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z", "pitch", "roll"]
 
-TIME_FEAT_NAMES = ["mean", "std", "min", "max", "range", "rms", "skew", "kurtosis", "zcr"]
+TIME_FEAT_NAMES = ["mean", "std", "min", "max", "range", "rms", "skew", "kurtosis", "zcr", "iqr"]
 FREQ_FEAT_NAMES = ["spec_mean", "spec_std", "peak_freq", "spec_entropy",
                     "band_energy_0", "band_energy_1", "band_energy_2", "band_energy_3"]
 GLOBAL_FEAT_NAMES = ["sma_acc", "sma_gyro",
@@ -41,7 +41,8 @@ GLOBAL_FEAT_NAMES = ["sma_acc", "sma_gyro",
 
 def build_feature_names(n_channels: int) -> list[str]:
     """需与 src/ml/features.py 的 _extract_one 拼接顺序一致：
-    时域(全部通道) → 频域(仅前6通道 acc+gyro) → 全局特征(SMA+轴间相关，仅当 n_channels>=6)"""
+    时域(全部通道) → 频域(仅前6通道 acc+gyro) → 全局特征(SMA+轴间相关)
+    → acc/gyro模长(时域+频域) → acc-jerk模长(时域)，后三组仅当 n_channels>=6"""
     names = []
     for ch in range(n_channels):
         ch_name = CHANNEL_NAMES[ch] if ch < len(CHANNEL_NAMES) else f"ch{ch}"
@@ -53,6 +54,10 @@ def build_feature_names(n_channels: int) -> list[str]:
             names.append(f"{ch_name}_{feat}")
     if n_channels >= 6:
         names.extend(GLOBAL_FEAT_NAMES)
+        for mag_name in ("acc_mag", "gyro_mag"):
+            names.extend(f"{mag_name}_{feat}" for feat in TIME_FEAT_NAMES)
+            names.extend(f"{mag_name}_{feat}" for feat in FREQ_FEAT_NAMES)
+        names.extend(f"acc_jerk_mag_{feat}" for feat in TIME_FEAT_NAMES)
     return names
 
 
