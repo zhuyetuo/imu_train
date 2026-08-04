@@ -483,4 +483,4 @@ clips_0.3-0.6/  ← 数量多时可抽样，主要用于捡漏和分析误报类
   - 非官方衍生版本（仅供参考，命名容易混淆，注意区分）：
     [vlainic/FilterNet-Keras](https://github.com/vlainic/FilterNet-Keras)（第三方 Keras 复现，仅模型结构）、
     [Mikata-Project/FilterNet](https://github.com/Mikata-Project/FilterNet)（同名但不同项目，PyTorch + fastai 的 1D CNN，灵感来自 WaveNet，与 Whistle 的 FilterNet 无关）
-- [ward-metrics](https://pypi.org/project/ward-metrics/) — 事件级别（而非逐帧）分类评估指标库，实现 Ward et al. 提出的事件对应关系分类法（正确匹配/漏检/碎片化/合并/插入误报等）。与模型架构无关，可直接用在当前的随机森林输出上，见下方讨论。
+- [ward-metrics](https://pypi.org/project/ward-metrics/) — 事件级别（而非逐帧）分类评估指标库，实现 Ward et al. 提出的事件对应关系分类法（正确匹配/漏检/碎片化/合并/插入误报等）。与模型架构无关，可直接用在当前的随机森林输出上。项目里 `src/eval/event_eval.py` 已经接入，用法见该脚本头部注释；需要 `pip install ward-metrics`（import 名是 `wardmetrics`，注意不一致）。
