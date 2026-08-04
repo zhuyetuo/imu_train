@@ -99,6 +99,23 @@ def predict_dog(data6, model, classes, window_size, stride, hz):
     return pred_labels, pred_confs, starts
 
 
+def find_merge_groups(gt_events_meta, det_events):
+    """找出被同一个预测事件"吃进去"的多个真实事件（>=2个才算合并组）。
+    gt_events_meta: [(dog_id, local_start, local_end, global_start, global_end), ...]
+    det_events: [(global_start, global_end), ...] 已按 merge_gap 合并后的预测事件
+    返回: [[(dog_id, local_start, local_end), ...], ...] 每个子列表是一组被合并的真实事件，按时间排序"""
+    groups = []
+    for det_start, det_end in det_events:
+        hits = [
+            (dog_id, ls, le) for dog_id, ls, le, gs, ge in gt_events_meta
+            if gs < det_end and ge > det_start  # 与预测事件有重叠
+        ]
+        if len(hits) >= 2:
+            hits.sort(key=lambda h: h[1])
+            groups.append(hits)
+    return groups
+
+
 def merge_segments(intervals, merge_gap):
     """intervals: [(start_sec, end_sec), ...] 已排序，合并间隔<=merge_gap的相邻段"""
     if not intervals:
@@ -207,7 +224,8 @@ def main():
         print(f"[错误] 找不到 acc/gyro 列: {list(df.columns)}")
         return
 
-    gt_events_all = []             # 拼接所有狗的真实事件（带偏移）
+    gt_events_all = []             # 拼接所有狗的真实事件（带偏移，供 eval_events 用）
+    gt_events_meta = []            # [(dog_id, local_start_s, local_end_s, global_start, global_end), ...]
     target_window_confs_all = []   # 所有 argmax==target_label 窗口的置信度（不带偏移，纯统计用）
     dog_window_records = []        # [(pred_labels, pred_confs, starts, offset), ...] 每条狗，供后续按阈值重建片段
 
@@ -221,7 +239,10 @@ def main():
         gt_segs = find_contiguous_segments(labels)
         for start, end, lbl in gt_segs:
             if lbl == args.target_label:
-                gt_events_all.append((start / args.hz + offset, end / args.hz + offset))
+                local_start, local_end = start / args.hz, end / args.hz
+                gt_events_all.append((local_start + offset, local_end + offset))
+                gt_events_meta.append((dog_id, local_start, local_end,
+                                       local_start + offset, local_end + offset))
 
         data6 = np.concatenate(
             [sub[acc_cols].values, sub[gyro_cols].values], axis=1
@@ -293,7 +314,44 @@ def main():
   推荐配置: confidence_threshold={best[0]:.2f}  merge_gap={best[1]:.1f}s  (F1e={best[9]:.3f})
   对应到实际推理命令：
     python src/infer_csv_scratch.py ... --confidence_threshold {best[0]:.2f} --merge_gap {best[1]:.1f}
+""")
 
+    # ── 推荐配置下，具体列出被合并的真实事件组，供人工去 Label Studio 核实 ──
+    best_thr, best_mg = best[0], best[1]
+    raw_segs = []
+    for pred_labels, pred_confs, starts, offset in dog_window_records:
+        segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
+                                        args.hz, args.target_label, best_thr)
+        raw_segs.extend((s + offset, e + offset) for s, e in segs)
+    det_events_best = merge_segments(sorted(raw_segs), best_mg)
+    merge_groups = find_merge_groups(gt_events_meta, det_events_best)
+
+    print(f"{'='*90}")
+    print(f"  推荐配置下被合并的真实事件组（共 {len(merge_groups)} 组，供人工核实）")
+    print(f"{'='*90}")
+    if not merge_groups:
+        print("  没有发现被合并的事件组")
+    else:
+        for gi, group in enumerate(merge_groups, 1):
+            print(f"  组{gi}  dog_id={group[0][0]}  共{len(group)}个真实事件被合并:")
+            for j, (dog_id, ls, le) in enumerate(group):
+                gap_str = ""
+                if j > 0:
+                    gap = ls - group[j - 1][2]
+                    gap_str = f"    (距上一事件间隔 {gap:.2f}s)"
+                print(f"      {ls:>8.2f}s → {le:>8.2f}s{gap_str}")
+    print(f"""
+  上面的秒数是该条狗在合并CSV里的行序号/hz（从这条狗的第一行开始算），
+  可以据此去对应的原始录制/Label Studio标注里定位具体时间点核实：
+  - 如果间隔很短（<1秒）且动作听起来像是连续的一次抓挠中间偶尔停顿，
+    大概率是标注时被切成了多段，属于标注粒度问题，不是模型的错。
+  - 如果间隔有一两秒甚至更长，更像是两次独立的抓挠，说明合并确实是
+    模型/参数层面的问题，可以考虑要不要接受这种程度的合并（次数统计
+    会因此偏少），或者未来标注时尽量避免把间隔很短的重复动作拆开标。
+""")
+
+    print(f"""
+{'='*90}
   怎么解读：
   - 窗口级分布表：如果预测为目标行为的窗口大量集中在低置信度区间（比如
     阈值0.5时保留比例已经腰斩），说明模型对这个类别整体不够自信，提高
