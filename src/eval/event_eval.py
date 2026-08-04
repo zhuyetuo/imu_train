@@ -37,6 +37,7 @@ import sys
 import numpy as np
 import pandas as pd
 import joblib
+from sklearn.metrics import classification_report
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../ml"))
@@ -97,6 +98,13 @@ def sliding_windows(data, window_size, stride):
     if not starts:
         return np.empty((0, window_size, data.shape[1]), dtype=np.float32), []
     return np.stack([data[s:s + window_size] for s in starts]), starts
+
+
+def window_majority_labels(labels, starts, window_size):
+    """每个窗口内真实标签的多数投票，与 preprocess.py 的 sliding_window 逻辑一致，
+    用于跟模型的逐窗口预测对齐，算窗口级（逐帧）分类报告"""
+    from collections import Counter
+    return [Counter(labels[s:s + window_size]).most_common(1)[0][0] for s in starts]
 
 
 def predict_dog(data6, model, classes, window_size, stride, hz):
@@ -216,6 +224,48 @@ def compute_f1e(detailed):
     return p, r, f1e
 
 
+def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
+             target_label, window_size, hz):
+    """跑一遍 (置信度阈值 x merge_gap) 网格，返回结果列表
+    [(thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r), ...]"""
+    results = []
+    for thr in thr_values:
+        raw_segs = []
+        for pred_labels, pred_confs, starts, offset in dog_window_records:
+            segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
+                                            hz, target_label, thr)
+            raw_segs.extend((s + offset, e + offset) for s, e in segs)
+        raw_segs = sorted(raw_segs)
+        for mg in mg_values:
+            (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
+             f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
+            results.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
+    return results
+
+
+def print_grid_table(results, title, top_n=None):
+    insert_label = "I'"
+    print(f"\n{'='*90}")
+    print(f"  {title}")
+    print(f"{'='*90}")
+    rows = results if top_n is None else results[:top_n]
+    if top_n is not None:
+        header = f"  {'rank':<4}{'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}{'F1e':>8}"
+        print(header)
+        for rank, r in enumerate(rows, 1):
+            thr, mg, n_det, n_d, n_f, n_m, n_insert = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
+            f1e = r[9]
+            print(f"  {rank:<4}{thr:>7.3f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}{f1e:>8.3f}")
+    else:
+        header = (f"  {'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}"
+                  f"{'F1e':>8}{'lib_P':>8}{'lib_R':>8}")
+        print(header)
+        for r in rows:
+            thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r = r
+            print(f"  {thr:>7.3f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}"
+                  f"{f1e:>8.3f}{lib_p:>8.3f}{lib_r:>8.3f}")
+
+
 def eval_at_merge_gap(gt_events, raw_segs, merge_gap):
     """返回 (n_det, lib_p, lib_r, lib_f1, D, F, M, I', f1e_p, f1e_r, f1e)"""
     det_events = merge_segments(sorted(raw_segs), merge_gap)
@@ -244,7 +294,20 @@ def main():
                      help="要扫描的 merge_gap 取值列表（秒，默认 1 1.5 2 2.5 3）")
     ap.add_argument("--confidence_threshold", type=float, nargs="+",
                      default=[0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                     help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9）")
+                     help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9），"
+                          "这是第一阶段粗网格，用来定位大致范围")
+    ap.add_argument("--refine", dest="refine", action="store_true", default=True,
+                     help="是否在粗网格Top5范围附近自动做精细网格搜索（默认开启）")
+    ap.add_argument("--no_refine", dest="refine", action="store_false",
+                     help="关闭精细网格搜索，只用粗网格结果")
+    ap.add_argument("--refine_thr_step", type=float, default=0.01,
+                     help="精细网格的置信度阈值步长（默认0.01）")
+    ap.add_argument("--refine_gap_step", type=float, default=0.1,
+                     help="精细网格的merge_gap步长（默认0.1s）")
+    ap.add_argument("--refine_thr_pad", type=float, default=0.05,
+                     help="精细网格阈值范围在粗网格Top5边界基础上向外扩展的幅度（默认0.05）")
+    ap.add_argument("--refine_gap_pad", type=float, default=0.5,
+                     help="精细网格gap范围在粗网格Top5边界基础上向外扩展的幅度（默认0.5s）")
     ap.add_argument("--json_dir", default="",
                      help="Label Studio project-*.json 所在目录（可选）。传了的话，"
                           "被合并事件组/逐条对应表会顺带打印每个 dog_id 对应的 project "
@@ -290,6 +353,8 @@ def main():
     gt_events_meta = []            # [(dog_id, local_start_s, local_end_s, global_start, global_end), ...]
     target_window_confs_all = []   # 所有 argmax==target_label 窗口的置信度（不带偏移，纯统计用）
     dog_window_records = []        # [(pred_labels, pred_confs, starts, offset), ...] 每条狗，供后续按阈值重建片段
+    y_true_windows = []            # 全部窗口的真实标签（多数投票），跟 y_pred_windows 一一对应
+    y_pred_windows = []            # 全部窗口的模型预测标签（argmax，不做置信度过滤）
 
     dog_ids = sorted(df[args.dog_id_col].unique())
     print(f"共 {len(dog_ids)} 条狗，逐条推理中...")
@@ -314,6 +379,8 @@ def main():
         target_window_confs_all.extend(
             c for lbl, c in zip(pred_labels, pred_confs) if lbl == args.target_label
         )
+        y_true_windows.extend(window_majority_labels(labels, starts, window_size))
+        y_pred_windows.extend(pred_labels)
 
     # gt_events_all 和 gt_events_meta 必须按同一顺序排序（wardmetrics 要求输入按时间排好序，
     # 且返回的 gt_scores 顺序与输入顺序一一对应，两个列表如果各自排序会错位）
@@ -328,6 +395,14 @@ def main():
         print("[警告] 没有真实事件，无法评估")
         return
 
+    # ── 窗口级（逐帧）分类报告：不合并成事件，就是标准的多分类precision/recall/f1 ──
+    print(f"\n{'='*78}")
+    print("  窗口级分类报告（逐帧/逐窗口，未合并成事件，argmax预测，不做置信度过滤）")
+    print(f"{'='*78}")
+    labels_present = sorted(set(y_true_windows) | set(y_pred_windows))
+    print(classification_report(y_true_windows, y_pred_windows, labels=labels_present,
+                                zero_division=0))
+
     # ── 窗口级置信度分布 ──────────────────────────────────────────────────
     print(f"\n{'='*78}")
     print(f"  窗口级置信度分布（预测为 '{args.target_label}' 的窗口，按阈值累计保留比例）")
@@ -339,41 +414,41 @@ def main():
         pct = n_keep / n_total_windows * 100 if n_total_windows else 0.0
         print(f"  {thr:>8.2f}{n_keep:>12}{pct:>9.1f}%")
 
-    # ── 事件级评估：置信度阈值 × merge_gap 全网格 ──────────────────────────
-    print(f"\n{'='*90}")
-    print(f"  网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×{len(args.merge_gap)}"
-          f"={len(args.confidence_threshold)*len(args.merge_gap)} 组合）")
-    print(f"{'='*90}")
-    insert_label = "I'"
-    header = (f"  {'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}"
-              f"{'F1e':>8}{'lib_P':>8}{'lib_R':>8}")
-    print(header)
+    # ── 第一阶段：粗网格搜索 ────────────────────────────────────────────────
+    coarse_results = run_grid(args.confidence_threshold, args.merge_gap, dog_window_records,
+                              gt_events_all, args.target_label, window_size, args.hz)
+    print_grid_table(coarse_results,
+                     f"粗网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×"
+                     f"{len(args.merge_gap)}={len(coarse_results)} 组合）")
 
-    results = []  # (thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r)
-    for thr in args.confidence_threshold:
-        raw_segs = []
-        for pred_labels, pred_confs, starts, offset in dog_window_records:
-            segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
-                                            args.hz, args.target_label, thr)
-            raw_segs.extend((s + offset, e + offset) for s, e in segs)
-        raw_segs = sorted(raw_segs)
-        for mg in args.merge_gap:
-            (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
-             f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
-            results.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
-            row = (f"  {thr:>7.2f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}"
-                   f"{f1e:>8.3f}{lib_p:>8.3f}{lib_r:>8.3f}")
-            print(row)
+    coarse_sorted = sorted(coarse_results, key=lambda x: -x[9])
+    print_grid_table(coarse_sorted, "粗网格 Top 5（F1e 把碎片化F、合并M都算作错误，不像库自带precision/recall那样纵容合并）",
+                     top_n=5)
 
-    # ── 自动推荐：按 F1e 排序 ────────────────────────────────────────────
-    results_sorted = sorted(results, key=lambda x: -x[9])
-    print(f"\n{'='*90}")
-    print(f"  按 F1e 排序 Top 5（F1e 把碎片化F、合并M都算作错误，不像库自带precision/recall那样纵容合并）")
-    print(f"{'='*90}")
-    print(f"  {'rank':<4}{'thr>=':>7}{'gap':>6}{'n_pred':>7}{'D':>7}{'F':>7}{'M':>7}{insert_label:>7}{'F1e':>8}")
-    for rank, r in enumerate(results_sorted[:5], 1):
-        thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r = r
-        print(f"  {rank:<4}{thr:>7.2f}{mg:>6.1f}{n_det:>7}{n_d:>7}{n_f:>7}{n_m:>7}{n_insert:>7}{f1e:>8.3f}")
+    # ── 第二阶段：在粗网格 Top5 的范围附近做精细网格搜索 ───────────────────
+    results_sorted = coarse_sorted
+    if args.refine:
+        top5 = coarse_sorted[:5]
+        thr_lo = max(0.0, min(r[0] for r in top5) - args.refine_thr_pad)
+        thr_hi = min(1.0, max(r[0] for r in top5) + args.refine_thr_pad)
+        mg_lo = max(0.0, min(r[1] for r in top5) - args.refine_gap_pad)
+        mg_hi = max(r[1] for r in top5) + args.refine_gap_pad
+
+        n_thr = int(round((thr_hi - thr_lo) / args.refine_thr_step)) + 1
+        n_mg = int(round((mg_hi - mg_lo) / args.refine_gap_step)) + 1
+        fine_thr = [round(thr_lo + i * args.refine_thr_step, 4) for i in range(n_thr)]
+        fine_mg = [round(mg_lo + i * args.refine_gap_step, 4) for i in range(n_mg)]
+
+        fine_results = run_grid(fine_thr, fine_mg, dog_window_records,
+                                gt_events_all, args.target_label, window_size, args.hz)
+        fine_sorted = sorted(fine_results, key=lambda x: -x[9])
+        print_grid_table(
+            fine_sorted,
+            f"精细网格搜索（基于粗网格Top5范围扩展）: thr∈[{thr_lo:.2f},{thr_hi:.2f}]"
+            f"步长{args.refine_thr_step} × gap∈[{mg_lo:.1f},{mg_hi:.1f}]步长{args.refine_gap_step}"
+            f"（{len(fine_thr)}×{len(fine_mg)}={len(fine_results)} 组合），仅显示 Top 10",
+            top_n=10)
+        results_sorted = fine_sorted
 
     best = results_sorted[0]
     print(f"""
