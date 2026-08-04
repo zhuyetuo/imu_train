@@ -57,6 +57,20 @@ GYRO_CANDIDATES = [["gyro_x", "gyro_y", "gyro_z"], ["gyr_x", "gyr_y", "gyr_z"], 
 DOG_TIME_OFFSET = 1e7  # 每条狗的时间轴偏移量，避免跨狗事件在拼接后重叠
 
 
+class Tee:
+    """把 print 输出同时写到终端和日志文件"""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
 def find_cols(cols, candidates):
     for g in candidates:
         if all(c in cols for c in g):
@@ -233,9 +247,18 @@ def main():
                      help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9）")
     ap.add_argument("--json_dir", default="",
                      help="Label Studio project-*.json 所在目录（可选）。传了的话，"
-                          "被合并事件组会顺带打印每个 dog_id 对应的 project 文件和 "
-                          "video/csv 链接，不用再单独跑 find_task_project.py")
+                          "被合并事件组/逐条对应表会顺带打印每个 dog_id 对应的 project "
+                          "文件和 video/csv 链接，不用再单独跑 find_task_project.py")
+    ap.add_argument("--log_file", default="",
+                     help="可选：把完整输出（含逐条事件对应表）同时保存到这个文件，"
+                          "方便去 Label Studio 复查时对照")
     args = ap.parse_args()
+
+    if args.log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(args.log_file)), exist_ok=True)
+        log_f = open(args.log_file, "w", encoding="utf-8")
+        sys.stdout = Tee(sys.stdout, log_f)
+        print(f"[日志] 输出同时保存到: {args.log_file}\n")
 
     model = joblib.load(args.model)
     meta_path = args.model.replace(".pkl", ".json")
@@ -292,7 +315,11 @@ def main():
             c for lbl, c in zip(pred_labels, pred_confs) if lbl == args.target_label
         )
 
-    gt_events_all = sorted(gt_events_all)
+    # gt_events_all 和 gt_events_meta 必须按同一顺序排序（wardmetrics 要求输入按时间排好序，
+    # 且返回的 gt_scores 顺序与输入顺序一一对应，两个列表如果各自排序会错位）
+    order = sorted(range(len(gt_events_all)), key=lambda i: gt_events_all[i][0])
+    gt_events_all = [gt_events_all[i] for i in order]
+    gt_events_meta = [gt_events_meta[i] for i in order]
     target_window_confs_all = np.array(target_window_confs_all)
     print(f"\n真实 '{args.target_label}' 事件数: {len(gt_events_all)}")
     print(f"模型预测为 '{args.target_label}' 的窗口总数（未按置信度过滤）: {len(target_window_confs_all)}")
@@ -355,21 +382,61 @@ def main():
     python src/infer_csv_scratch.py ... --confidence_threshold {best[0]:.2f} --merge_gap {best[1]:.1f}
 """)
 
-    # ── 推荐配置下，具体列出被合并的真实事件组，供人工去 Label Studio 核实 ──
+    # ── 推荐配置下，重新算一遍拿到完整明细（C/D/F/FM/M/I' 等），供下面拆解和逐条表复用 ──
     best_thr, best_mg = best[0], best[1]
     raw_segs = []
     for pred_labels, pred_confs, starts, offset in dog_window_records:
         segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
                                         args.hz, args.target_label, best_thr)
         raw_segs.extend((s + offset, e + offset) for s, e in segs)
-    det_events_best = merge_segments(sorted(raw_segs), best_mg)
-    merge_groups = find_merge_groups(gt_events_meta, det_events_best)
+    raw_segs = sorted(raw_segs)
+    det_events_best = merge_segments(raw_segs, best_mg)
+    gt_scores_best, det_scores_best, detailed_best, standard_best = eval_events(gt_events_all, det_events_best)
 
     project_lookup = build_project_lookup(args.json_dir) if args.json_dir else None
     if args.json_dir and not project_lookup:
         print(f"[警告] {args.json_dir} 下没找到 project-*.json，跳过 project 反查")
 
+    # ── 详细拆解：真实事件总数 = C(精确匹配) + D(漏检) + F(碎片) + FM(碎片且合并) + M(合并) ──
+    n_gt = len(gt_events_all)
+    c_count = detailed_best["C"]
+    d_count = detailed_best["D"]
+    f_count = detailed_best["F"]
+    fm_count = detailed_best["FM"]
+    m_count = detailed_best["M"]
+    insert_count = detailed_best["I'"]
     print(f"{'='*90}")
+    print(f"  推荐配置详细拆解（真实 '{args.target_label}' 事件共 {n_gt} 个，预测事件 {len(det_events_best)} 个）")
+    print(f"{'='*90}")
+    print(f"  ✅ 精确匹配 C  = {c_count:>3}  个真实事件被干净利落地一对一识别对了")
+    print(f"  ❌ 漏检     D  = {d_count:>3}  个真实事件完全没被检测到")
+    print(f"  🔀 碎片     F  = {f_count:>3}  个真实事件被切成了多段预测")
+    if fm_count:
+        print(f"  🔀🔗 碎片且合并 FM = {fm_count:>3}  个真实事件既被切碎又被合并（复合错误）")
+    print(f"  🔗 合并     M  = {m_count:>3}  个真实事件跟旁边事件被粘到了同一个预测片段里")
+    print(f"  👻 纯误报   I' = {insert_count:>3}  个预测事件压根没有对应的真实事件")
+    print(f"  验算: C+D+F+FM+M = {c_count + d_count + f_count + fm_count + m_count}"
+          f"  （应等于真实事件总数 {n_gt}）")
+
+    # ── 全部真实事件逐条对应表：每一条的类别 + 匹配到的预测区间 + project信息 ──
+    print(f"\n{'='*90}")
+    print(f"  全部 {n_gt} 个真实事件逐条对应表（供逐条去 Label Studio 复查）")
+    print(f"{'='*90}")
+    score_name = {"C": "精确匹配", "D": "漏检", "F": "碎片化", "M": "合并", "FM": "碎片且合并"}
+    printed_dogs = set()
+    for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best):
+        overlaps = [(ds - (gs - ls), de - (ge - le)) for ds, de in det_events_best if ds < ge and de > gs]
+        overlap_str = ", ".join(f"{ds:.2f}s→{de:.2f}s" for ds, de in overlaps) if overlaps else "(无)"
+        print(f"  [{score:>2}={score_name.get(score, score):<6}] {dog_id:<20}"
+              f"  真实:{ls:>8.2f}s→{le:>8.2f}s   预测:{overlap_str}")
+        if project_lookup is not None and dog_id not in printed_dogs:
+            print_project_info(dog_id, project_lookup)
+            printed_dogs.add(dog_id)
+
+    # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
+    merge_groups = find_merge_groups(gt_events_meta, det_events_best)
+
+    print(f"\n{'='*90}")
     print(f"  推荐配置下被合并的真实事件组（共 {len(merge_groups)} 组，供人工核实）")
     print(f"{'='*90}")
     if not merge_groups:
