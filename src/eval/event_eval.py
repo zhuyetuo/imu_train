@@ -28,8 +28,10 @@
 """
 
 import argparse
+import glob
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -41,6 +43,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../ml"))
 
 from gravity_align import gravity_align_batch, append_raw_tilt_batch
 from features import extract_features
+from find_task_project import extract_task_id, extract_project_no
 
 try:
     from wardmetrics.core_methods import eval_events
@@ -97,6 +100,38 @@ def predict_dog(data6, model, classes, window_size, stride, hz):
     pred_confs = probs[np.arange(len(probs)), pred_ids]
     pred_labels = [classes[int(p)] for p in pred_ids]
     return pred_labels, pred_confs, starts
+
+
+def build_project_lookup(json_dir, pattern="project-*.json"):
+    """扫描 project-*.json，建立 task_id -> (文件名, project编号, task字典) 的查找表"""
+    lookup = {}
+    files = sorted(glob.glob(os.path.join(json_dir, pattern)))
+    for fpath in files:
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                tasks = json.load(f)
+        except Exception:
+            continue
+        project_no = extract_project_no(fpath)
+        for task in tasks:
+            tid = task.get("id")
+            if tid is not None and tid not in lookup:
+                lookup[tid] = (os.path.basename(fpath), project_no, task)
+    return lookup
+
+
+def print_project_info(dog_id, project_lookup):
+    """按 dog_id（如 task496_imu1）反查并打印所属 project 文件 + video/csv 链接"""
+    tid = extract_task_id(dog_id)
+    if tid is None or tid not in project_lookup:
+        print(f"      [未找到 {dog_id} 对应的 project 信息]")
+        return
+    fname, project_no, task = project_lookup[tid]
+    print(f"      project文件: {fname}  project编号: {project_no or '未知'}")
+    data = task.get("data", {})
+    for k in ("csv", "video1", "video2", "cam1", "cam2"):
+        if k in data:
+            print(f"      data.{k}: {data[k]}")
 
 
 def find_merge_groups(gt_events_meta, det_events):
@@ -196,6 +231,10 @@ def main():
     ap.add_argument("--confidence_threshold", type=float, nargs="+",
                      default=[0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
                      help="要扫描的置信度阈值列表（默认 0.0 0.4 0.5 0.6 0.7 0.8 0.9）")
+    ap.add_argument("--json_dir", default="",
+                     help="Label Studio project-*.json 所在目录（可选）。传了的话，"
+                          "被合并事件组会顺带打印每个 dog_id 对应的 project 文件和 "
+                          "video/csv 链接，不用再单独跑 find_task_project.py")
     args = ap.parse_args()
 
     model = joblib.load(args.model)
@@ -326,6 +365,10 @@ def main():
     det_events_best = merge_segments(sorted(raw_segs), best_mg)
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
 
+    project_lookup = build_project_lookup(args.json_dir) if args.json_dir else None
+    if args.json_dir and not project_lookup:
+        print(f"[警告] {args.json_dir} 下没找到 project-*.json，跳过 project 反查")
+
     print(f"{'='*90}")
     print(f"  推荐配置下被合并的真实事件组（共 {len(merge_groups)} 组，供人工核实）")
     print(f"{'='*90}")
@@ -333,7 +376,10 @@ def main():
         print("  没有发现被合并的事件组")
     else:
         for gi, group in enumerate(merge_groups, 1):
-            print(f"  组{gi}  dog_id={group[0][0]}  共{len(group)}个真实事件被合并:")
+            dog_id = group[0][0]
+            print(f"  组{gi}  dog_id={dog_id}  共{len(group)}个真实事件被合并:")
+            if project_lookup is not None:
+                print_project_info(dog_id, project_lookup)
             for j, (dog_id, ls, le) in enumerate(group):
                 gap_str = ""
                 if j > 0:
