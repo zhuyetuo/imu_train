@@ -464,7 +464,10 @@ def eval_at_merge_gap(gt_events, raw_segs, merge_gap):
     n_gt = len(gt_events)
     if not det_events:
         return 0, 0.0, 0.0, 0.0, n_gt, 0, 0, 0, 0.0, 0.0, 0.0
-    gt_scores, det_scores, detailed, standard = eval_events(gt_events, det_events)
+    # 传副本进去：ward-metrics 的 eval_events() 内部会用 del 原地修改传入的列表
+    # （合并首尾正好相接的事件），如果直接传引用，我们自己这份 gt_events_all
+    # 会被library悄悄改短，后面再用 len(gt_events_all) 就会跟之前打印的对不上
+    gt_scores, det_scores, detailed, standard = eval_events(list(gt_events), list(det_events))
     lib_p, lib_r = standard["precision"], standard["recall"]
     lib_f1 = 2 * lib_p * lib_r / (lib_p + lib_r) if (lib_p + lib_r) > 0 else 0.0
     f1e_p, f1e_r, f1e = compute_f1e(detailed)
@@ -766,7 +769,7 @@ def main():
         raw_segs.extend((s + offset, e + offset) for s, e in segs)
     raw_segs = sorted(raw_segs)
     det_events_best = merge_segments(raw_segs, best_mg)
-    gt_scores_best, det_scores_best, detailed_best, standard_best = eval_events(gt_events_all, det_events_best)
+    gt_scores_best, det_scores_best, detailed_best, standard_best = eval_events(list(gt_events_all), list(det_events_best))
 
     project_lookup = build_project_lookup(args.json_dir) if args.json_dir else None
     if args.json_dir and not project_lookup:
