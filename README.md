@@ -515,6 +515,8 @@ python src/eval/event_eval.py \
 
 `--labeled_csv` 要用**未按 `--keep_labels` 过滤的全量标注CSV**（用 `labelstudio_to_custom.py --keep_labels` 不传值生成，见上文"标注分析"一节），这样窗口级分类报告和事件提取才有完整的真实标签可用。
 
+`labelstudio_to_custom.py` 生成的CSV现在带一列 `timestamp`（原始CSV里解析出来的绝对时间），`event_eval.py` 会自动识别这一列，在逐条对应表里除了相对秒数还会多打印一行"绝对时间戳"，方便直接去原始CSV/视频里定位对应位置。用旧版脚本生成、没有这一列的CSV仍然能跑，只是不显示绝对时间戳（自动降级）。
+
 ### 输出内容（按顺序）
 
 1. **窗口级分类报告**：标准的多分类 precision/recall/f1-score，只统计真实标签在模型已知类别内的窗口（比如标注CSV里的"啃身体"模型没训练过，会被跳过，不会拉低指标）

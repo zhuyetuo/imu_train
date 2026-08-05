@@ -135,11 +135,13 @@ def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
     if acc_unit == "g":
         acc = acc * G
     gyro = seg_df[gyro_cols].values.astype(np.float64) if gyro_cols else np.zeros((len(seg_df), 3))
+    ts = seg_df["_ts"].values
     rows = []
     for i in range(len(seg_df)):
         rows.append({
             "dog_id": subject_id,
             "label":  label,
+            "timestamp": ts[i],
             "acc_x":  acc[i, 0], "acc_y": acc[i, 1], "acc_z": acc[i, 2],
             "gyr_x":  gyro[i, 0], "gyr_y": gyro[i, 1], "gyr_z": gyro[i, 2],
         })
