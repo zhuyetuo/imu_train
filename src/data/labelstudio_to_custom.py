@@ -177,6 +177,13 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                                                       f"task{task_id}_imu{idx}")
             if not sensor_map:
                 continue
+            # 任务只挂了一个传感器（csv1/csv2只填了一个）时，Label Studio 标注界面
+            # 用的是通用的 from_name="label"，不是 "label1"/"label2"——实测显示这种
+            # from_name="label" + is_multi 的标注段100%来自只有一个csv链接的任务，
+            # 给这唯一存在的传感器加一个 "label" 别名，不然这些标注会被判定成"对不上
+            # 传感器"整段跳过（531段抓挠标注里有342段、即64%，就是这么丢的）
+            if len(sensor_map) == 1:
+                sensor_map["label"] = next(iter(sensor_map.values()))
 
             for ann in annotations:
                 for seg in ann.get("result", []):
