@@ -79,13 +79,26 @@ def find_cols(cols, candidates):
     return None
 
 
-def find_contiguous_segments(labels, min_len=1):
+def find_contiguous_segments(labels, min_len=1, break_before=None):
+    """把标签数组切成连续同标签的片段。
+
+    break_before: 可选的布尔数组（跟 labels 等长），True 的位置强制从这里切断，
+    即使前后标签相同也不合并成一个片段。
+
+    为什么需要这个：labelstudio_to_custom.py 生成CSV时只保留标注覆盖到的行，
+    两次标注之间没有被标注的时间段（哪怕是几分钟）在CSV里根本不存在任何行——
+    不是"被打上了别的标签"，是"直接消失"。这样一来，如果两次独立发生的抓挠
+    之间没有被标注别的行为，它们在CSV数组里会紧挨在一起，单看标签数组分不出
+    这是"一次连续事件"还是"两次相隔很远、只是中间没被标注任何东西的独立事件"。
+    调用方可以传入基于真实时间戳算出的 break_before（时间跳变超过阈值的位置），
+    强制在这些位置切断，避免虚假合并成一个事件。"""
     segs = []
     n = len(labels)
     i = 0
     while i < n:
         j = i + 1
-        while j < n and labels[j] == labels[i]:
+        while (j < n and labels[j] == labels[i]
+               and not (break_before is not None and break_before[j])):
             j += 1
         if j - i >= min_len:
             segs.append((i, j, labels[i]))
@@ -108,14 +121,30 @@ def window_majority_labels(labels, starts, window_size):
 
 
 def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
-                     model, classes, window_size, stride, hz, target_label):
-    """单条狗的完整处理（真实事件提取 + 滑窗推理），供并行调用。"""
+                     model, classes, window_size, stride, hz, target_label,
+                     has_timestamp=False, gap_tolerance=1.5):
+    """单条狗的完整处理（真实事件提取 + 滑窗推理），供并行调用。
+
+    has_timestamp: CSV是否带有真实时间戳列。有的话用真实时间跳变来判断两段
+    同标签的行是不是真的时间连续，而不是只看数组下标是否相邻——因为CSV只保留
+    了标注覆盖到的行，未标注的时间段直接消失不留痕迹，两次相隔很远的独立事件
+    如果中间没有别的标注，会在数组里紧挨着，单靠标签数组分不出来。
+    gap_tolerance: 相邻两行时间差超过 gap_tolerance/hz 秒就认为不是真连续
+    （正常单帧间隔是1/hz，给1.5倍冗余容忍轻微的采样抖动）。"""
     sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
     labels = sub[label_col].values
     offset = i * DOG_TIME_OFFSET
 
+    break_before = None
+    if has_timestamp:
+        ts = pd.to_datetime(sub["timestamp"], errors="coerce").values.astype("datetime64[ns]")
+        deltas = np.empty(len(ts))
+        deltas[0] = 0.0
+        deltas[1:] = (ts[1:] - ts[:-1]) / np.timedelta64(1, "s")
+        break_before = deltas > (gap_tolerance / hz)
+
     gt_events, gt_meta = [], []
-    gt_segs = find_contiguous_segments(labels)
+    gt_segs = find_contiguous_segments(labels, break_before=break_before)
     for start, end, lbl in gt_segs:
         if lbl == target_label:
             local_start, local_end = start / hz, end / hz
@@ -140,7 +169,7 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
 
 def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
                   model, classes, window_size, stride, hz, target_label,
-                  show_progress=True, workers=-1):
+                  show_progress=True, workers=-1, has_timestamp=False):
     """对全部狗跑一遍推理 + 提取真实事件，返回本次评估需要的全部中间数据。
     每次调用都会重新做完整的特征提取+模型推理，换 stride 时必须重新调用
     （跟 confidence_threshold/merge_gap 不同，那两个可以复用同一份推理结果）。
@@ -162,7 +191,8 @@ def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
         dog_iter = enumerate(tqdm(dog_ids, desc="逐狗推理", unit="狗"))
     results = Parallel(n_jobs=n_jobs, backend="loky")(
         delayed(_process_one_dog)(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
-                                  model, classes, window_size, stride, hz, target_label)
+                                  model, classes, window_size, stride, hz, target_label,
+                                  has_timestamp=has_timestamp)
         for i, dog_id in dog_iter
     )
 
@@ -503,14 +533,16 @@ def main():
     dog_ids = sorted(df[args.dog_id_col].unique())
 
     # ── 可选的绝对时间戳列（labelstudio_to_custom.py 新版才有，旧数据没有则优雅降级）──
+    has_ts = "timestamp" in df.columns
     dog_ts_map = {}
-    if "timestamp" in df.columns:
+    if has_ts:
         ts_all = pd.to_datetime(df["timestamp"], errors="coerce")
         for dog_id in dog_ids:
             dog_ts_map[dog_id] = ts_all[df[args.dog_id_col] == dog_id].reset_index(drop=True)
     else:
         print("[提示] CSV 里没有 timestamp 列（用旧版 labelstudio_to_custom.py 生成的），"
-              "逐条对应表将只显示相对秒数，不显示绝对时间戳")
+              "逐条对应表将只显示相对秒数，不显示绝对时间戳；"
+              "同时无法判断两段同标签标注是否真的时间连续，可能把中间隔了很久的独立事件误合并成一个")
 
     # ── stride 对比模式：每个候选步长都要重新做一遍完整推理（不能复用），
     # 所以只跑网格搜索拿到每个 stride 的最优 F1e 做对比，不打印逐条明细 ──
@@ -522,7 +554,7 @@ def main():
             print(f"\n[{si}/{len(args.stride_compare)}] 步长={cand_stride_s}s（{cand_stride}个采样点）推理中...")
             ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
                                model, classes, window_size, cand_stride, args.hz, args.target_label,
-                               workers=args.workers)
+                               workers=args.workers, has_timestamp=has_ts)
             if not ds["gt_events_all"]:
                 print("  [警告] 没有真实事件，跳过")
                 continue
@@ -572,7 +604,7 @@ def main():
     # ── 单一步长模式（默认，跟原来一样）──────────────────────────────────
     ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
                        model, classes, window_size, stride, args.hz, args.target_label,
-                       workers=args.workers)
+                       workers=args.workers, has_timestamp=has_ts)
     gt_events_all = ds["gt_events_all"]
     gt_events_meta = ds["gt_events_meta"]
     target_window_confs_all = ds["target_window_confs_all"]
