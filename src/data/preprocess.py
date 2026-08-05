@@ -356,15 +356,16 @@ def main(args):
         if strategy == "random":
             print(f"[preprocess] subject 数={n_subjects} < 10，自动使用窗口随机划分（可用 --split_strategy subject 强制按subject划分）")
 
+    test_r_display = max(0.0, round(1 - train_r - val_r, 6))  # 避免浮点误差显示成 -0%
     if strategy == "subject":
         train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
         print(f"[preprocess] 按 subject 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
     elif strategy == "label_concat":
         train_ids = val_ids = test_ids = None
-        print(f"[preprocess] 按类别拼接滑窗: train={train_r:.0%} / val={val_r:.0%} / test={1-train_r-val_r:.0%}")
+        print(f"[preprocess] 按类别拼接滑窗+按片段分组划分: train={train_r:.0%} / val={val_r:.0%} / test={test_r_display:.0%}")
     else:
         train_ids = val_ids = test_ids = None
-        print(f"[preprocess] 按窗口随机划分: train={train_r:.0%} / val={val_r:.0%} / test={1-train_r-val_r:.0%}")
+        print(f"[preprocess] 按连续片段分组划分: train={train_r:.0%} / val={val_r:.0%} / test={test_r_display:.0%}")
 
     for target_hz in target_hz_list:
         if target_hz > source_hz:
