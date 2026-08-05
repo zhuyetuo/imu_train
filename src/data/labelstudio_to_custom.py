@@ -216,7 +216,12 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
     if not rows:
         raise RuntimeError("没有任何有效数据，请检查输入 JSON 和 CSV 路径")
 
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    # 标注段是按 Label Studio 导出顺序拼接的，不一定按时间先后，
+    # 必须按 (dog_id, timestamp) 重新排序，否则同一个 dog_id 内部的
+    # "局部秒数"跟真实时间顺序对不上（窗口切分、事件时间戳换算都会错）
+    out = out.sort_values(["dog_id", "timestamp"], kind="stable").reset_index(drop=True)
+    return out
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
