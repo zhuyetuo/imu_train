@@ -19,10 +19,12 @@ LABEL="抓挠"
 REMAP="configs/remap_custom_3class.yaml"
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
-SPLIT_STRATEGY="random"   # random=混合所有狗后按窗口划分（默认），subject=按狗ID划分
+SPLIT_STRATEGY="random"   # random=混合所有狗后按片段分组划分（默认），subject=按狗ID划分，label_concat=按类别拼接
 TRAIN_RATIO="0.9"         # 训练集比例（默认0.9）
 VAL_RATIO="0.1"           # 验证集比例（默认0.1）
 TEST_RATIO="0.0"          # 测试集比例（默认0=无测试集，纠错循环阶段不需要）
+LABEL_MODE="majority"     # majority=多数投票（默认，原有行为），center=窗口标签取中心帧
+STRIDE_S=""               # 训练窗口步长秒数（留空=用 configs/data.yaml 默认值1秒）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -35,6 +37,8 @@ while [[ $# -gt 0 ]]; do
     --train_ratio)    TRAIN_RATIO="$2";    shift 2 ;;
     --val_ratio)      VAL_RATIO="$2";      shift 2 ;;
     --test_ratio)     TEST_RATIO="$2";     shift 2 ;;
+    --label_mode)     LABEL_MODE="$2";     shift 2 ;;
+    --stride_s)       STRIDE_S="$2";       shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -72,6 +76,8 @@ python src/data/preprocess.py \
   --train_ratio "$TRAIN_RATIO" \
   --val_ratio "$VAL_RATIO" \
   --test_ratio "$TEST_RATIO" \
+  --label_mode "$LABEL_MODE" \
+  $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
   --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
