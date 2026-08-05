@@ -96,20 +96,34 @@ def _load_sensor(url, csv_dir, name):
     return df, acc_cols, gyro_cols
 
 
-def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
-    """从 Label Studio JSON 中提取所有 target_label 的原始片段，返回 list of (N,6) ndarray。"""
+def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbose=True):
+    """从 Label Studio JSON 中提取所有 target_label 的原始片段，返回 list of (N,6) ndarray。
+    verbose=True 时打印每一类跳过原因的计数，方便核对"标注里明明有N段，怎么只提取出M个"。"""
     segments = []
     # 缓存已加载的 CSV，避免同一文件重复读取
     _csv_cache = {}
+
+    # 跳过原因计数：方便定位"标注段数"跟"实际提取出的片段数"之间的差距来自哪一步
+    skip_no_annotation = 0     # task 本身没有 annotations
+    skip_no_url = 0            # data 里没有可用的 csv/csv1/csv2 链接
+    skip_load_fail = 0         # csv 下载/解析失败（_load_sensor 内部已打印具体错误）
+    skip_no_label_match = 0    # 该段标签不是 target_label（正常情况，不算异常）
+    skip_sensor_mismatch = 0   # from_name 在 sensor_map 里找不到对应的CSV（双传感器from_name对不上）
+    skip_too_short = 0         # 时间段内匹配到的行数 < min_rows
+    n_matched_label = 0        # 标签匹配上 target_label 的段总数（跟 analyze_label_segments.py 的片段数对应）
 
     for task in tasks:
         task_id = task["id"]
         data    = task.get("data", {})
         anns    = task.get("annotations", [])
         if not anns:
+            skip_no_annotation += 1
             continue
 
         is_multi = "csv1" in data or "csv2" in data
+
+        task_has_url = False   # 这个task至少有一个csv/csv1/csv2链接
+        load_failed  = False   # 有链接，但至少一个下载/解析失败了
 
         if is_multi:
             sensor_map = {}
@@ -117,17 +131,24 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
                 url = data.get(f"csv{idx}", "")
                 if not url:
                     continue
+                task_has_url = True
                 if url not in _csv_cache:
                     _csv_cache[url] = _load_sensor(url, csv_dir, f"task{task_id}_imu{idx}")
                 if _csv_cache[url]:
                     sensor_map[f"label{idx}"] = _csv_cache[url]
+                else:
+                    load_failed = True
         else:
             url = data.get("csv", "")
-            if not url:
-                continue
-            if url not in _csv_cache:
-                _csv_cache[url] = _load_sensor(url, csv_dir, f"task{task_id}_imu")
-            sensor_map = {"label": _csv_cache[url]} if _csv_cache[url] else {}
+            task_has_url = bool(url)
+            sensor_map = {}
+            if url:
+                if url not in _csv_cache:
+                    _csv_cache[url] = _load_sensor(url, csv_dir, f"task{task_id}_imu")
+                if _csv_cache[url]:
+                    sensor_map = {"label": _csv_cache[url]}
+                else:
+                    load_failed = True
 
         for ann in anns:
             for seg in ann.get("result", []):
@@ -137,8 +158,18 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
                 t1_str = val.get("end",   "")
                 fn     = seg.get("from_name", "")
                 if not labels or labels[0] != target_label or not t0_str or not t1_str:
+                    skip_no_label_match += 1
+                    continue
+                n_matched_label += 1
+                if not task_has_url:
+                    skip_no_url += 1
                     continue
                 if fn not in sensor_map:
+                    # 该task的CSV要么下载/解析失败了，要么加载成功但from_name跟label1/label2对不上
+                    if load_failed:
+                        skip_load_fail += 1
+                    else:
+                        skip_sensor_mismatch += 1
                     continue
                 df, acc_cols, gyro_cols = sensor_map[fn]
                 t0   = pd.to_datetime(t0_str)
@@ -146,12 +177,27 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16):
                 mask = (df["_ts"] >= t0) & (df["_ts"] <= t1)
                 sub  = df[mask]
                 if len(sub) < min_rows:
+                    skip_too_short += 1
                     print(f"  [跳过] task{task_id} {t0_str} 只有 {len(sub)} 行")
                     continue
                 acc  = sub[acc_cols].values.astype(np.float32)
                 gyro = sub[gyro_cols].values.astype(np.float32) if gyro_cols \
                        else np.zeros((len(sub), 3), dtype=np.float32)
                 segments.append(np.concatenate([acc, gyro], axis=1))
+
+    if verbose:
+        print(f"\n  [提取明细] 标签='{target_label}' 匹配到的标注段: {n_matched_label}")
+        print(f"    ✅ 成功提取:                 {len(segments)}")
+        print(f"    ⚠️  task无标注被跳过:          {skip_no_annotation}（不影响，跟本标签无关）")
+        print(f"    ❌ 段所在task没有csv链接:      {skip_no_url}")
+        print(f"    ❌ csv下载/解析失败:          {skip_load_fail}（具体错误见上面 [错误] 行）")
+        print(f"    ❌ from_name跟sensor_map对不上: {skip_sensor_mismatch}"
+              f"（双传感器标注用的from_name不是label1/label2）")
+        print(f"    ❌ 时间段内行数<{min_rows}(约{min_rows/16:.2f}s@16Hz): {skip_too_short}")
+        accounted = len(segments) + skip_no_url + skip_load_fail + skip_sensor_mismatch + skip_too_short
+        if accounted != n_matched_label:
+            print(f"    [提示] 明细加总({accounted})跟匹配段数({n_matched_label})对不上，"
+                  f"可能有未覆盖到的分支，欢迎反馈")
 
     return segments
 
