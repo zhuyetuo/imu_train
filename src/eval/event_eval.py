@@ -370,13 +370,47 @@ def compute_f1e(detailed):
     return p, r, f1e
 
 
+def _eval_one_threshold(thr, mg_values, dog_window_records, gt_events_all,
+                        target_label, window_size, hz, stride, label_mode):
+    """单个置信度阈值下，扫完所有 merge_gap 取值，返回这一批结果行。
+    按阈值拆成独立函数是为了给 run_grid 的多进程并行用（每个阈值互不依赖，
+    重建预测片段+跑 wardmetrics 都是纯CPU计算，核多、狗多、事件多时并行收益明显）。"""
+    raw_segs = []
+    for pred_labels, pred_confs, starts, offset in dog_window_records:
+        segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
+                                        hz, target_label, thr, stride, label_mode)
+        raw_segs.extend((s + offset, e + offset) for s, e in segs)
+    raw_segs = sorted(raw_segs)
+    rows = []
+    for mg in mg_values:
+        (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
+         f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
+        rows.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
+    return rows
+
+
 def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
              target_label, window_size, hz, stride=None, label_mode="majority",
-             desc="网格搜索", show_progress=True):
+             desc="网格搜索", show_progress=True, workers=1):
     """跑一遍 (置信度阈值 x merge_gap) 网格，返回结果列表
     [(thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r), ...]
-    耗时主要在按阈值重建预测片段这一层（外层循环），gap 合并很快，
-    所以进度条按阈值粒度显示，能大致反映整体进度。"""
+    耗时主要在按阈值重建预测片段这一层（外层循环），gap 合并很快。
+    workers != 1 时用 joblib 多进程按阈值并行（每个阈值的工作彼此独立，
+    狗越多、事件越多，单线程越慢，并行收益越明显）。"""
+    if workers and workers != 1:
+        from joblib import Parallel, delayed
+        from tqdm import tqdm
+        n_jobs = workers if workers > 0 else -1
+        it = thr_values
+        if show_progress:
+            it = tqdm(thr_values, desc=desc, unit="thr")
+        nested = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_eval_one_threshold)(thr, mg_values, dog_window_records, gt_events_all,
+                                         target_label, window_size, hz, stride, label_mode)
+            for thr in it
+        )
+        return [row for rows in nested for row in rows]
+
     results = []
     best_f1e_so_far = 0.0
     it = thr_values
@@ -384,17 +418,11 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
         from tqdm import tqdm
         it = tqdm(thr_values, desc=desc, unit="thr")
     for thr in it:
-        raw_segs = []
-        for pred_labels, pred_confs, starts, offset in dog_window_records:
-            segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
-                                            hz, target_label, thr, stride, label_mode)
-            raw_segs.extend((s + offset, e + offset) for s, e in segs)
-        raw_segs = sorted(raw_segs)
-        for mg in mg_values:
-            (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
-             f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
-            results.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
-            best_f1e_so_far = max(best_f1e_so_far, f1e)
+        rows = _eval_one_threshold(thr, mg_values, dog_window_records, gt_events_all,
+                                   target_label, window_size, hz, stride, label_mode)
+        results.extend(rows)
+        if rows:
+            best_f1e_so_far = max(best_f1e_so_far, max(r[9] for r in rows))
         if show_progress:
             it.set_postfix(best_f1e=f"{best_f1e_so_far:.3f}")
     return results
@@ -562,7 +590,8 @@ def main():
             grid_results = run_grid(args.confidence_threshold, args.merge_gap, ds["dog_window_records"],
                                     ds["gt_events_all"], args.target_label, window_size, args.hz,
                                     stride=cand_stride, label_mode=label_mode,
-                                    desc=f"  阈值×gap网格(stride={cand_stride_s}s)")
+                                    desc=f"  阈值×gap网格(stride={cand_stride_s}s)",
+                                    workers=args.workers)
             best = sorted(grid_results, key=lambda x: -x[9])[0]
             thr, mg, n_det, n_d, n_f, n_m, n_insert = best[0], best[1], best[2], best[3], best[4], best[5], best[6]
             f1e = best[9]
@@ -667,7 +696,8 @@ def main():
               f"，共 {len(full_thr)}×{len(full_mg)}={len(full_thr)*len(full_mg)} 组合")
         full_results = run_grid(full_thr, full_mg, dog_window_records, gt_events_all,
                                 args.target_label, window_size, args.hz,
-                                stride=stride, label_mode=label_mode, desc="全局网格搜索")
+                                stride=stride, label_mode=label_mode, desc="全局网格搜索",
+                                workers=args.workers)
         results_sorted = sorted(full_results, key=lambda x: -x[9])
         print_grid_table(results_sorted,
                          f"全局网格搜索 Top 20（{len(full_results)} 组合中选出）", top_n=20)
@@ -675,7 +705,8 @@ def main():
         # ── 第一阶段：粗网格搜索 ────────────────────────────────────────────
         coarse_results = run_grid(args.confidence_threshold, args.merge_gap, dog_window_records,
                                   gt_events_all, args.target_label, window_size, args.hz,
-                                  stride=stride, label_mode=label_mode, desc="粗网格搜索")
+                                  stride=stride, label_mode=label_mode, desc="粗网格搜索",
+                                  workers=args.workers)
         print_grid_table(coarse_results,
                          f"粗网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×"
                          f"{len(args.merge_gap)}={len(coarse_results)} 组合）")
@@ -700,7 +731,8 @@ def main():
 
             fine_results = run_grid(fine_thr, fine_mg, dog_window_records,
                                     gt_events_all, args.target_label, window_size, args.hz,
-                                    stride=stride, label_mode=label_mode, desc="精细网格搜索")
+                                    stride=stride, label_mode=label_mode, desc="精细网格搜索",
+                                    workers=args.workers)
             fine_sorted = sorted(fine_results, key=lambda x: -x[9])
             print_grid_table(
                 fine_sorted,
