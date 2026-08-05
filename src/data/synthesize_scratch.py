@@ -304,36 +304,47 @@ def main():
         print("[错误] 未找到任何片段，请检查 --label 名称和 JSON 内容")
         return
 
-    raw_windows = []
-    for seg in segments:
-        raw_windows.extend(sliding_windows(seg, window_size, stride))
+    # seg_id 记录每个窗口来自 segments 里的第几个原始片段（增强出来的变体沿用同一个id）：
+    # 同一个原始事件产生的原始窗口+所有增强变体窗口，是"近乎重复"的内容，必须在
+    # train/val/test 划分时被当作同一组，否则训练集和验证集里会混进彼此的近似
+    # 副本，造成数据泄漏（验证集分数虚高但不代表真实泛化能力）。
+    raw_windows, raw_seg_ids = [], []
+    for seg_id, seg in enumerate(segments):
+        wins = sliding_windows(seg, window_size, stride)
+        raw_windows.extend(wins)
+        raw_seg_ids.extend([seg_id] * len(wins))
     print(f"原始片段滑窗: {len(raw_windows)} 个窗口")
 
-    aug_windows = []
-    for seg in segments:
+    aug_windows, aug_seg_ids = [], []
+    for seg_id, seg in enumerate(segments):
         for v in augment_segment(seg, args.n_aug, rng):
-            aug_windows.extend(sliding_windows(v, window_size, stride))
+            wins = sliding_windows(v, window_size, stride)
+            aug_windows.extend(wins)
+            aug_seg_ids.extend([seg_id] * len(wins))
 
     all_windows = raw_windows + aug_windows
-    print(f"增强后总窗口: {len(all_windows)} 个")
+    all_seg_ids = raw_seg_ids + aug_seg_ids
+    print(f"增强后总窗口: {len(all_windows)} 个（来自 {len(segments)} 个原始片段）")
 
     if not all_windows:
         print("[错误] 没有生成任何窗口")
         return
 
-    # 按目标数量随机采样，避免合成数据压过真实数据
+    # 按目标数量随机采样，避免合成数据压过真实数据（seg_id 跟着同步采样，保持对应关系）
     if target_windows > 0 and len(all_windows) > target_windows:
         idx = rng.choice(len(all_windows), size=target_windows, replace=False)
         all_windows = [all_windows[i] for i in idx]
+        all_seg_ids = [all_seg_ids[i] for i in idx]
         print(f"采样到目标窗口数: {len(all_windows)} 个（原 {len(raw_windows) + len(aug_windows)} 个）")
     elif target_windows > 0:
         print(f"[提示] 生成窗口数 {len(all_windows)} 少于目标 {target_windows}，可调大 --n_aug")
 
     X = np.stack(all_windows, axis=0)
+    seg_ids = np.array(all_seg_ids, dtype=np.int64)
     print(f"\n输出形状: {X.shape}")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    np.savez_compressed(args.output, X=X)
+    np.savez_compressed(args.output, X=X, seg_ids=seg_ids)
     print(f"已保存: {args.output}")
 
     print(f"\n下一步（注入合成数据训练）:")

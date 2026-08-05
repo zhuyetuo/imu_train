@@ -16,6 +16,7 @@ import joblib
 from dataset import load_all_splits
 from features import extract_features
 from gravity_align import gravity_align_batch, append_raw_tilt_batch
+from preprocess import split_windows_by_segment
 from models.random_forest import build_rf
 from models.xgboost_model import build_xgb
 from models.lightgbm_model import build_lgbm
@@ -152,19 +153,26 @@ def main(args):
             syn_label_id = len(classes)               # 追加为新类别
             classes      = classes + [syn_label]
 
-        # 按与真实数据相同的比例分配合成数据到 train/val/test
+        # 按与真实数据相同的比例分配合成数据到 train/val/test。
+        # 必须按"原始片段"分组划分，不能纯随机打乱窗口——合成数据是由少量真实
+        # 片段增强放大出来的（同一片段可能产生几十个近乎重复的窗口），纯随机
+        # 划分会让同一片段的窗口分散到train和val/test里，造成数据泄漏（验证集
+        # 分数虚高但不代表真实泛化能力）。
         syn_train_r = float(meta.get("train_ratio", 0.8))
         syn_val_r   = float(meta.get("val_ratio",   0.1))
-        syn_test_r  = float(meta.get("test_ratio",  max(0.0, 1.0 - syn_train_r - syn_val_r)))
         n = len(X_syn)
-        n_val = max(1, int(n * syn_val_r))
-        n_te  = max(0, int(n * syn_test_r))
-        n_tr  = n - n_val - n_te
-        rng = np.random.default_rng(42)
-        idx = rng.permutation(n)
-        X_syn_tr  = X_syn[idx[:n_tr]]
-        X_syn_val = X_syn[idx[n_tr:n_tr+n_val]]
-        X_syn_te  = X_syn[idx[n_tr+n_val:]]
+        if "seg_ids" in syn:
+            syn_seg_ids = syn["seg_ids"]
+        else:
+            print("[ml/train] [警告] 合成数据文件缺少 seg_ids（旧版 synthesize_scratch.py 生成），"
+                  "无法按片段分组，退化为按窗口随机划分，可能有数据泄漏。建议重新跑一遍"
+                  "synthesize_scratch.py 生成带 seg_ids 的新文件。")
+            syn_seg_ids = np.arange(n)  # 退化：每个窗口自成一组，等价于旧的纯随机划分
+        dummy_y     = np.zeros(n, dtype=np.int64)
+        dummy_y_seq = np.zeros((n, X_syn.shape[1]), dtype=np.int64)
+        (X_syn_tr, _, _, X_syn_val, _, _, X_syn_te, _, _) = split_windows_by_segment(
+            X_syn, dummy_y, dummy_y_seq, syn_seg_ids, syn_train_r, syn_val_r, seed=42)
+        n_tr, n_val, n_te = len(X_syn_tr), len(X_syn_val), len(X_syn_te)
         y_syn_tr  = np.full(n_tr,  syn_label_id, dtype=np.int64)
         y_syn_val = np.full(n_val, syn_label_id, dtype=np.int64)
         y_syn_te  = np.full(n_te,  syn_label_id, dtype=np.int64)
