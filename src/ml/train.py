@@ -364,6 +364,7 @@ def main(args):
         "stride": stride,
         "window_s": window_s,
         "stride_s": stride_s,
+        "label_mode": meta.get("label_mode", "majority"),  # 训练时窗口怎么打标签，推理侧重建事件要对齐这个
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},

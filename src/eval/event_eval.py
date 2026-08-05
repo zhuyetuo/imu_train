@@ -242,17 +242,32 @@ def merge_segments(intervals, merge_gap):
     return [tuple(x) for x in merged]
 
 
-def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, target_label, conf_threshold):
+def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, target_label,
+                             conf_threshold, stride=None, label_mode="majority"):
     """把逐窗口预测里 label==target_label 且 conf>=conf_threshold 的窗口，
-    合并成连续的原始片段（未做 merge_gap 合并）"""
+    合并成连续的原始片段（未做 merge_gap 合并）。
+
+    label_mode 必须跟训练模型时用的一致，否则会错误地重建事件边界：
+      "majority"（默认）：一个正例窗口代表"这2秒(window_size)都是目标行为"，
+        跟窗口起点到窗口终点整段对应，这是训练时多数投票的语义。
+      "center"：一个正例窗口只代表"窗口正中心这一瞬间是目标行为"，只用窗口
+        中心点前后半个步长(stride/2)去覆盖时间轴，不铺满整个窗口——这样才能
+        真正发挥中心点标注法带来的边界精度收益，否则等于白训练。
+    """
     raw_segs = []
     in_seg = False
     seg_start = None
     prev_end = None
+    half_pad = (stride / 2 / hz) if (label_mode == "center" and stride) else 0.0
     for lbl, conf, s in zip(pred_labels, pred_confs, starts):
         hit = (lbl == target_label) and (conf >= conf_threshold)
-        start_sec = s / hz
-        end_sec = (s + window_size) / hz
+        if label_mode == "center":
+            center_sec = (s + window_size / 2) / hz
+            start_sec = center_sec - half_pad
+            end_sec   = center_sec + half_pad
+        else:
+            start_sec = s / hz
+            end_sec = (s + window_size) / hz
         if hit:
             if not in_seg:
                 in_seg = True
@@ -281,7 +296,8 @@ def compute_f1e(detailed):
 
 
 def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
-             target_label, window_size, hz, desc="网格搜索", show_progress=True):
+             target_label, window_size, hz, stride=None, label_mode="majority",
+             desc="网格搜索", show_progress=True):
     """跑一遍 (置信度阈值 x merge_gap) 网格，返回结果列表
     [(thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r), ...]
     耗时主要在按阈值重建预测片段这一层（外层循环），gap 合并很快，
@@ -296,7 +312,7 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
         raw_segs = []
         for pred_labels, pred_confs, starts, offset in dog_window_records:
             segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
-                                            hz, target_label, thr)
+                                            hz, target_label, thr, stride, label_mode)
             raw_segs.extend((s + offset, e + offset) for s, e in segs)
         raw_segs = sorted(raw_segs)
         for mg in mg_values:
@@ -409,13 +425,14 @@ def main():
 
     model = joblib.load(args.model)
     meta_path = args.model.replace(".pkl", ".json")
-    classes, window_s, stride_s = [], 2.0, 1.0
+    classes, window_s, stride_s, label_mode = [], 2.0, 1.0, "majority"
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
         classes  = meta.get("classes", [])
         window_s = float(meta.get("window_s", 2.0))
         stride_s = float(meta.get("stride_s", 1.0))
+        label_mode = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
     else:
         classes = list(model.classes_) if hasattr(model, "classes_") else []
     if args.target_label not in classes:
@@ -425,7 +442,7 @@ def main():
     # 推理步长可以跟训练步长解耦：--infer_stride_s 显式覆盖，不传则沿用训练meta里的stride_s
     infer_stride_s = args.infer_stride_s if args.infer_stride_s is not None else stride_s
     stride = max(1, round(infer_stride_s * args.hz))
-    print(f"[模型] 类别={classes}  窗口={window_s}s  训练步长={stride_s}s  "
+    print(f"[模型] label_mode={label_mode}  类别={classes}  窗口={window_s}s  训练步长={stride_s}s  "
           f"推理步长={infer_stride_s}s（{stride}个采样点）")
 
     df = pd.read_csv(args.labeled_csv)
@@ -453,6 +470,7 @@ def main():
             n_windows = sum(len(r[0]) for r in ds["dog_window_records"])
             grid_results = run_grid(args.confidence_threshold, args.merge_gap, ds["dog_window_records"],
                                     ds["gt_events_all"], args.target_label, window_size, args.hz,
+                                    stride=cand_stride, label_mode=label_mode,
                                     desc=f"  阈值×gap网格(stride={cand_stride_s}s)")
             best = sorted(grid_results, key=lambda x: -x[9])[0]
             thr, mg, n_det, n_d, n_f, n_m, n_insert = best[0], best[1], best[2], best[3], best[4], best[5], best[6]
@@ -556,7 +574,8 @@ def main():
               f"× gap∈[{args.full_gap_start},{args.full_gap_stop}]步长{args.full_gap_step}"
               f"，共 {len(full_thr)}×{len(full_mg)}={len(full_thr)*len(full_mg)} 组合")
         full_results = run_grid(full_thr, full_mg, dog_window_records, gt_events_all,
-                                args.target_label, window_size, args.hz, desc="全局网格搜索")
+                                args.target_label, window_size, args.hz,
+                                stride=stride, label_mode=label_mode, desc="全局网格搜索")
         results_sorted = sorted(full_results, key=lambda x: -x[9])
         print_grid_table(results_sorted,
                          f"全局网格搜索 Top 20（{len(full_results)} 组合中选出）", top_n=20)
@@ -564,7 +583,7 @@ def main():
         # ── 第一阶段：粗网格搜索 ────────────────────────────────────────────
         coarse_results = run_grid(args.confidence_threshold, args.merge_gap, dog_window_records,
                                   gt_events_all, args.target_label, window_size, args.hz,
-                                  desc="粗网格搜索")
+                                  stride=stride, label_mode=label_mode, desc="粗网格搜索")
         print_grid_table(coarse_results,
                          f"粗网格搜索: 置信度阈值 × merge_gap（{len(args.confidence_threshold)}×"
                          f"{len(args.merge_gap)}={len(coarse_results)} 组合）")
@@ -589,7 +608,7 @@ def main():
 
             fine_results = run_grid(fine_thr, fine_mg, dog_window_records,
                                     gt_events_all, args.target_label, window_size, args.hz,
-                                    desc="精细网格搜索")
+                                    stride=stride, label_mode=label_mode, desc="精细网格搜索")
             fine_sorted = sorted(fine_results, key=lambda x: -x[9])
             print_grid_table(
                 fine_sorted,
@@ -612,7 +631,7 @@ def main():
     raw_segs = []
     for pred_labels, pred_confs, starts, offset in dog_window_records:
         segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
-                                        args.hz, args.target_label, best_thr)
+                                        args.hz, args.target_label, best_thr, stride, label_mode)
         raw_segs.extend((s + offset, e + offset) for s, e in segs)
     raw_segs = sorted(raw_segs)
     det_events_best = merge_segments(raw_segs, best_mg)
