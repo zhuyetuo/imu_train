@@ -44,18 +44,32 @@ def downsample(data, labels, source_hz, target_hz):
     return data_ds, labels_ds
 
 
-def sliding_window(data, labels, window_size, stride, keep_label_set=None):
-    """返回 (X, y_majority, y_seq): y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用。"""
+def sliding_window(data, labels, window_size, stride, keep_label_set=None, label_mode="majority"):
+    """返回 (X, y, y_seq): y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用。
+
+    label_mode:
+      "majority"（默认，原有行为）：窗口标签取窗口内出现次数最多的标签，
+        跨越标注边界的窗口会被强行归为占比更多的那一类（窗口越靠近边界，
+        标签跟窗口内实际内容的吻合度越低，但保持原样不动，供对比用）。
+      "center"：窗口标签取窗口正中心那一帧的标签，代表"这个窗口的特征描述
+        的是中心点这一瞬间"，不做多数投票压制。要真正发挥效果需要配合更密的
+        步长（否则中心点之间会有大段没有预测覆盖的空隙），且训练/验证/测试
+        划分要避免同一段连续标注产生的高度重叠窗口被拆到不同集合（数据泄漏），
+        这个函数本身不处理划分，只负责怎么给窗口打标签。
+    """
     X, y, y_seq = [], [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
         end = start + window_size
         frame_labels = labels[start:end]
-        majority = Counter(frame_labels).most_common(1)[0][0]
-        if keep_label_set is not None and majority not in keep_label_set:
+        if label_mode == "center":
+            label = frame_labels[window_size // 2]
+        else:
+            label = Counter(frame_labels).most_common(1)[0][0]
+        if keep_label_set is not None and label not in keep_label_set:
             continue
         X.append(data[start:end])
-        y.append(majority)
+        y.append(label)
         y_seq.append(frame_labels)
     if not X:
         empty_X = np.empty((0, window_size, data.shape[1]), dtype=np.float32)
@@ -110,6 +124,10 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
 def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
     """按类别汇总所有片段的窗口：每个连续片段内部各自滑窗，汇总后合并。
     不跨片段边界取窗口，避免不同时间/动物的数据拼接产生无意义的假窗口。
+
+    注：这里的窗口本来就只在单一标签的连续片段内部滑动，天然不会跨边界，
+    所以 --label_mode 对这个策略没有意义（majority 和 center 结果完全一样），
+    不需要传参数进来。
     """
     from collections import defaultdict as _dd
     # label_id → list of continuous segment arrays
@@ -159,7 +177,8 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
     return np.concatenate(X_all), np.concatenate(y_all), np.concatenate(y_seq_all)
 
 
-def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
+def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None,
+                  use_gravity_align=True, label_mode="majority"):
     X_all, y_all, y_seq_all = [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     for r in records:
@@ -169,7 +188,7 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
         labels_enc = np.full(len(labels), -1, dtype=np.int64)
         labels_enc[mask] = le.transform(labels[mask])
-        X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
+        X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded, label_mode)
         if len(X) == 0:
             continue
         tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
@@ -302,11 +321,11 @@ def main(args):
         ga = not args.no_gravity_align
 
         if strategy == "subject":
-            X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
-            X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
-            X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
+            X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode)
         elif strategy == "label_concat":
-            # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别
+            # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别（label_mode 在这里没有意义，不传）
             X_all, y_all, y_seq_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
@@ -314,7 +333,7 @@ def main(args):
         else:
             # 先把所有窗口提取出来，再随机划分
             all_ids = set(r["dog_id"] for r in ds_records)
-            X_all, y_all, y_seq_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga)
+            X_all, y_all, y_seq_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
@@ -328,6 +347,7 @@ def main(args):
             "n_channels": str(X_train.shape[2] if X_train.ndim == 3 else 6),
             "classes": str(classes),
             "split_strategy": strategy,
+            "label_mode": args.label_mode,
             "train_ratio": str(train_r),
             "val_ratio":   str(val_r),
             "test_ratio":  str(round(1.0 - train_r - val_r, 6)),
@@ -380,6 +400,10 @@ if __name__ == "__main__":
                         help="验证集比例（0=从 configs/data.yaml 读取）")
     parser.add_argument("--test_ratio", type=float, default=-1.0,
                         help="测试集比例（-1=由 1-train-val 推导，0=无测试集）")
+    parser.add_argument("--label_mode", default="majority", choices=["majority", "center"],
+                        help="窗口标签怎么定：majority=多数投票（默认，原有行为不变），"
+                             "center=取窗口正中心那一帧的标签（对 label_concat 策略无影响，"
+                             "该策略下窗口本来就纯净）")
     parser.add_argument("--hz", type=int, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
     main(parser.parse_args())
