@@ -163,16 +163,15 @@ def aug_noise(seg, scale=0.02):
 
 
 def aug_scale(seg, low=0.85, high=1.15):
+    """只缩放"动态成分"（每个通道减去自身均值后剩下的部分），均值（重力/静态偏置）
+    原样保留。如果连均值一起按各通道独立随机缩放，加速度计的重力模长会被破坏——
+    真实数据静止/缓动时模长应接近9.8，这个物理约束被我们的特征（acc_mag、pitch/
+    roll、SMA等）显式捕捉，破坏它会让合成样本"一眼假"，模型学到的会是"这是不是
+    合成数据"而不是"这是不是抓挠"，验证分数好看但没有真实意义。"""
+    mean = seg.mean(axis=0, keepdims=True)
+    dynamic = seg - mean
     s = np.random.uniform(low, high, size=(1, seg.shape[1])).astype(np.float32)
-    return seg * s
-
-
-def aug_flip_axis(seg):
-    out  = seg.copy()
-    axis = np.random.randint(0, 3)
-    out[:, axis]     *= -1
-    out[:, axis + 3] *= -1
-    return out
+    return mean + dynamic * s
 
 
 def aug_time_shift(seg, max_frac=0.1):
@@ -189,7 +188,10 @@ def aug_time_stretch(seg, low=0.8, high=1.2):
 
 
 def augment_segment(seg, n_aug, rng):
-    aug_fns  = [aug_noise, aug_scale, aug_flip_axis, aug_time_shift]
+    # aug_flip_axis 已移除：翻转轴虽不改变模长，但可能把重力方向翻到"上下颠倒"，
+    # 这种朝向在真实录制里几乎不会持续2秒以上，会给 pitch/roll 这类姿态特征
+    # 制造不真实的异常值，风险不确定，直接去掉比留着更稳妥
+    aug_fns  = [aug_noise, aug_scale, aug_time_shift]
     variants = []
     for _ in range(n_aug):
         out    = seg.copy()
