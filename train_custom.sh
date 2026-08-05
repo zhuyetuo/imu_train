@@ -25,6 +25,7 @@ VAL_RATIO="0.1"           # 验证集比例（默认0.1）
 TEST_RATIO="0.0"          # 测试集比例（默认0=无测试集，纠错循环阶段不需要）
 LABEL_MODE="majority"     # majority=多数投票（默认，原有行为），center=窗口标签取中心帧
 STRIDE_S=""               # 训练窗口步长秒数（留空=用 configs/data.yaml 默认值1秒）
+FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --test_ratio)     TEST_RATIO="$2";     shift 2 ;;
     --label_mode)     LABEL_MODE="$2";     shift 2 ;;
     --stride_s)       STRIDE_S="$2";       shift 2 ;;
+    --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -87,6 +89,7 @@ python src/ml/train.py --hz "$HZ" --model rf \
   --processed_dir "$PROCESSED_DIR" \
   --remap "$REMAP" \
   --results_dir "$RESULTS_DIR" \
+  --feat_workers "$FEAT_WORKERS" \
   > /tmp/train_no_syn.log 2>&1 &
 PID_A=$!
 
@@ -111,6 +114,7 @@ python src/ml/train.py --hz "$HZ" --model rf \
   --synthetic "$SYNTHETIC" \
   --synthetic_label "$LABEL" \
   --results_dir "$RESULTS_DIR" \
+  --feat_workers "$FEAT_WORKERS" \
   > /tmp/train_with_syn.log 2>&1 &
 PID_B=$!
 

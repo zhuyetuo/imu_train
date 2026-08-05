@@ -252,17 +252,17 @@ def main(args):
             reason = "特征维度变化" if dim_mismatch else "样本数与数据不符"
             print(f"[ml/train] 缓存{reason}，重建缓存: {feat_cache}")
             os.remove(feat_cache)
-            X_tr_f = extract_features(X_tr, args.hz)
-            X_val_f = extract_features(X_val, args.hz)
-            X_te_f = extract_features(X_te, args.hz)
+            X_tr_f = extract_features(X_tr, args.hz, workers=args.feat_workers)
+            X_val_f = extract_features(X_val, args.hz, workers=args.feat_workers)
+            X_te_f = extract_features(X_te, args.hz, workers=args.feat_workers)
             np.savez_compressed(feat_cache, X_tr=X_tr_f, X_val=X_val_f, X_te=X_te_f)
         else:
             print(f"[ml/train] 加载缓存特征: {feat_cache}")
     else:
         print(f"[ml/train] 提取特征（首次，之后自动缓存）...")
-        X_tr_f = extract_features(X_tr, args.hz)
-        X_val_f = extract_features(X_val, args.hz)
-        X_te_f = extract_features(X_te, args.hz)
+        X_tr_f = extract_features(X_tr, args.hz, workers=args.feat_workers)
+        X_val_f = extract_features(X_val, args.hz, workers=args.feat_workers)
+        X_te_f = extract_features(X_te, args.hz, workers=args.feat_workers)
         np.savez_compressed(feat_cache, X_tr=X_tr_f, X_val=X_val_f, X_te=X_te_f)
         print(f"[ml/train] 特征已缓存至 {feat_cache}")
 
@@ -385,6 +385,10 @@ if __name__ == "__main__":
     parser.add_argument("--results_dir", default="results")
     parser.add_argument("--n_jobs", type=int, default=None,
                         help="覆盖模型的 n_jobs（并行启动时限制每个任务的核数）")
+    parser.add_argument("--feat_workers", type=int, default=1,
+                        help="特征提取的并行进程数（默认1=不并行，原有行为不变）。"
+                             "传-1用全部CPU核心，传正整数指定核数。特征提取是纯CPU计算，"
+                             "核多、数据量大时开几个能明显提速")
     parser.add_argument("--remap", default="",
                         help="标签重映射 YAML 文件路径（用于合并类别，如 6类→2类）")
     parser.add_argument("--synthetic", default="",

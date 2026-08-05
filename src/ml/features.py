@@ -11,6 +11,8 @@
 详见 docs/features.md。
 """
 
+import os
+
 import numpy as np
 from scipy import stats, signal
 from scipy.signal import find_peaks
@@ -180,16 +182,36 @@ def feature_names(n_channels: int) -> list:
     return names
 
 
-def extract_features(X: np.ndarray, hz: int, show_progress: bool = True) -> np.ndarray:
+def _extract_chunk(X_chunk: np.ndarray, hz: int) -> np.ndarray:
+    return np.stack([_extract_one(X_chunk[i], hz) for i in range(len(X_chunk))])
+
+
+def extract_features(X: np.ndarray, hz: int, show_progress: bool = True, workers: int = 1) -> np.ndarray:
     """
     X: (N, window_size, n_channels)，n_channels 为 6（acc+gyro）或 8（+pitch/roll）
     返回: (N, n_features)，若 X 为空则返回 shape (0, n_features)
+
+    workers>1 时用 joblib 多进程并行（特征提取是纯CPU计算，每个窗口独立，
+    没有跨窗口状态，天然可并行；用多进程而不是多线程是因为GIL会卡住纯Python循环）。
+    按 workers 数量切成大块分给每个进程，而不是逐窗口丢给 joblib，避免进程间
+    通信开销盖过并行收益。
     """
     if len(X) == 0:
         n_ch = X.shape[2] if X.ndim == 3 else 6
         window_size = X.shape[1] if X.ndim == 3 else 10
         n_feat = _feature_dim(window_size, n_ch, hz)
         return np.empty((0, n_feat), dtype=np.float32)
+
+    if workers and workers != 1 and len(X) > 10:
+        from joblib import Parallel, delayed
+        n_chunks = workers if workers > 0 else (os.cpu_count() or 1)
+        n_chunks = max(1, min(n_chunks, len(X)))
+        chunks = np.array_split(np.arange(len(X)), n_chunks)
+        results = Parallel(n_jobs=workers, backend="loky", verbose=10 if show_progress else 0)(
+            delayed(_extract_chunk)(X[idx], hz) for idx in chunks
+        )
+        return np.concatenate(results, axis=0)
+
     features = []
     it = range(len(X))
     if show_progress and len(X) > 10:
