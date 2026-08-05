@@ -238,7 +238,7 @@ def print_project_info(dog_id, project_lookup):
     print(f"      project文件: {fname}  project编号: {project_no or '未知'}  task_id={tid}{inner_str}")
     print(f"      → Label Studio 网页版: 进入 project {project_no}，Data Manager 里按 task_id={tid} 搜索/筛选定位")
     data = task.get("data", {})
-    for k in ("csv", "video1", "video2", "cam1", "cam2"):
+    for k in ("csv", "csv1", "csv2", "video1", "video2", "cam1", "cam2"):
         if k in data:
             print(f"      data.{k}: {data[k]}")
 
