@@ -199,13 +199,18 @@ def build_project_lookup(json_dir, pattern="project-*.json"):
 
 
 def print_project_info(dog_id, project_lookup):
-    """按 dog_id（如 task496_imu1）反查并打印所属 project 文件 + video/csv 链接"""
+    """按 dog_id（如 task496_imu1）反查并打印所属 project 文件 + task_id + video/csv 链接。
+    project 下通常有很多个待标注文件，光有 project 编号定位不到具体是哪一条，
+    必须带上 task_id（Label Studio Data Manager 里按这个搜索/筛选）。"""
     tid = extract_task_id(dog_id)
     if tid is None or tid not in project_lookup:
         print(f"      [未找到 {dog_id} 对应的 project 信息]")
         return
     fname, project_no, task = project_lookup[tid]
-    print(f"      project文件: {fname}  project编号: {project_no or '未知'}")
+    inner_id = task.get("inner_id")
+    inner_str = f"  inner_id(项目内序号)={inner_id}" if inner_id is not None else ""
+    print(f"      project文件: {fname}  project编号: {project_no or '未知'}  task_id={tid}{inner_str}")
+    print(f"      → Label Studio 网页版: 进入 project {project_no}，Data Manager 里按 task_id={tid} 搜索/筛选定位")
     data = task.get("data", {})
     for k in ("csv", "video1", "video2", "cam1", "cam2"):
         if k in data:
