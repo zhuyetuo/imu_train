@@ -131,9 +131,12 @@ def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_
     泄漏（验证集分数虚高，但不代表真实泛化能力）。步长越密、label_mode=center
     时这个问题越严重，这个函数从根上解决，不管当前用什么步长/label_mode都适用。
 
-    做法：把片段（而不是窗口）打乱，按窗口数量累计分配到 train/val/test，
-    尽量逼近目标比例（由于每个片段大小不同，实际比例会有一定误差，这是分组
-    划分本身固有的、无法避免的代价，数据量越大、片段越多，误差通常越小）。
+    做法：**按类别分别**把该类别的片段打乱，各自按窗口数量累计分配到
+    train/val/test，尽量逼近目标比例。必须按类别分别分配，而不是把所有类别的
+    片段混在一起只看总窗口数——否则哪个类别的片段先被随机打乱到前面，val/test
+    的目标窗口数就会被哪个类别占满，导致片段数少、单个片段窗口数多的类别
+    （比如一大段连续"活动"）很容易被整体分进train、val里几乎没有，验证集上
+    该类别的样本量跟训练集比例严重失调，指标失真。
     """
     rng = np.random.default_rng(seed)
     n = len(X_all)
@@ -142,29 +145,34 @@ def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_
 
     test_r = max(0.0, 1.0 - train_r - val_r)
 
-    # 按片段id分组，收集每个片段对应的窗口下标
+    # 按片段id分组，收集每个片段对应的窗口下标 + 该片段的类别（片段内窗口标签一致）
     seg_to_indices = {}
     for i, sid in enumerate(seg_ids_all):
         seg_to_indices.setdefault(int(sid), []).append(i)
-    seg_ids_unique = list(seg_to_indices.keys())
-    rng.shuffle(seg_ids_unique)
 
-    target_val  = val_r * n
-    target_test = test_r * n
+    # 按类别分桶：每个类别内部独立打乱、独立按比例分配，避免类别间互相挤占目标名额
+    label_to_segs = {}
+    for sid, idxs in seg_to_indices.items():
+        lbl = y_all[idxs[0]]
+        label_to_segs.setdefault(lbl, []).append(sid)
 
     train_idx, val_idx, test_idx = [], [], []
-    val_count = test_count = 0
-    for sid in seg_ids_unique:
-        idxs = seg_to_indices[sid]
-        # 优先把片段分给还没达到目标窗口数的 val / test，其余进 train
-        if val_count < target_val:
-            val_idx.extend(idxs)
-            val_count += len(idxs)
-        elif test_count < target_test:
-            test_idx.extend(idxs)
-            test_count += len(idxs)
-        else:
-            train_idx.extend(idxs)
+    for lbl, sids in label_to_segs.items():
+        rng.shuffle(sids)
+        n_lbl = sum(len(seg_to_indices[sid]) for sid in sids)
+        target_val  = val_r * n_lbl
+        target_test = test_r * n_lbl
+        val_count = test_count = 0
+        for sid in sids:
+            idxs = seg_to_indices[sid]
+            if val_count < target_val:
+                val_idx.extend(idxs)
+                val_count += len(idxs)
+            elif test_count < target_test:
+                test_idx.extend(idxs)
+                test_count += len(idxs)
+            else:
+                train_idx.extend(idxs)
 
     i_train = np.array(sorted(train_idx), dtype=np.int64)
     i_val   = np.array(sorted(val_idx),   dtype=np.int64)
