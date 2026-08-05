@@ -260,6 +260,20 @@ def find_merge_groups(gt_events_meta, det_events):
     return groups
 
 
+def local_sec_to_ts_str(dog_id, local_sec, hz, dog_ts_map):
+    """把某条狗内部的相对秒数换算成 CSV 里的绝对时间戳字符串，供人工去原始CSV/视频里核对。
+    没有 timestamp 列（旧数据）或越界时返回 None。"""
+    ts_series = dog_ts_map.get(dog_id)
+    if ts_series is None or len(ts_series) == 0:
+        return None
+    idx = int(round(local_sec * hz))
+    idx = max(0, min(idx, len(ts_series) - 1))
+    ts = ts_series.iloc[idx]
+    if pd.isna(ts):
+        return None
+    return ts.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 def merge_segments(intervals, merge_gap):
     """intervals: [(start_sec, end_sec), ...] 已排序，合并间隔<=merge_gap的相邻段"""
     if not intervals:
@@ -487,6 +501,16 @@ def main():
         print(f"[错误] 找不到 acc/gyro 列: {list(df.columns)}")
         return
     dog_ids = sorted(df[args.dog_id_col].unique())
+
+    # ── 可选的绝对时间戳列（labelstudio_to_custom.py 新版才有，旧数据没有则优雅降级）──
+    dog_ts_map = {}
+    if "timestamp" in df.columns:
+        ts_all = pd.to_datetime(df["timestamp"], errors="coerce")
+        for dog_id in dog_ids:
+            dog_ts_map[dog_id] = ts_all[df[args.dog_id_col] == dog_id].reset_index(drop=True)
+    else:
+        print("[提示] CSV 里没有 timestamp 列（用旧版 labelstudio_to_custom.py 生成的），"
+              "逐条对应表将只显示相对秒数，不显示绝对时间戳")
 
     # ── stride 对比模式：每个候选步长都要重新做一遍完整推理（不能复用），
     # 所以只跑网格搜索拿到每个 stride 的最优 F1e 做对比，不打印逐条明细 ──
@@ -762,9 +786,17 @@ def main():
             overlaps = [(ds2 - (gs - ls), de2 - (ge - le)) for ds2, de2 in det_events_best if ds2 < ge and de2 > gs]
             overlap_str = ", ".join(f"{ds2:.2f}s-{de2:.2f}s" for ds2, de2 in overlaps) if overlaps else "(none)"
             print(f"    [{score_tag(score)}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
+            ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
+            ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            if ts_start is not None:
+                print(f"        绝对时间戳: {ts_start} → {ts_end}")
         else:
             print(f"    [{score_tag(score)}]  real:(none)              pred:{ls:.2f}s-{le:.2f}s"
                   f"  ← 模型预测但没有对应真实事件，建议核实是不是漏标")
+            ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
+            ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            if ts_start is not None:
+                print(f"        绝对时间戳: {ts_start} → {ts_end}")
 
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
@@ -786,6 +818,10 @@ def main():
                     gap = ls - group[j - 1][2]
                     gap_str = f"    (距上一事件间隔 {gap:.2f}s)"
                 print(f"      {ls:>8.2f}s → {le:>8.2f}s{gap_str}")
+                ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
+                ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+                if ts_start is not None:
+                    print(f"        绝对时间戳: {ts_start} → {ts_end}")
     print(f"""
   上面的秒数是该条狗在合并CSV里的行序号/hz（从这条狗的第一行开始算），
   可以据此去对应的原始录制/Label Studio标注里定位具体时间点核实：
