@@ -786,17 +786,22 @@ def main():
             overlaps = [(ds2 - (gs - ls), de2 - (ge - le)) for ds2, de2 in det_events_best if ds2 < ge and de2 > gs]
             overlap_str = ", ".join(f"{ds2:.2f}s-{de2:.2f}s" for ds2, de2 in overlaps) if overlaps else "(none)"
             print(f"    [{score_tag(score)}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
-            ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
-            ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
-            if ts_start is not None:
-                print(f"        绝对时间戳: {ts_start} → {ts_end}")
+            real_ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
+            real_ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            if real_ts_start is not None:
+                print(f"        真实标注时间戳: {real_ts_start} → {real_ts_end}")
+            for ds2, de2 in overlaps:
+                pred_ts_start = local_sec_to_ts_str(dog_id, ds2, args.hz, dog_ts_map)
+                pred_ts_end = local_sec_to_ts_str(dog_id, de2, args.hz, dog_ts_map)
+                if pred_ts_start is not None:
+                    print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
         else:
             print(f"    [{score_tag(score)}]  real:(none)              pred:{ls:.2f}s-{le:.2f}s"
                   f"  ← 模型预测但没有对应真实事件，建议核实是不是漏标")
-            ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
-            ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
-            if ts_start is not None:
-                print(f"        绝对时间戳: {ts_start} → {ts_end}")
+            pred_ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
+            pred_ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            if pred_ts_start is not None:
+                print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
 
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
