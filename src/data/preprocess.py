@@ -44,25 +44,65 @@ def downsample(data, labels, source_hz, target_hz):
     return data_ds, labels_ds
 
 
-def sliding_window(data, labels, window_size, stride, keep_label_set=None):
-    """返回 (X, y_majority, y_seq): y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用。"""
-    X, y, y_seq = [], [], []
+def compute_segment_ids(labels, next_id=0):
+    """给连续同标签片段分配全局唯一id，相邻标签不同就换一个新id。
+    返回 (seg_ids数组, 下一个可用id)——next_id 在多条记录之间传递，
+    保证不同狗/不同文件产生的片段id不会撞车。"""
+    n = len(labels)
+    if n == 0:
+        return np.empty(0, dtype=np.int64), next_id
+    change = np.empty(n, dtype=bool)
+    change[0] = False
+    change[1:] = labels[1:] != labels[:-1]
+    seg_ids = next_id + np.cumsum(change)
+    return seg_ids.astype(np.int64), int(seg_ids[-1]) + 1
+
+
+def sliding_window(data, labels, window_size, stride, keep_label_set=None,
+                   label_mode="majority", seg_id_labels=None):
+    """返回 (X, y, y_seq, y_seg)：
+      y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用；
+      y_seg 是每个窗口所属的"连续标注片段"编号，供按片段分组划分数据集、
+      避免同一片段产生的高度重叠窗口被拆到 train/val/test 不同集合（数据泄漏）。
+
+    label_mode:
+      "majority"（默认，原有行为）：窗口标签取窗口内出现次数最多的标签，
+        跨越标注边界的窗口会被强行归为占比更多的那一类（窗口越靠近边界，
+        标签跟窗口内实际内容的吻合度越低，但保持原样不动，供对比用）。
+      "center"：窗口标签取窗口正中心那一帧的标签，代表"这个窗口的特征描述
+        的是中心点这一瞬间"，不做多数投票压制。要真正发挥效果需要配合更密的
+        步长（否则中心点之间会有大段没有预测覆盖的空隙）。
+    """
+    X, y, y_seq, y_seg = [], [], [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
         end = start + window_size
         frame_labels = labels[start:end]
-        majority = Counter(frame_labels).most_common(1)[0][0]
-        if keep_label_set is not None and majority not in keep_label_set:
+        if label_mode == "center":
+            label = frame_labels[window_size // 2]
+        else:
+            label = Counter(frame_labels).most_common(1)[0][0]
+        if keep_label_set is not None and label not in keep_label_set:
             continue
         X.append(data[start:end])
-        y.append(majority)
+        y.append(label)
         y_seq.append(frame_labels)
+        if seg_id_labels is not None:
+            seg_frame = seg_id_labels[start:end]
+            if label_mode == "center":
+                y_seg.append(int(seg_frame[window_size // 2]))
+            else:
+                y_seg.append(int(Counter(seg_frame).most_common(1)[0][0]))
+        else:
+            y_seg.append(-1)
     if not X:
         empty_X = np.empty((0, window_size, data.shape[1]), dtype=np.float32)
-        return empty_X, np.empty((0,)), np.empty((0, window_size), dtype=np.int64)
+        return (empty_X, np.empty((0,)), np.empty((0, window_size), dtype=np.int64),
+                np.empty((0,), dtype=np.int64))
     return (np.array(X, dtype=np.float32),
             np.array(y),
-            np.array(y_seq, dtype=np.int64))
+            np.array(y_seq, dtype=np.int64),
+            np.array(y_seg, dtype=np.int64))
 
 
 def split_by_dog(records, train_r, val_r, seed):
@@ -82,26 +122,53 @@ def split_by_dog(records, train_r, val_r, seed):
             set(dog_ids[n_train + n_val:]))
 
 
-def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
-    """按窗口随机划分（适合 subject 数太少的小数据集）。"""
+def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_r, seed):
+    """按"连续标注片段"分组划分，而不是按窗口随机划分。
+
+    同一个连续片段（比如一次完整的抓挠事件）产生的所有窗口——不管重叠率多高、
+    步长多密——保证被整体分进同一个集合，不会有一部分进train、一部分进val/test。
+    这是为了避免"高度重叠的近似窗口分别出现在训练集和验证/测试集里"造成的数据
+    泄漏（验证集分数虚高，但不代表真实泛化能力）。步长越密、label_mode=center
+    时这个问题越严重，这个函数从根上解决，不管当前用什么步长/label_mode都适用。
+
+    做法：把片段（而不是窗口）打乱，按窗口数量累计分配到 train/val/test，
+    尽量逼近目标比例（由于每个片段大小不同，实际比例会有一定误差，这是分组
+    划分本身固有的、无法避免的代价，数据量越大、片段越多，误差通常越小）。
+    """
     rng = np.random.default_rng(seed)
     n = len(X_all)
-    idx = rng.permutation(n)
+    if n == 0:
+        return (X_all, y_all, y_seq_all, X_all, y_all, y_seq_all, X_all, y_all, y_seq_all)
+
     test_r = max(0.0, 1.0 - train_r - val_r)
-    n_val  = int(round(n * val_r))
-    n_test = int(round(n * test_r))
-    # 只有当 val_r > 0 / test_r > 0 时才保证至少1个样本；
-    # test_r 基本为0时强制清零，避免取整误差把剩余样本漏进测试集
-    if val_r > 0 and n >= 3:
-        n_val = max(1, n_val)
-    if test_r > 1e-9 and n >= 3:
-        n_test = max(1, n_test)
-    else:
-        n_test = 0
-    n_train = n - n_val - n_test  # 训练集吸收取整后的剩余样本
-    i_train = idx[:n_train]
-    i_val   = idx[n_train:n_train + n_val]
-    i_test  = idx[n_train + n_val:]
+
+    # 按片段id分组，收集每个片段对应的窗口下标
+    seg_to_indices = {}
+    for i, sid in enumerate(seg_ids_all):
+        seg_to_indices.setdefault(int(sid), []).append(i)
+    seg_ids_unique = list(seg_to_indices.keys())
+    rng.shuffle(seg_ids_unique)
+
+    target_val  = val_r * n
+    target_test = test_r * n
+
+    train_idx, val_idx, test_idx = [], [], []
+    val_count = test_count = 0
+    for sid in seg_ids_unique:
+        idxs = seg_to_indices[sid]
+        # 优先把片段分给还没达到目标窗口数的 val / test，其余进 train
+        if val_count < target_val:
+            val_idx.extend(idxs)
+            val_count += len(idxs)
+        elif test_count < target_test:
+            test_idx.extend(idxs)
+            test_count += len(idxs)
+        else:
+            train_idx.extend(idxs)
+
+    i_train = np.array(sorted(train_idx), dtype=np.int64)
+    i_val   = np.array(sorted(val_idx),   dtype=np.int64)
+    i_test  = np.array(sorted(test_idx),  dtype=np.int64)
     return (X_all[i_train], y_all[i_train], y_seq_all[i_train],
             X_all[i_val],   y_all[i_val],   y_seq_all[i_val],
             X_all[i_test],  y_all[i_test],  y_seq_all[i_test])
@@ -110,10 +177,15 @@ def split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed):
 def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
     """按类别汇总所有片段的窗口：每个连续片段内部各自滑窗，汇总后合并。
     不跨片段边界取窗口，避免不同时间/动物的数据拼接产生无意义的假窗口。
+
+    注：这里的窗口本来就只在单一标签的连续片段内部滑动，天然不会跨边界，
+    所以 --label_mode 对这个策略没有意义（majority 和 center 结果完全一样），
+    不需要传参数进来。
     """
     from collections import defaultdict as _dd
-    # label_id → list of continuous segment arrays
+    # label_id → list of (seg_id, continuous segment array)
     label_segs = _dd(list)
+    next_seg_id = 0
 
     for r in records:
         data, labels = r["data"], r["labels"]
@@ -132,15 +204,17 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
             seg = data[i:j]
             if len(seg) >= window_size:
                 lbl_id = le.transform([lbl])[0]
-                label_segs[lbl_id].append(seg.astype(np.float32))
+                label_segs[lbl_id].append((next_seg_id, seg.astype(np.float32)))
+                next_seg_id += 1
             i = j
 
-    X_all, y_all, y_seq_all = [], [], []
+    X_all, y_all, y_seq_all, y_seg_all = [], [], [], []
     for lbl_id in sorted(label_segs.keys()):
-        wins = []
-        for seg in label_segs[lbl_id]:
+        wins, seg_ids = [], []
+        for seg_id, seg in label_segs[lbl_id]:
             for start in range(0, len(seg) - window_size + 1, stride):
                 wins.append(seg[start:start + window_size])
+                seg_ids.append(seg_id)
         if not wins:
             continue
         arr = np.array(wins, dtype=np.float32)
@@ -153,15 +227,19 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
         y_seq_all.append(np.tile(
             np.full(window_size, lbl_id, dtype=np.int64), (len(arr), 1)
         ))
+        y_seg_all.append(np.array(seg_ids, dtype=np.int64))
 
     if not X_all:
-        return np.empty((0,)), np.empty((0,)), np.empty((0,))
-    return np.concatenate(X_all), np.concatenate(y_all), np.concatenate(y_seq_all)
+        return (np.empty((0,)), np.empty((0,)), np.empty((0,)), np.empty((0,), dtype=np.int64))
+    return (np.concatenate(X_all), np.concatenate(y_all),
+            np.concatenate(y_seq_all), np.concatenate(y_seg_all))
 
 
-def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
-    X_all, y_all, y_seq_all = [], [], []
+def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None,
+                  use_gravity_align=True, label_mode="majority"):
+    X_all, y_all, y_seq_all, y_seg_all = [], [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
+    next_seg_id = 0
     for r in records:
         if r["dog_id"] not in dog_ids_set:
             continue
@@ -169,7 +247,9 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
         labels_enc = np.full(len(labels), -1, dtype=np.int64)
         labels_enc[mask] = le.transform(labels[mask])
-        X, y, y_seq = sliding_window(data, labels_enc, window_size, stride, valid_encoded)
+        seg_id_labels, next_seg_id = compute_segment_ids(labels, next_seg_id)
+        X, y, y_seq, y_seg = sliding_window(data, labels_enc, window_size, stride, valid_encoded,
+                                            label_mode, seg_id_labels)
         if len(X) == 0:
             continue
         tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
@@ -179,9 +259,11 @@ def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=
         X_all.append(X)
         y_all.append(y)
         y_seq_all.append(y_seq)
+        y_seg_all.append(y_seg)
     if not X_all:
-        return np.empty((0,)), np.empty((0,)), np.empty((0,))
-    return np.concatenate(X_all), np.concatenate(y_all), np.concatenate(y_seq_all)
+        return (np.empty((0,)), np.empty((0,)), np.empty((0,)), np.empty((0,), dtype=np.int64))
+    return (np.concatenate(X_all), np.concatenate(y_all),
+            np.concatenate(y_seq_all), np.concatenate(y_seg_all))
 
 
 def load_records(args, cfg):
@@ -236,7 +318,7 @@ def main(args):
 
     target_hz_list = [args.hz] if args.hz else cfg["target_hz_list"]
     window_sec = cfg["window_seconds"]
-    stride_sec = cfg["stride_seconds"]
+    stride_sec = args.stride_s if args.stride_s > 0 else cfg["stride_seconds"]
     seed = cfg["seed"]
     train_r = args.train_ratio if args.train_ratio > 0 else cfg["train_ratio"]
     val_r   = args.val_ratio   if args.val_ratio   > 0 else cfg["val_ratio"]
@@ -302,22 +384,23 @@ def main(args):
         ga = not args.no_gravity_align
 
         if strategy == "subject":
-            X_train, y_train, y_seq_train = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga)
-            X_val,   y_val,   y_seq_val   = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga)
-            X_test,  y_test,  y_seq_test  = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga)
+            # 按狗分组划分，狗与狗之间本来就不会共享同一个连续片段，天然无泄漏，seg_id 不需要
+            X_train, y_train, y_seq_train, _ = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_val,   y_val,   y_seq_val,   _ = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_test,  y_test,  y_seq_test,  _ = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode)
         elif strategy == "label_concat":
-            # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别
-            X_all, y_all, y_seq_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga)
+            # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别（label_mode 在这里没有意义，不传）
+            X_all, y_all, y_seq_all, y_seg_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
-             X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
+             X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
         else:
-            # 先把所有窗口提取出来，再随机划分
+            # 先把所有窗口提取出来，再按连续片段分组划分（避免高度重叠窗口跨集合泄漏）
             all_ids = set(r["dog_id"] for r in ds_records)
-            X_all, y_all, y_seq_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga)
+            X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
-             X_test,  y_test,  y_seq_test) = split_windows_random(X_all, y_all, y_seq_all, train_r, val_r, seed)
+             X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
 
 
         out_dir = os.path.join(args.output_dir, f"{target_hz}hz")
@@ -328,6 +411,7 @@ def main(args):
             "n_channels": str(X_train.shape[2] if X_train.ndim == 3 else 6),
             "classes": str(classes),
             "split_strategy": strategy,
+            "label_mode": args.label_mode,
             "train_ratio": str(train_r),
             "val_ratio":   str(val_r),
             "test_ratio":  str(round(1.0 - train_r - val_r, 6)),
@@ -380,6 +464,14 @@ if __name__ == "__main__":
                         help="验证集比例（0=从 configs/data.yaml 读取）")
     parser.add_argument("--test_ratio", type=float, default=-1.0,
                         help="测试集比例（-1=由 1-train-val 推导，0=无测试集）")
+    parser.add_argument("--label_mode", default="majority", choices=["majority", "center"],
+                        help="窗口标签怎么定：majority=多数投票（默认，原有行为不变），"
+                             "center=取窗口正中心那一帧的标签（对 label_concat 策略无影响，"
+                             "该策略下窗口本来就纯净）")
     parser.add_argument("--hz", type=int, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
+    parser.add_argument("--stride_s", type=float, default=0.0,
+                        help="训练窗口步长（秒），覆盖 configs/data.yaml 的 stride_seconds"
+                             "（0=用配置文件默认值）。步长越密，训练窗口越多、"
+                             "越能覆盖标注边界过渡区，但预处理和训练耗时也越高")
     main(parser.parse_args())
