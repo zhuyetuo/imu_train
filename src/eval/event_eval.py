@@ -108,7 +108,7 @@ def window_majority_labels(labels, starts, window_size):
 
 
 def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
-                  model, classes, window_size, stride, hz, target_label):
+                  model, classes, window_size, stride, hz, target_label, show_progress=True):
     """对全部狗跑一遍推理 + 提取真实事件，返回本次评估需要的全部中间数据。
     每次调用都会重新做完整的特征提取+模型推理，换 stride 时必须重新调用
     （跟 confidence_threshold/merge_gap 不同，那两个可以复用同一份推理结果）。"""
@@ -119,7 +119,12 @@ def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
     y_true_windows = []
     y_pred_windows = []
 
-    for i, dog_id in enumerate(dog_ids):
+    it = enumerate(dog_ids)
+    if show_progress:
+        from tqdm import tqdm
+        it = enumerate(tqdm(dog_ids, desc="逐狗推理", unit="狗"))
+
+    for i, dog_id in it:
         sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
         labels = sub[label_col].values
         offset = i * DOG_TIME_OFFSET
