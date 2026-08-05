@@ -395,8 +395,15 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
     """跑一遍 (置信度阈值 x merge_gap) 网格，返回结果列表
     [(thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r), ...]
     耗时主要在按阈值重建预测片段这一层（外层循环），gap 合并很快。
-    workers != 1 时用 joblib 多进程按阈值并行（每个阈值的工作彼此独立，
-    狗越多、事件越多，单线程越慢，并行收益越明显）。"""
+
+    workers != 1 时并行按阈值分发，但这里故意用 backend="threading"、不用
+    build_dataset()那边的"loky"多进程：每个阈值任务都要用到 dog_window_records
+    这一整份数据（可能是几十万到上百万个窗口的标签+置信度），loky多进程每次
+    派发任务都要把这一整份数据重新pickle、通过进程间通信传给子进程，阈值数量
+    一多，这个序列化开销会远远盖过并行本身省下的时间，实测表现跟卡住一样。
+    threading共享内存不需要序列化传输，虽然纯Python循环受GIL限制、并行加速
+    有限，但至少不会比单线程更慢。真正的CPU密集部分（wardmetrics的eval_events）
+    是纯Python实现，指望不上GIL之外的并行收益，这里主要是避免多进程的传输坑。"""
     if workers and workers != 1:
         from joblib import Parallel, delayed
         from tqdm import tqdm
@@ -404,7 +411,7 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
         it = thr_values
         if show_progress:
             it = tqdm(thr_values, desc=desc, unit="thr")
-        nested = Parallel(n_jobs=n_jobs, backend="loky")(
+        nested = Parallel(n_jobs=n_jobs, backend="threading")(
             delayed(_eval_one_threshold)(thr, mg_values, dog_window_records, gt_events_all,
                                          target_label, window_size, hz, stride, label_mode)
             for thr in it
