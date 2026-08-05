@@ -210,12 +210,12 @@ def main(args):
         is_synthetic_val[n_val_real:] = True
         is_synthetic_te = np.zeros(len(X_te), dtype=bool)
         is_synthetic_te[n_te_real:] = True
-    else:
-        is_synthetic_val = np.zeros(len(X_val), dtype=bool)
-        is_synthetic_te = np.zeros(len(X_te), dtype=bool)
         print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
         print(f"[ml/train] 更新后类别: {classes}")
         print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
+    else:
+        is_synthetic_val = np.zeros(len(X_val), dtype=bool)
+        is_synthetic_te = np.zeros(len(X_te), dtype=bool)
 
     # 打印注入后的完整类别分布
     counts_tr  = np.bincount(y_tr.astype(int),  minlength=len(classes))
