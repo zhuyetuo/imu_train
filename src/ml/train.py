@@ -194,12 +194,25 @@ def main(args):
                 X_syn_val = resample_poly(X_syn_val, up, down, axis=1).astype(np.float32)
                 X_syn_te  = resample_poly(X_syn_te,  up, down, axis=1).astype(np.float32)
 
+        # 记录哪些 val/test 样本是合成的（拼接前的长度就是真实样本数），
+        # 后面单独拆开算一遍指标，避免"整体分数好看"掩盖"合成数据虚高、真实数据其实很差"
+        n_val_real = len(X_val)
+        n_te_real  = len(X_te)
+
         X_tr  = np.concatenate([X_tr,  X_syn_tr],  axis=0)
         X_val = np.concatenate([X_val, X_syn_val], axis=0)
         X_te  = np.concatenate([X_te,  X_syn_te],  axis=0)
         y_tr  = np.concatenate([y_tr,  y_syn_tr],  axis=0)
         y_val = np.concatenate([y_val, y_syn_val], axis=0)
         y_te  = np.concatenate([y_te,  y_syn_te],  axis=0)
+
+        is_synthetic_val = np.zeros(len(X_val), dtype=bool)
+        is_synthetic_val[n_val_real:] = True
+        is_synthetic_te = np.zeros(len(X_te), dtype=bool)
+        is_synthetic_te[n_te_real:] = True
+    else:
+        is_synthetic_val = np.zeros(len(X_val), dtype=bool)
+        is_synthetic_te = np.zeros(len(X_te), dtype=bool)
         print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
         print(f"[ml/train] 更新后类别: {classes}")
         print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
@@ -291,10 +304,12 @@ def main(args):
     if has_test:
         eval_tag = "测试集"
         X_eval_f, y_eval = X_te_f, y_te
+        is_synthetic_eval = is_synthetic_te
     else:
         # test_ratio=0 时无测试集，改用验证集汇报指标（仅供参考，验证集参与了早停/模型选择）
         eval_tag = "验证集（无测试集，仅供参考）"
         X_eval_f, y_eval = X_val_f, y_val
+        is_synthetic_eval = is_synthetic_val
 
     y_pred = np.array(model.predict(X_eval_f)).flatten().astype(int)
     acc = accuracy_score(y_eval, y_pred)
@@ -305,6 +320,23 @@ def main(args):
     print(f"  Macro F1: {f1:.4f}")
     present_labels = sorted(set(y_eval) | set(y_pred))
     present_names = [classes[i] for i in present_labels]
+
+    # 真实 vs 合成样本分开算指标：如果整体分数好看但只是因为合成样本占多数、
+    # 合成样本"太好认"，这里能直接看出来（不能只看合成数据训练是否让整体分数
+    # 变好看，得看它对真实样本有没有真实帮助）
+    if args.synthetic and is_synthetic_eval.sum() > 0 and (~is_synthetic_eval).sum() > 0:
+        syn_class_mask = (y_eval == syn_label_id)
+        real_mask = syn_class_mask & (~is_synthetic_eval)
+        fake_mask = syn_class_mask & is_synthetic_eval
+        print(f"\n  ── '{syn_label}' 类别按来源拆分（不能只看整体分数）──")
+        for tag, mask in (("真实样本", real_mask), ("合成样本", fake_mask)):
+            n = int(mask.sum())
+            if n == 0:
+                print(f"    {tag}: 0 个，跳过")
+                continue
+            recall = float((y_pred[mask] == syn_label_id).mean())
+            print(f"    {tag}: {n:>5} 个  recall={recall:.4f}"
+                  f"{'  ⚠️ 明显低于合成样本，说明模型对真实抓挠泛化不够' if tag == '真实样本' and recall < 0.7 else ''}")
     print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
 
