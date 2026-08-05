@@ -138,6 +138,10 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbos
                     sensor_map[f"label{idx}"] = _csv_cache[url]
                 else:
                     load_failed = True
+            # 只有一个传感器有效时，Label Studio 标注界面用通用的 from_name="label"，
+            # 不是 "label1"/"label2"（跟 labelstudio_to_custom.py 保持一致的修复）
+            if len(sensor_map) == 1:
+                sensor_map["label"] = next(iter(sensor_map.values()))
         else:
             url = data.get("csv", "")
             task_has_url = bool(url)
