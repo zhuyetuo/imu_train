@@ -107,11 +107,46 @@ def window_majority_labels(labels, starts, window_size):
     return [Counter(labels[s:s + window_size]).most_common(1)[0][0] for s in starts]
 
 
+def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
+                     model, classes, window_size, stride, hz, target_label):
+    """单条狗的完整处理（真实事件提取 + 滑窗推理），供并行调用。"""
+    sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
+    labels = sub[label_col].values
+    offset = i * DOG_TIME_OFFSET
+
+    gt_events, gt_meta = [], []
+    gt_segs = find_contiguous_segments(labels)
+    for start, end, lbl in gt_segs:
+        if lbl == target_label:
+            local_start, local_end = start / hz, end / hz
+            gt_events.append((local_start + offset, local_end + offset))
+            gt_meta.append((dog_id, local_start, local_end,
+                            local_start + offset, local_end + offset))
+
+    data6 = np.concatenate(
+        [sub[acc_cols].values, sub[gyro_cols].values], axis=1
+    ).astype(np.float32)
+    pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, hz)
+    target_confs = [c for lbl, c in zip(pred_labels, pred_confs) if lbl == target_label]
+    y_true = window_majority_labels(labels, starts, window_size)
+
+    return {
+        "gt_events": gt_events, "gt_meta": gt_meta,
+        "window_record": (pred_labels, pred_confs, starts, offset),
+        "target_confs": target_confs,
+        "y_true": y_true, "y_pred": list(pred_labels),
+    }
+
+
 def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
-                  model, classes, window_size, stride, hz, target_label, show_progress=True):
+                  model, classes, window_size, stride, hz, target_label,
+                  show_progress=True, workers=-1):
     """对全部狗跑一遍推理 + 提取真实事件，返回本次评估需要的全部中间数据。
     每次调用都会重新做完整的特征提取+模型推理，换 stride 时必须重新调用
-    （跟 confidence_threshold/merge_gap 不同，那两个可以复用同一份推理结果）。"""
+    （跟 confidence_threshold/merge_gap 不同，那两个可以复用同一份推理结果）。
+
+    每条狗的处理彼此独立，用 joblib 多进程并行（特征提取是纯CPU计算，
+    多进程能真正利用多核，多线程会被GIL卡住基本没用）。"""
     gt_events_all = []
     gt_events_meta = []
     target_window_confs_all = []
@@ -119,34 +154,25 @@ def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
     y_true_windows = []
     y_pred_windows = []
 
-    it = enumerate(dog_ids)
+    from joblib import Parallel, delayed
+    from tqdm import tqdm
+    n_jobs = workers if workers > 0 else -1
+    dog_iter = enumerate(dog_ids)
     if show_progress:
-        from tqdm import tqdm
-        it = enumerate(tqdm(dog_ids, desc="逐狗推理", unit="狗"))
+        dog_iter = enumerate(tqdm(dog_ids, desc="逐狗推理", unit="狗"))
+    results = Parallel(n_jobs=n_jobs, backend="loky")(
+        delayed(_process_one_dog)(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
+                                  model, classes, window_size, stride, hz, target_label)
+        for i, dog_id in dog_iter
+    )
 
-    for i, dog_id in it:
-        sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
-        labels = sub[label_col].values
-        offset = i * DOG_TIME_OFFSET
-
-        gt_segs = find_contiguous_segments(labels)
-        for start, end, lbl in gt_segs:
-            if lbl == target_label:
-                local_start, local_end = start / hz, end / hz
-                gt_events_all.append((local_start + offset, local_end + offset))
-                gt_events_meta.append((dog_id, local_start, local_end,
-                                       local_start + offset, local_end + offset))
-
-        data6 = np.concatenate(
-            [sub[acc_cols].values, sub[gyro_cols].values], axis=1
-        ).astype(np.float32)
-        pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, hz)
-        dog_window_records.append((pred_labels, pred_confs, starts, offset))
-        target_window_confs_all.extend(
-            c for lbl, c in zip(pred_labels, pred_confs) if lbl == target_label
-        )
-        y_true_windows.extend(window_majority_labels(labels, starts, window_size))
-        y_pred_windows.extend(pred_labels)
+    for r in results:
+        gt_events_all.extend(r["gt_events"])
+        gt_events_meta.extend(r["gt_meta"])
+        dog_window_records.append(r["window_record"])
+        target_window_confs_all.extend(r["target_confs"])
+        y_true_windows.extend(r["y_true"])
+        y_pred_windows.extend(r["y_pred"])
 
     order = sorted(range(len(gt_events_all)), key=lambda i: gt_events_all[i][0])
     gt_events_all = [gt_events_all[i] for i in order]
@@ -420,6 +446,9 @@ def main():
                           "网格搜索，最后对比哪个步长的最优F1e最高。例: --stride_compare 1.0 0.5 0.25 0.0625"
                           "（0.0625s=16Hz下1个采样点，是能做到的最细步长）。传了这个参数会跳过"
                           "正常的单步长完整分析，只输出步长对比汇总")
+    ap.add_argument("--workers", type=int, default=-1,
+                     help="逐狗推理的并行进程数（默认-1=用全部CPU核）。特征提取是纯CPU计算，"
+                          "多进程能真正利用多核；步长越密、狗越多，并行收益越明显")
     args = ap.parse_args()
 
     if args.log_file:
@@ -468,7 +497,8 @@ def main():
             cand_stride = max(1, round(cand_stride_s * args.hz))
             print(f"\n[{si}/{len(args.stride_compare)}] 步长={cand_stride_s}s（{cand_stride}个采样点）推理中...")
             ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
-                               model, classes, window_size, cand_stride, args.hz, args.target_label)
+                               model, classes, window_size, cand_stride, args.hz, args.target_label,
+                               workers=args.workers)
             if not ds["gt_events_all"]:
                 print("  [警告] 没有真实事件，跳过")
                 continue
@@ -517,7 +547,8 @@ def main():
 
     # ── 单一步长模式（默认，跟原来一样）──────────────────────────────────
     ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
-                       model, classes, window_size, stride, args.hz, args.target_label)
+                       model, classes, window_size, stride, args.hz, args.target_label,
+                       workers=args.workers)
     gt_events_all = ds["gt_events_all"]
     gt_events_meta = ds["gt_events_meta"]
     target_window_confs_all = ds["target_window_confs_all"]
