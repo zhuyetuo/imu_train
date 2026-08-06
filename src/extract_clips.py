@@ -102,6 +102,16 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
 
     # 浏览器兼容优先：libx264 baseline，faststart，yuv420p，无音频
     # nvenc 输出某些浏览器不支持，统一用软编码保证兼容性
+    #
+    # 提速两点（复查用的片段，不是最终交付质量，preset变快、体积略增没关系）：
+    #   1. preset从fast改成veryfast——libx264速度阶梯里veryfast比fast快不少，
+    #      画质肉眼基本看不出差别，复查用完全够。
+    #   2. 显式限制-threads——不限制的话libx264默认会尝试用满所有CPU核心，
+    #      而这里本来就是many-workers并行跑多个ffmpeg进程，每个进程再各自
+    #      抢满所有核心，会严重过度订阅（16个进程 x 各自想用24核），互相
+    #      抢核反而更慢。显式限制每个进程用少量线程，让"并行进程数"而不是
+    #      "单进程内部线程数"来吃满CPU，这是many-parallel-encodes场景的
+    #      标准优化方式。
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{rel_start:.3f}",
@@ -111,7 +121,8 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         "-profile:v", "baseline",
         "-level", "3.1",
         "-crf", "23",
-        "-preset", "fast",
+        "-preset", "veryfast",
+        "-threads", "2",
         "-pix_fmt", "yuv420p",
         "-an",                       # 原始视频无音频，明确丢弃避免 aac 编码报错
         "-movflags", "+faststart",   # moov atom 放文件头，浏览器流式播放必需
