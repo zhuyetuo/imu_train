@@ -121,7 +121,10 @@ def match_events(events_a, events_b):
 
 
 def fmt_ts(t):
-    return t.strftime("%H:%M:%S") if t else "?"
+    # 精确到百分之一秒——之前只显示到整秒，会出现"两边时间戳看起来只差1秒，
+    # 但时长差却是2.25秒"这种视觉上对不上的情况（时长差是按完整精度算的，
+    # 显示被截断了），加上毫秒位方便直接核对
+    return t.strftime("%H:%M:%S.%f")[:-4] if t else "?"
 
 
 def compare_pair(label_a, events_a_by_record, label_b, events_b_by_record):
