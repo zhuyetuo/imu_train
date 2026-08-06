@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 一键预处理 + 训练：同时生成纯标注和带合成数据两个模型
 #
+# 需要先有 data/raw_custom/<DATE>/merged_tmp.json（Label Studio 导出的合并JSON，
+# 见README"标注分析"一节），训练CSV（merged_<DATE>.csv）会自动生成，不用手动
+# 先跑 labelstudio_to_custom.py 这一步。
+#
 # 用法:
 #   bash train_custom.sh --date 2026_7_23
 #   bash train_custom.sh --date 2026_7_23 --n_aug 30
@@ -85,10 +89,28 @@ if [[ "$CLEAN" == "1" ]]; then
   rm -f "$SYNTHETIC"
 fi
 
-# ── 检查输入文件 ──────────────────────────────────────────
+# ── 步骤1：生成训练CSV（CSV不存在，或者--clean要求从头全新生成时自动跑）──
+# 注意：这里不传 --keep_labels 的值，等于保留全部标签——remap_custom_3class.yaml
+# 需要看到甩身体/舔身体/啃身体等原始细分类别才能把它们折算进"活动"类当负样本，
+# 之前这里默认只留3类，把这些数据在到达remap之前就丢掉了，是踩过的坑，见
+# configs/data.yaml 里 custom.keep_labels 的注释。
+if [[ ! -f "$CSV" || "$CLEAN" == "1" ]]; then
+  if [[ ! -f "$JSON" ]]; then
+    echo "[错误] 找不到标注JSON: $JSON"
+    echo "需要先有 Label Studio 导出的合并JSON才能生成训练CSV"
+    exit 1
+  fi
+  echo ""
+  echo "▶ 步骤1：生成训练CSV（$CSV 不存在或 --clean 要求重新生成）..."
+  python src/data/labelstudio_to_custom.py \
+    --json "$JSON" \
+    --output "$CSV" \
+    --csv_dir "$CSV_DIR" \
+    --keep_labels
+fi
+
 if [[ ! -f "$CSV" ]]; then
-  echo "[错误] 找不到训练 CSV: $CSV"
-  echo "请先运行步骤 1（labelstudio_to_custom.py）生成该文件"
+  echo "[错误] 生成训练CSV失败: $CSV"
   exit 1
 fi
 
