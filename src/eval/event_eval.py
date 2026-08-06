@@ -999,6 +999,28 @@ def main():
         print(f"  （如果<1s/1-3s短片段占比明显偏高，说明模型大概率是被短促、信号弱的片段难住了；"
               f"如果长短都有、分布均匀，更可能是真的没学好，不是片段太短的问题）")
 
+    # ── 纯误报(I')按时长分桶统计：判断是零星短噪声，还是模型学出了别的相似行为 ──
+    i_durations = [le - ls for dog_id, ls, le, gs in insertion_rows]
+    print(f"\n{'='*90}")
+    print(f"  纯误报(I')按时长分桶统计（共 {len(i_durations)} 个）")
+    print(f"{'='*90}")
+    if not i_durations:
+        print("  没有纯误报")
+    else:
+        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
+        print(f"  {'-'*30}")
+        for name, lo, hi in DUR_BUCKETS:
+            in_bucket = [d for d in i_durations if lo <= d < hi]
+            pct = len(in_bucket) / len(i_durations) * 100
+            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
+        print(f"  最短: {min(i_durations):.2f}s   最长: {max(i_durations):.2f}s   "
+              f"平均: {sum(i_durations)/len(i_durations):.2f}s")
+        print(f"  （如果<1s/1-3s短片段占多数，很可能是零星的高置信度噪声窗口，"
+              f"提高置信度阈值或加大merge_gap的过滤作用有限时可以专门核实这几条；"
+              f"如果时长偏长（比如接近或超过真实抓挠事件的平均时长），"
+              f"更值得怀疑模型是不是把某个相似动作（比如舔身体/甩身体）学成了抓挠，"
+              f"建议去下面逐条表里点开对应project核实是不是漏标了抓挠，或者模型误判成了别的相似行为）")
+
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
 
