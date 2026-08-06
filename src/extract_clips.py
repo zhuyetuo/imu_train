@@ -160,6 +160,20 @@ def slice_csv(src_csv: str, dst_csv: str,
         return False
 
 
+def _symlink_into(src_path: str, dst_dir: str) -> None:
+    """在 dst_dir 下建一个指向 src_path 的相对软链接，同名文件已存在则跳过。
+    用于 --bin_by both：物理文件只裁剪一次，第二套分桶目录里放软链接，
+    不重复编码、不占双倍磁盘。"""
+    dst_path = os.path.join(dst_dir, os.path.basename(src_path))
+    if os.path.exists(dst_path) or os.path.islink(dst_path):
+        return
+    rel_target = os.path.relpath(src_path, dst_dir)
+    try:
+        os.symlink(rel_target, dst_path)
+    except OSError as e:
+        print(f"    [软链接失败] {dst_path}: {e}")
+
+
 def _process_one(task: dict) -> dict:
     """处理单个 clip 任务（在线程池中运行）。"""
     args       = task["args"]
@@ -173,6 +187,7 @@ def _process_one(task: dict) -> dict:
     clip_dir   = task["clip_dir"]
     suffix     = task["suffix"]
     seg        = task["seg"]
+    secondary_dir = task.get("secondary_dir")
 
     start_sec = ts_to_sec(seg["start_ts"])
     end_sec   = ts_to_sec(seg["end_ts"]) if seg["end_ts"] else start_sec + 2.0
@@ -188,6 +203,14 @@ def _process_one(task: dict) -> dict:
     ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
     ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
+    if secondary_dir:
+        if ok_cam1:
+            _symlink_into(cam1_clip_mp4, secondary_dir)
+        if ok_cam2:
+            _symlink_into(cam2_clip_mp4, secondary_dir)
+        if ok_csv:
+            _symlink_into(cam1_clip_csv, secondary_dir)
+
     return {**task, "ok_cam1": ok_cam1, "ok_cam2": ok_cam2, "ok_csv": ok_csv}
 
 
@@ -201,8 +224,11 @@ def main():
                         help="并行裁剪线程数（默认 4）。裁剪固定用CPU软编码libx264"
                              "（见下方说明），不是GPU瓶颈，核数多的机器可以调大，"
                              "比如16核以上的机器可以试试 8~16")
-    parser.add_argument("--bin_by", default="conf_max", choices=["conf_max", "conf_mean"],
-                        help="置信度分桶依据：conf_max=片段内最高置信度（默认），conf_mean=片段内平均置信度")
+    parser.add_argument("--bin_by", default="conf_max", choices=["conf_max", "conf_mean", "both"],
+                        help="置信度分桶依据：conf_max=片段内最高置信度（默认），conf_mean=片段内平均置信度，"
+                             "both=两套分桶同时保留（conf_max找漏检更方便、conf_mean误报少更稳，"
+                             "两个都想看的时候用这个，不用跑两遍）。both模式下视频只真正裁剪一次，"
+                             "第二套分桶目录里放的是软链接，不会重复编码、不会占用双倍磁盘")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -261,21 +287,31 @@ def main():
 
             conf_mean = seg.get("conf_mean", 0.0)
             conf_max  = seg.get("conf_max",  0.0)
-            bin_conf  = conf_max if args.bin_by == "conf_max" else conf_mean
-            bin_label = get_bin(bin_conf)
+            is_both   = args.bin_by == "both"
+            bin_conf  = conf_max if args.bin_by in ("conf_max", "both") else conf_mean
+            bin_label = get_bin(bin_conf)  # both模式下这是canonical(conf_max)分桶，实际裁剪落在这里
+            bin_label_mean = get_bin(conf_mean) if is_both else None
             suffix    = f"_clip{idx:02d}_{ts_to_hhmmss(t0_str)}-{ts_to_hhmmss(t1_str or t0_str)}"
 
+            root_max = os.path.join(args.output_dir, "by_conf_max") if is_both else args.output_dir
             with lock:
                 if bin_label not in bin_dirs:
-                    clip_dir = os.path.join(args.output_dir, f"clips_{bin_label}")
+                    clip_dir = os.path.join(root_max, f"clips_{bin_label}")
                     os.makedirs(clip_dir, exist_ok=True)
                     bin_dirs[bin_label] = clip_dir
                 clip_dir = bin_dirs[bin_label]
+
+            secondary_dir = None
+            if is_both:
+                secondary_dir = os.path.join(args.output_dir, "by_conf_mean", f"clips_{bin_label_mean}")
+                with lock:
+                    os.makedirs(secondary_dir, exist_ok=True)
 
             all_tasks.append({
                 "args": args, "has_ffmpeg": has_ffmpeg,
                 "stem1": stem1, "stem2": stem2,
                 "detected_stem": detected_stem,  # CSV clip 用检测狗的 stem
+                "bin_label_mean": bin_label_mean, "secondary_dir": secondary_dir,
                 "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
@@ -288,7 +324,9 @@ def main():
 
     # ── 并行执行 ─────────────────────────────────────────────────────────────
     from tqdm import tqdm
-    bin_logs  = {bl: [] for bl in bin_dirs}
+    is_both = args.bin_by == "both"
+    bin_logs      = {bl: [] for bl in bin_dirs}       # conf_max（both模式下是canonical分桶）
+    bin_logs_mean = {}                                 # 仅both模式用：conf_mean那一套
     done = 0
     pbar = tqdm(total=len(all_tasks), desc="裁剪片段", unit="clip")
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -303,6 +341,7 @@ def main():
             conf_mean = seg["conf_mean"]
             conf_max  = seg["conf_max"]
             bin_label = res["bin_label"]
+            bin_label_mean = res.get("bin_label_mean")
             stem1     = res["stem1"]
             suffix    = res["suffix"]
             bin_by    = res["bin_by"]
@@ -313,27 +352,46 @@ def main():
                 "csv✅"  if res["ok_csv"]  else "csv❌",
             ]
             status = " ".join(parts)
-            bin_conf = conf_max if bin_by == "conf_max" else conf_mean
+            if is_both:
+                conf_str = f"max={conf_max:.2f} mean={conf_mean:.2f}"
+            else:
+                conf_str = f"{bin_by}={(conf_max if bin_by == 'conf_max' else conf_mean):.2f}"
             tqdm.write(f"  [{done}/{len(all_tasks)}] [{bin_label}] {res['csv_basename']}  "
                        f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
-                       f"{bin_by}={bin_conf:.2f}  {status}")
+                       f"{conf_str}  {status}")
 
             line = (f"{res['csv_basename']}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
                     f"\tconf_mean={conf_mean:.3f}\tconf_max={conf_max:.3f}"
                     f"\t{stem1 + suffix + '.mp4'}\t{status}")
             with lock:
                 bin_logs[bin_label].append(line)
+                if is_both:
+                    bin_logs_mean.setdefault(bin_label_mean, []).append(line)
     pbar.close()
 
+    max_root = os.path.join(args.output_dir, "by_conf_max") if is_both else args.output_dir
     for bin_label, lines in sorted(bin_logs.items()):
-        log_path = os.path.join(args.output_dir, f"scratch_log_review_{bin_label}.txt")
+        log_path = os.path.join(max_root, f"scratch_log_review_{bin_label}.txt")
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("csv_file\tstart\tend\tconf_mean\tconf_max\tclip_file\tstatus\n")
             f.write("\n".join(lines) + "\n")
         print(f"  → {log_path}  ({len(lines)} 条)")
 
+    if is_both:
+        mean_root = os.path.join(args.output_dir, "by_conf_mean")
+        for bin_label, lines in sorted(bin_logs_mean.items()):
+            log_path = os.path.join(mean_root, f"scratch_log_review_{bin_label}.txt")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("csv_file\tstart\tend\tconf_mean\tconf_max\tclip_file\tstatus\n")
+                f.write("\n".join(lines) + "\n")
+            print(f"  → {log_path}  ({len(lines)} 条)")
+
     total = sum(len(v) for v in bin_logs.values())
-    print(f"\n共 {total} 段抓挠，分布在 {len(bin_logs)} 个置信度区间")
+    both_note = ""
+    if is_both:
+        both_note = ("（按conf_max分桶，实际裁剪落在 by_conf_max/；"
+                      "by_conf_mean/ 下是同样这些片段按conf_mean重新分桶后的软链接视图）")
+    print(f"\n共 {total} 段抓挠，分布在 {len(bin_logs)} 个置信度区间{both_note}")
     for bl in sorted(bin_logs):
         print(f"  clips_{bl}/: {len(bin_logs[bl])} 段")
 
