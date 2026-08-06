@@ -152,6 +152,23 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
             gt_meta.append((dog_id, local_start, local_end,
                             local_start + offset, local_end + offset))
 
+    # break_before 强制切开的两个事件，边界值本来就是"行下标/hz"算出来的，
+    # 如果两段在数组里正好是相邻行（只是因为真实时间跳变才被拆开），算出来的
+    # 前一段end跟后一段start会是完全相等的浮点数——ward-metrics库自己内部有个
+    # "首尾正好相接就合并"的逻辑（eval_events()里的merge_events_if_necessary），
+    # 会把我们刚拆开的两个事件在它自己的统计口径里悄悄合并回去，等于白拆。
+    # 加一个微小的epsilon错开边界，两个事件保留可忽略不计的确定性小间隔，
+    # 不会影响任何显示精度（都是2位小数展示），但能防止被库重新合并。
+    EPS = 1e-6
+    for i in range(1, len(gt_events)):
+        prev_end = gt_events[i - 1][1]
+        cur_start, cur_end = gt_events[i]
+        if cur_start <= prev_end:
+            shift = (prev_end - cur_start) + EPS
+            gt_events[i] = (cur_start + shift, cur_end + shift)
+            m_dog, m_ls, m_le, m_gs, m_ge = gt_meta[i]
+            gt_meta[i] = (m_dog, m_ls + shift, m_le + shift, m_gs + shift, m_ge + shift)
+
     data6 = np.concatenate(
         [sub[acc_cols].values, sub[gyro_cols].values], axis=1
     ).astype(np.float32)
