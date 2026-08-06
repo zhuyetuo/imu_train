@@ -211,8 +211,14 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     # 汇总
     n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
-    if scratch_only and not scratch_segs:
-        return preds, classes, scratch_segs
+    # 之前这里 scratch_only 且没检测到抓挠时会直接return，连下面"保存JSON结果"
+    # 那块都被跳过了——批量推理时某个文件如果真的一段抓挠都没有（比如模型
+    # 误报率低了之后完全正常出现的情况），会导致它压根没有对应的 {stem}_infer.json，
+    # 后续 extract_clips.py 找不到文件、甚至在"这一批全部文件都零检出"时报错
+    # 说 _infer 目录下没有任何 *_infer.json。改成不提前return，只在没检出时
+    # 跳过下面的逐窗口/汇总打印（scratch_only本来的目的就是减少输出噪音），
+    # JSON该保存还是要保存。
+    skip_print = scratch_only and not scratch_segs
 
     # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）
     merged = []
@@ -256,11 +262,12 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     merged_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
                  if merged else "未检测到抓挠"
 
-    if scratch_only:
-        print(f"\n── {display_name} ──")
-    print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)")
-    print(f"  【片段】{seg_str}")
-    print(f"  【合并】{merged_str}")
+    if not skip_print:
+        if scratch_only:
+            print(f"\n── {display_name} ──")
+        print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)")
+        print(f"  【片段】{seg_str}")
+        print(f"  【合并】{merged_str}")
 
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
     if output_dir:
