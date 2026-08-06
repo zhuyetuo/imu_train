@@ -82,9 +82,30 @@ def csv_start_sec(csv_path: str) -> float:
         return 0.0
 
 
-def sibling_stem(stem: str, target_cam: int) -> str:
-    """cam1_imu1 → cam2_imu2（或反向），target_cam=1 或 2"""
-    return re.sub(r"cam\d_imu\d", f"cam{target_cam}_imu{target_cam}", stem)
+def session_prefix(stem: str) -> str:
+    """去掉末尾的 _camN_imuM_resampled16hz，得到这次录制场次的公共前缀
+    （比如 multicam_20260731_024344249_cam1_imu3_resampled16hz
+     → multicam_20260731_024344249）。
+
+    房间固定只有2个机位(cam1/cam2)，拍的是整个房间；狗身上戴的IMU编号
+    (imu1/imu2/imu3/imu4...)是每条狗自己的编号，跟机位编号没有对应关系——
+    "cam1_imu1"/"cam2_imu2"只是这两个固定机位视频文件名本身固定的后缀
+    （大概率是摄像头设备自己的编号，凑巧2条狗时刚好跟imu1/imu2对上），
+    3条狗以后，imu3/imu4没有自己的专属视频，得用这两个固定机位的视频。"""
+    return re.sub(r"_cam\d+_imu\d+_resampled16hz$", "", stem)
+
+
+def camera_video_stem(session: str, cam_num: int) -> str:
+    """两个机位视频的文件名后缀固定是 cam1_imu1 / cam2_imu2，
+    不管这个场次实际挂了几条狗的IMU。"""
+    return f"{session}_cam{cam_num}_imu{cam_num}_resampled16hz"
+
+
+def extract_imu_label(stem: str) -> str:
+    """从stem里提取真正触发检测的IMU编号，比如
+    ..._cam1_imu3_resampled16hz → 'IMU3'。取不到就返回'IMU'。"""
+    m = re.search(r"_imu(\d+)_resampled16hz$", stem)
+    return f"IMU{m.group(1)}" if m else "IMU"
 
 
 _WINDOWS_CACHE = {}
@@ -340,16 +361,20 @@ def _process_one(task: dict) -> dict:
     # 保证跨运行文件名互不冲突，而且是确定性的、能看出源头，不用随机UUID
     # （UUID虽然也能保证唯一，但看不出是哪次运行产出的，出问题不好排查）。
     run_suffix = f"_{args.run_tag}" if args.run_tag else ""
-    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + run_suffix + ".mp4")
-    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + run_suffix + ".mp4")
+    imu_label = task.get("imu_label", "IMU")
+    # cam1/cam2的视频现在是固定的两个机位文件，不再跟触发检测的狗一一对应，
+    # 文件名里必须带上是"哪条狗"触发的(imu_tag)，不然两条狗在同一个场次里
+    # 检测到相近时间的事件时，输出文件名会撞在一起(后一个把前一个覆盖掉)
+    imu_tag = f"_by{imu_label}"
+    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + imu_tag + suffix + run_suffix + ".mp4")
+    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + imu_tag + suffix + run_suffix + ".mp4")
     cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + run_suffix + ".csv")  # 检测狗的 CSV
 
-    windows1 = task.get("windows1")  # cam1自己的imu1逐窗口置信度（可能为空=没有对应_infer.json）
-    windows2 = task.get("windows2")  # cam2自己的imu2逐窗口置信度
+    windows_detected = task.get("windows_detected")  # 触发检测的那条狗自己的逐窗口置信度
     ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0,
-                       windows=windows1, label_text="IMU1") if (cam1_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label) if (cam1_mp4 and has_ffmpeg) else False
     ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0,
-                       windows=windows2, label_text="IMU2") if (cam2_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label) if (cam2_mp4 and has_ffmpeg) else False
     ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
     if secondary_dir:
@@ -424,28 +449,26 @@ def main():
         if not segs:
             continue
 
-        # 判断是哪只狗的 IMU：cam1_imu1=狗1，cam2_imu2=狗2
+        # 房间固定2个机位(cam1/cam2)拍全景，触发检测的可能是任意一条狗的IMU
+        # (imu1/imu2/imu3/imu4...)——不管是哪条狗，两个机位的视频永远是同一对
+        # 固定文件(cam1_imu1/cam2_imu2)，不能再按"imu编号=机位编号"做字符串替换
+        # (3条狗以后，imu3/imu4没有自己的专属视频，那样替换会找到不存在的文件)。
         detected_stem = os.path.splitext(csv_basename)[0]
-        is_cam2 = bool(re.search(r"cam2_imu2", csv_basename))
-        if is_cam2:
-            # 狗2检测到抓挠：cam1=视角1(兄弟), cam2=检测狗
-            stem2 = detected_stem                  # cam2_imu2（检测狗）
-            stem1 = sibling_stem(detected_stem, 1) # cam1_imu1（视角1兄弟）
-        else:
-            # 狗1检测到抓挠：cam1=检测狗, cam2=视角2(兄弟)
-            stem1 = detected_stem                  # cam1_imu1（检测狗）
-            stem2 = sibling_stem(detected_stem, 2) # cam2_imu2（视角2兄弟）
+        session = session_prefix(detected_stem)
+        stem1 = camera_video_stem(session, 1)  # cam1固定视频
+        stem2 = camera_video_stem(session, 2)  # cam2固定视频
+        imu_label = extract_imu_label(detected_stem)  # 真正触发检测的狗，比如"IMU3"
+
         src_csv1 = os.path.join(args.video_dir, csv_basename)
         cam1_mp4 = find_video(stem1, args.video_dir)
         cam2_mp4 = find_video(stem2, args.video_dir)
         video_t0 = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
 
-        # 各自IMU自己的逐窗口置信度，用于烧录右上角实时置信度字幕；
-        # stem1/stem2各自有独立的_infer.json（两路IMU分别跑的推理），
-        # 不是检测触发的那一路也应该有自己的推理结果文件，除非那一路
-        # 压根没跑推理，这时优雅降级成不烧字幕（cut_clip里windows为空会跳过）
-        windows1 = load_windows_for_stem(args.infer_dir, stem1) if not args.no_conf_overlay else []
-        windows2 = load_windows_for_stem(args.infer_dir, stem2) if not args.no_conf_overlay else []
+        # 置信度字幕烧的是"触发检测的那条狗自己"的逐窗口置信度，两个机位视频上
+        # 烧一样的数据（反正两个机位拍的是同一个房间、同一条狗），不是机位自己
+        # 固定绑定的imu1/imu2置信度——因为机位跟狗现在已经不是1:1对应关系了
+        windows_detected = load_windows_for_stem(args.infer_dir, detected_stem) \
+            if not args.no_conf_overlay else []
 
         for idx, seg in enumerate(segs, 1):
             t0_str = seg.get("start_ts", "") or ""
@@ -482,7 +505,7 @@ def main():
                 "bin_label_mean": bin_label_mean, "secondary_dir": secondary_dir,
                 "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
-                "windows1": windows1, "windows2": windows2,
+                "windows_detected": windows_detected, "imu_label": imu_label,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
                         "conf_mean": conf_mean, "conf_max": conf_max},
                 "csv_basename": csv_basename, "bin_label": bin_label,
