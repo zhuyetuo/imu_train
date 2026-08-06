@@ -307,6 +307,37 @@ def find_merge_groups(gt_events_meta, det_events):
     return groups
 
 
+def real_time_gap_seconds(dog_id, prev_end_local, cur_start_local, hz, dog_ts_map):
+    """算两个local_sec之间的真实间隔（用timestamp列查出的实际经过时间），
+    而不是直接拿local_sec相减。
+
+    为什么不能直接相减：像"两次抓挠中间隔了5分钟但标注之间没有别的标注"
+    这种情况，两段在CSV行序号上是紧挨着的，local_sec本身就是"行号/hz"算出来
+    的，没法反映中间真实流逝的时间；而且这类事件在事件提取阶段被
+    _process_one_dog的break_before逻辑强制拆开后，为了不被wardmetrics库
+    自己的合并逻辑（首尾相接就合并）误伤，又加了一个可忽略不计(1e-6s)的
+    边界错开——直接相减会算出接近0的"间隔"，完全掩盖了真实的时间跨度。
+    这里改用timestamp列查两头的绝对时间戳，做真正有意义的差值；没有
+    timestamp列时才退化为直接相减。"""
+    ts_series = dog_ts_map.get(dog_id)
+    if ts_series is None or len(ts_series) == 0:
+        return cur_start_local - prev_end_local
+
+    def _idx(sec):
+        idx = int(round(sec * hz))
+        return max(0, min(idx, len(ts_series) - 1))
+
+    # prev_end_local 是"独占式"结束位置（下一行所在的位置），这一行实际上
+    # 已经是下一个片段的第一行了——真正属于上一个片段的最后一行在往前一帧，
+    # 不减这一帧的话查出来的是下一段自己的起始时间戳，跟cur_start查到的是
+    # 同一行，算出来的间隔恒为0，等于白查。
+    t0 = ts_series.iloc[_idx(prev_end_local - 1.0 / hz)]
+    t1 = ts_series.iloc[_idx(cur_start_local)]
+    if pd.isna(t0) or pd.isna(t1):
+        return cur_start_local - prev_end_local
+    return (t1 - t0).total_seconds()
+
+
 def local_sec_to_ts_str(dog_id, local_sec, hz, dog_ts_map):
     """把某条狗内部的相对秒数换算成 CSV 里的绝对时间戳字符串，供人工去原始CSV/视频里核对。
     没有 timestamp 列（旧数据）或越界时返回 None。"""
@@ -978,49 +1009,6 @@ def main():
             if pred_ts_start is not None:
                 print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
 
-    # ── 漏检(D)按时长分桶统计：帮助判断是不是短片段/信号弱的问题占多数 ──
-    DUR_BUCKETS = [("<1s", 0, 1), ("1-3s", 1, 3), ("3-9s", 3, 9), ("9s以上", 9, float("inf"))]
-    d_durations = [le - ls for (dog_id, ls, le, gs, ge), score
-                   in zip(gt_events_meta, gt_scores_best) if score == "D"]
-    print(f"\n{'='*90}")
-    print(f"  漏检(D)事件按时长分桶统计（共 {len(d_durations)} 个）")
-    print(f"{'='*90}")
-    if not d_durations:
-        print("  没有漏检事件")
-    else:
-        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
-        print(f"  {'-'*30}")
-        for name, lo, hi in DUR_BUCKETS:
-            in_bucket = [d for d in d_durations if lo <= d < hi]
-            pct = len(in_bucket) / len(d_durations) * 100
-            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
-        print(f"  最短: {min(d_durations):.2f}s   最长: {max(d_durations):.2f}s   "
-              f"平均: {sum(d_durations)/len(d_durations):.2f}s")
-        print(f"  （如果<1s/1-3s短片段占比明显偏高，说明模型大概率是被短促、信号弱的片段难住了；"
-              f"如果长短都有、分布均匀，更可能是真的没学好，不是片段太短的问题）")
-
-    # ── 纯误报(I')按时长分桶统计：判断是零星短噪声，还是模型学出了别的相似行为 ──
-    i_durations = [le - ls for dog_id, ls, le, gs in insertion_rows]
-    print(f"\n{'='*90}")
-    print(f"  纯误报(I')按时长分桶统计（共 {len(i_durations)} 个）")
-    print(f"{'='*90}")
-    if not i_durations:
-        print("  没有纯误报")
-    else:
-        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
-        print(f"  {'-'*30}")
-        for name, lo, hi in DUR_BUCKETS:
-            in_bucket = [d for d in i_durations if lo <= d < hi]
-            pct = len(in_bucket) / len(i_durations) * 100
-            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
-        print(f"  最短: {min(i_durations):.2f}s   最长: {max(i_durations):.2f}s   "
-              f"平均: {sum(i_durations)/len(i_durations):.2f}s")
-        print(f"  （如果<1s/1-3s短片段占多数，很可能是零星的高置信度噪声窗口，"
-              f"提高置信度阈值或加大merge_gap的过滤作用有限时可以专门核实这几条；"
-              f"如果时长偏长（比如接近或超过真实抓挠事件的平均时长），"
-              f"更值得怀疑模型是不是把某个相似动作（比如舔身体/甩身体）学成了抓挠，"
-              f"建议去下面逐条表里点开对应project核实是不是漏标了抓挠，或者模型误判成了别的相似行为）")
-
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
 
@@ -1038,47 +1026,71 @@ def main():
             for j, (dog_id, ls, le) in enumerate(group):
                 gap_str = ""
                 if j > 0:
-                    gap = ls - group[j - 1][2]
-                    gap_str = f"    (距上一事件间隔 {gap:.2f}s)"
+                    gap = real_time_gap_seconds(dog_id, group[j - 1][2], ls, args.hz, dog_ts_map)
+                    gap_str = f"    (距上一事件真实间隔 {gap:.2f}s)"
                 print(f"      {ls:>8.2f}s → {le:>8.2f}s{gap_str}")
                 ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
                 ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
                 if ts_start is not None:
                     print(f"        绝对时间戳: {ts_start} → {ts_end}")
-
-    # ── 合并组内相邻真实事件间隔按分桶统计：判断M是不是集中在"间隔很短"的情况 ──
-    GAP_BUCKETS = [("<2s", 0, 2), ("2-5s", 2, 5), ("5-10s", 5, 10), ("10s以上", 10, float("inf"))]
-    merge_gaps = [group[j][1] - group[j - 1][2]
-                  for group in merge_groups for j in range(1, len(group))]
-    print(f"\n{'='*90}")
-    print(f"  合并组内相邻真实事件间隔分桶统计（共 {len(merge_gaps)} 个相邻间隔，来自 {len(merge_groups)} 组）")
-    print(f"{'='*90}")
-    if not merge_gaps:
-        print("  没有被合并的事件组")
-    else:
-        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
-        print(f"  {'-'*30}")
-        for name, lo, hi in GAP_BUCKETS:
-            in_bucket = [g for g in merge_gaps if lo <= g < hi]
-            pct = len(in_bucket) / len(merge_gaps) * 100
-            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
-        print(f"  最短间隔: {min(merge_gaps):.2f}s   最长间隔: {max(merge_gaps):.2f}s   "
-              f"平均: {sum(merge_gaps)/len(merge_gaps):.2f}s")
-        close5 = sum(1 for g in merge_gaps if g < 5)
-        print(f"  间隔<5s的占 {close5}/{len(merge_gaps)} = {close5/len(merge_gaps)*100:.1f}%"
-              f"——如果这类『几秒内的连续抓挠算一次事件』在实际场景里可以接受，"
-              f"这部分M造成的F1e扣分可能没那么值得在意，可以考虑单独核实一下"
-              f"多长间隔以内的合并你愿意接受，而不是死磕论文定义的严格F1e")
-
-    print(f"""
-  上面的秒数是该条狗在合并CSV里的行序号/hz（从这条狗的第一行开始算），
-  可以据此去对应的原始录制/Label Studio标注里定位具体时间点核实：
-  - 如果间隔很短（<1秒）且动作听起来像是连续的一次抓挠中间偶尔停顿，
+        print(f"""
+  上面"距上一事件真实间隔"是用timestamp列查出来的实际经过时间，不是简单
+  local_sec相减（两次抓挠中间如果没有别的标注，在CSV行序号上会紧挨着，
+  直接相减算出来的间隔会失真，可能大到几分钟都显示成接近0秒）：
+  - 如果真实间隔很短（几秒内）且动作听起来像是连续的一次抓挠中间偶尔停顿，
     大概率是标注时被切成了多段，属于标注粒度问题，不是模型的错。
-  - 如果间隔有一两秒甚至更长，更像是两次独立的抓挠，说明合并确实是
+  - 如果真实间隔有几十秒甚至更长，更像是两次独立的抓挠，说明合并确实是
     模型/参数层面的问题，可以考虑要不要接受这种程度的合并（次数统计
     会因此偏少），或者未来标注时尽量避免把间隔很短的重复动作拆开标。
 """)
+
+    # ── D/M/I' 统计汇总：放在最后，方便一起看，不用在逐条明细里找 ──
+    DUR_BUCKETS = [("<1s", 0, 1), ("1-3s", 1, 3), ("3-9s", 3, 9), ("9s以上", 9, float("inf"))]
+    GAP_BUCKETS = [("<2s", 0, 2), ("2-5s", 2, 5), ("5-10s", 5, 10), ("10s以上", 10, float("inf"))]
+
+    def print_bucket_stats(title, values, buckets, empty_msg, extra_note=""):
+        print(f"\n{'='*90}")
+        print(f"  {title}（共 {len(values)} 个）")
+        print(f"{'='*90}")
+        if not values:
+            print(f"  {empty_msg}")
+            return
+        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
+        print(f"  {'-'*30}")
+        for name, lo, hi in buckets:
+            in_bucket = [v for v in values if lo <= v < hi]
+            pct = len(in_bucket) / len(values) * 100
+            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
+        print(f"  最短: {min(values):.2f}s   最长: {max(values):.2f}s   平均: {sum(values)/len(values):.2f}s")
+        if extra_note:
+            print(extra_note)
+
+    d_durations = [le - ls for (dog_id, ls, le, gs, ge), score
+                   in zip(gt_events_meta, gt_scores_best) if score == "D"]
+    print_bucket_stats(
+        "漏检(D)事件按时长分桶统计", d_durations, DUR_BUCKETS, "没有漏检事件",
+        "  （如果<1s/1-3s短片段占比明显偏高，说明模型大概率是被短促、信号弱的片段难住了；"
+        "如果长短都有、分布均匀，更可能是真的没学好，不是片段太短的问题）")
+
+    i_durations = [le - ls for dog_id, ls, le, gs in insertion_rows]
+    print_bucket_stats(
+        "纯误报(I')按时长分桶统计", i_durations, DUR_BUCKETS, "没有纯误报",
+        "  （如果<1s/1-3s短片段占多数，很可能是零星的高置信度噪声窗口，"
+        "提高置信度阈值或加大merge_gap的过滤作用有限时可以专门核实这几条；"
+        "如果时长偏长（比如接近或超过真实抓挠事件的平均时长），"
+        "更值得怀疑模型是不是把某个相似动作（比如舔身体/甩身体）学成了抓挠，"
+        "建议去上面逐条表里点开对应project核实是不是漏标了抓挠，或者模型误判成了别的相似行为）")
+
+    merge_gaps = [real_time_gap_seconds(group[j][0], group[j - 1][2], group[j][1], args.hz, dog_ts_map)
+                  for group in merge_groups for j in range(1, len(group))]
+    close5 = sum(1 for g in merge_gaps if g < 5) if merge_gaps else 0
+    print_bucket_stats(
+        "合并(M)组内相邻真实事件真实间隔分桶统计", merge_gaps, GAP_BUCKETS, "没有被合并的事件组",
+        (f"  间隔<5s的占 {close5}/{len(merge_gaps)} = {close5/len(merge_gaps)*100:.1f}%"
+         f"——如果这类『几秒内的连续抓挠算一次事件』在实际场景里可以接受，"
+         f"这部分M造成的F1e扣分可能没那么值得在意，可以考虑单独核实一下"
+         f"多长间隔以内的合并你愿意接受，而不是死磕论文定义的严格F1e"
+         if merge_gaps else ""))
 
     print(f"""
 {'='*90}
