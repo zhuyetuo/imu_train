@@ -116,7 +116,7 @@ elif [ "$DATASET" = "custom" ]; then
         echo "  请将你的 CSV 文件放到该路径，或修改 configs/data.yaml 中 custom.csv_path"
         echo ""
         echo "  CSV 格式要求（列名可在 configs/data.yaml custom 节自定义）:"
-        echo "    dog_id, label, acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z"
+        echo "    record_id, label, acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z"
         exit 1
     else
         echo "  ✅ $CSV_CUSTOM"

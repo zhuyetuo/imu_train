@@ -38,8 +38,12 @@ custom:
   csv_path: data/raw_custom/data.csv
   # 采样率 — 填写 CSV 的实际采样率（已 resample 到 16Hz 的填 16）
   source_hz: 16
-  # 狗ID列名
-  dog_id_col: dog_id
+  # 记录ID列名——注意：这不是真实的狗ID，是"task编号+传感器路数"拼出来的
+  # 分组键（比如 task496_imu1），一次录制/一路传感器算一个record_id，
+  # 跟实际有多少条不同的狗没有直接对应关系，只是用来做leave-some-out分组
+  # 划分、防止同一段录制的窗口被拆到训练/验证集不同边（叫dog_id容易让人
+  # 误以为是真实狗的数量，改叫record_id）
+  record_id_col: record_id
   # 标签列名
   label_col: label
   # 6个传感器通道列名（顺序：acc_x/y/z, gyr_x/y/z）

@@ -1,20 +1,20 @@
 """
-反查 dog_id（形如 task496_imu1）对应的 Label Studio project 文件和 task id，
+反查 record_id（形如 task496_imu1）对应的 Label Studio project 文件和 task id，
 方便去 Label Studio 网页版按 project + task 定位具体标注核实。
 
 背景: labelstudio_to_custom.py 把多个 project 导出的 JSON 合并转换成一份
-训练用 CSV 时，dog_id 只保留了 task_id（Label Studio 任务的全局唯一ID），
+训练用 CSV 时，record_id 只保留了 task_id（Label Studio 任务的全局唯一ID），
 丢失了"来自哪个 project 导出文件"这个信息。这个脚本反过来在原始的
 project-*.json 文件里搜索，找到 task_id 属于哪个文件（文件名里一般带有
 project 编号，如 project-23-at-2026-07-30-06-04-c4825aac.json → project 23）。
 
 用法:
-  # dog_id 形如 task496_imu1，只需要传数字部分
+  # record_id 形如 task496_imu1，只需要传数字部分
   python src/eval/find_task_project.py \\
     --task_ids 496 539 567 \\
     --json_dir data/raw_custom/2026_7_30
 
-  # 也可以直接传 dog_id 字符串，脚本会自动提取数字
+  # 也可以直接传 record_id 字符串，脚本会自动提取数字
   python src/eval/find_task_project.py \\
     --task_ids task496_imu1 task539_imu1 task567_imu2 \\
     --json_dir data/raw_custom/2026_7_30
@@ -42,7 +42,7 @@ def extract_project_no(filename):
 def main():
     ap = argparse.ArgumentParser(description="反查 task_id 属于哪个 Label Studio project 文件")
     ap.add_argument("--task_ids", nargs="+", required=True,
-                     help="task id 列表，支持纯数字或 task496_imu1 这种 dog_id 格式")
+                     help="task id 列表，支持纯数字或 task496_imu1 这种 record_id 格式")
     ap.add_argument("--json_dir", required=True, help="存放 project-*.json 的目录")
     ap.add_argument("--pattern", default="project-*.json", help="项目导出文件名匹配模式")
     args = ap.parse_args()

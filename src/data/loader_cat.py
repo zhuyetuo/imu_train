@@ -64,7 +64,7 @@ def load_dataset_cat(csv_path: str, cfg: dict) -> tuple:
     for cat_id in cat_ids:
         sub = df[df[cat_id_col] == cat_id]
         records.append({
-            "dog_id": f"cat_{cat_id}",      # 统一用 dog_id 字段，前缀 cat_ 避免与狗 ID 冲突
+            "record_id": f"cat_{cat_id}",   # 统一用 record_id 字段，前缀 cat_ 避免跟狗数据集的ID冲突
             "data":   sub[sensor_cols].values.astype(np.float32),
             "labels": sub[label_col].values,
         })

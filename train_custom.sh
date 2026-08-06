@@ -193,9 +193,18 @@ PID_B=$!
 # 终端手动tail -f才看得到；现在直接在这个终端里实时滚动显示，不用切窗口。
 echo ""
 echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志，[A]=纯标注 [B]=带合成）..."
-tail -f -n +1 /tmp/train_no_syn.log 2>/dev/null | sed -u 's/^/[A] /' &
+# tqdm进度条是靠\r（回车不换行）原地刷新的，不是每次都换行；sed要等到\n
+# 才会把攒的内容当一整行输出，\r的更新会一直卡在缓冲区里，直到最后进度条
+# 跑完打印真正的\n才一次性冒出来，等于白等——这也是之前"卡住不动，跑完
+# 才突然出现"的原因。用 tr 把\r也当成换行处理，每次进度更新都单独成行、
+# 立刻输出，代价是不再是原地刷新的动画效果，而是一行行往下滚动，但是真
+# 实时的，不用干等。
+# 光加tr还不够：tr写到管道（不是终端）时默认是全缓冲的，会把转换后的内容
+# 攒在自己的缓冲区里不立刻往下传，一样会卡住——用 stdbuf -oL 强制tr按行
+# 缓冲，才能真正做到每次更新都立刻显示。
+tail -f -n +1 /tmp/train_no_syn.log 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[A] /' &
 TAIL_A=$!
-tail -f -n +1 /tmp/train_with_syn.log 2>/dev/null | sed -u 's/^/[B] /' &
+tail -f -n +1 /tmp/train_with_syn.log 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[B] /' &
 TAIL_B=$!
 
 wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 /tmp/train_no_syn.log"

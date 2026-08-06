@@ -72,12 +72,12 @@ def is_unconventional(name: str) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description="特征判别力 EDA：哪些特征（尤其非常规特征）对区分当前行为类别有用")
-    ap.add_argument("--labeled_csv", required=True, help="合并CSV路径（dog_id/label/acc_x.../gyr_z 逐行标签）")
+    ap.add_argument("--labeled_csv", required=True, help="合并CSV路径（record_id/label/acc_x.../gyr_z 逐行标签）")
     ap.add_argument("--hz", type=int, default=16)
     ap.add_argument("--window_s", type=float, default=2.0)
     ap.add_argument("--stride_s", type=float, default=1.0)
     ap.add_argument("--min_seg_s", type=float, default=2.0, help="连续同标签片段最短秒数")
-    ap.add_argument("--dog_id_col", default="dog_id")
+    ap.add_argument("--record_id_col", default="record_id")
     ap.add_argument("--label_col", default="label")
     ap.add_argument("--min_windows_per_class", type=int, default=10,
                      help="窗口数低于此值的类别只展示、不参与判别力排名（默认10）")
@@ -94,7 +94,7 @@ def main():
     if acc_cols is None or gyro_cols is None:
         print(f"[错误] 找不到 acc/gyro 列，现有列: {list(df.columns)}")
         return
-    missing = [c for c in [args.dog_id_col, args.label_col] if c not in df.columns]
+    missing = [c for c in [args.record_id_col, args.label_col] if c not in df.columns]
     if missing:
         print(f"[错误] 缺少列: {missing}")
         return
@@ -104,7 +104,7 @@ def main():
     min_len = max(window_size, int(args.hz * args.min_seg_s))
 
     label_wins = {}
-    for dog_id, sub in df.groupby(args.dog_id_col):
+    for record_id, sub in df.groupby(args.record_id_col):
         labels = sub[args.label_col].values
         for start, end, label in find_contiguous_segments(labels, min_len):
             wins = build_windows(sub.iloc[start:end], acc_cols, gyro_cols, window_size, stride)

@@ -534,7 +534,7 @@ python src/eval/event_eval.py \
 2. **窗口级置信度分布**：预测为目标行为的窗口，有多少落在各置信度阈值以上
 3. **网格搜索**：扫描 `(置信度阈值, merge_gap)` 组合，用论文定义的 **F1e**（把碎片化F、合并M都算作错误，跟 ward-metrics 库自带、把"合并"当命中处理的 precision/recall 不同）挑出最优组合
 4. **推荐配置详细拆解**：真实事件总数 = 精确匹配C + 漏检D + 碎片F + 合并M（+FM），带验算
-5. **全部真实事件逐条对应表**：每条事件的类别、真实时间、匹配到的预测区间，按 `dog_id` 分块，方便逐条去 Label Studio 复查
+5. **全部真实事件逐条对应表**：每条事件的类别、真实时间、匹配到的预测区间，按 `record_id` 分块，方便逐条去 Label Studio 复查
 6. **被合并的真实事件组**：单独摘出"合并"这类问题，附上间隔秒数——间隔很短（<1秒）通常是标注切碎了同一个连续动作；间隔一两秒甚至更长，更可能是模型/参数层面的问题，也可能是真实的"多次独立动作间隔很近"（需要人工核实，见下方案例）
 
 ### 网格搜索两种模式
@@ -553,9 +553,9 @@ python src/eval/event_eval.py \
 | `--json_dir` | Label Studio `project-*.json` 所在目录，传了的话逐条对应表/被合并事件组会顺带打印每个事件对应的 project 文件、video/csv 链接，不用再单独跑 `find_task_project.py` |
 | `--log_file` | 把完整输出另存一份到文件（每次覆盖写，不追加），方便复查时对照 |
 
-### 反查 dog_id 对应的 Label Studio project（`find_task_project.py`）
+### 反查 record_id 对应的 Label Studio project（`find_task_project.py`）
 
-事件表里的 `dog_id`（形如 `task496_imu1`）只保留了 Label Studio 的 task_id，丢失了来自哪个 project 导出文件这个信息。`--json_dir` 已经把这一步自动接进 `event_eval.py` 了；如果只是想单独查几个 task_id，也可以直接跑：
+事件表里的 `record_id`（形如 `task496_imu1`）只保留了 Label Studio 的 task_id，丢失了来自哪个 project 导出文件这个信息。`--json_dir` 已经把这一步自动接进 `event_eval.py` 了；如果只是想单独查几个 task_id，也可以直接跑：
 
 ```bash
 python src/eval/find_task_project.py \

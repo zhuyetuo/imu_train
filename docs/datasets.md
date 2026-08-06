@@ -84,7 +84,7 @@ bash setup.sh --dataset cat_smit2023
 将数据整理成 CSV，放到 `data/raw_custom/data.csv`，每行一个采样点：
 
 ```
-dog_id, label, acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z
+record_id, label, acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z
 dog1,   Walk,  0.12,  -0.03, 9.81,  0.01,  0.02,  -0.01
 ...
 ```
