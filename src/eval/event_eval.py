@@ -374,6 +374,87 @@ def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, t
     return raw_segs
 
 
+def _flatten_records(dog_window_records, target_label):
+    """把 dog_window_records（687条狗，每条是 python list-of-str 的标签+置信度+起点）
+    转成几个大的 numpy 数组：starts/confs/hit 拼接成三个扁平数组，bounds 记录
+    每条狗在扁平数组里的 [start_idx, end_idx) 区间，offsets 是每条狗的时间偏移。
+
+    这是为了给 run_grid 的多进程并行用。之前直接把 dog_window_records（687个
+    python list，每个list里是几千个字符串）传给 joblib 的多进程worker，每次
+    派发任务都要重新pickle这一大坨python对象，101个阈值重复101次，开销比省下
+    的计算时间还大。改成先转成大的numpy数组，joblib/loky 对超过一定大小的
+    numpy数组会自动用内存映射共享（不用每次都完整拷贝+序列化），才能真正
+    发挥多进程的加速——用多线程规避这个问题是错的，纯python循环受GIL限制，
+    线程之间根本不会并行，等于白跑。"""
+    starts_parts, confs_parts, hit_parts = [], [], []
+    bounds = [0]
+    offsets = np.empty(len(dog_window_records), dtype=np.float64)
+    for i, (pred_labels, pred_confs, starts, offset) in enumerate(dog_window_records):
+        starts_parts.append(np.asarray(starts, dtype=np.int64))
+        confs_parts.append(np.asarray(pred_confs, dtype=np.float32))
+        hit_parts.append(np.asarray([lbl == target_label for lbl in pred_labels], dtype=bool))
+        offsets[i] = offset
+        bounds.append(bounds[-1] + len(starts))
+    starts_flat = np.concatenate(starts_parts) if starts_parts else np.empty(0, dtype=np.int64)
+    confs_flat = np.concatenate(confs_parts) if confs_parts else np.empty(0, dtype=np.float32)
+    hit_flat = np.concatenate(hit_parts) if hit_parts else np.empty(0, dtype=bool)
+    bounds = np.array(bounds, dtype=np.int64)
+    return starts_flat, confs_flat, hit_flat, bounds, offsets
+
+
+def _segments_from_hits(hits, starts, window_size, hz, stride, label_mode):
+    """跟 pred_windows_to_segments 逻辑一样，只是输入是预先算好的布尔命中数组
+    （hit标签 & conf>=阈值 已经在外面向量化算完），避免每个窗口都重复做
+    字符串比较+置信度比较。"""
+    raw_segs = []
+    in_seg = False
+    seg_start = None
+    prev_end = None
+    half_pad = (stride / 2 / hz) if (label_mode == "center" and stride) else 0.0
+    for idx in range(len(hits)):
+        s = starts[idx]
+        if label_mode == "center":
+            center_sec = (s + window_size / 2) / hz
+            start_sec = center_sec - half_pad
+            end_sec = center_sec + half_pad
+        else:
+            start_sec = s / hz
+            end_sec = (s + window_size) / hz
+        if hits[idx]:
+            if not in_seg:
+                in_seg = True
+                seg_start = start_sec
+            prev_end = end_sec
+        else:
+            if in_seg:
+                raw_segs.append((seg_start, prev_end))
+                in_seg = False
+    if in_seg:
+        raw_segs.append((seg_start, prev_end))
+    return raw_segs
+
+
+def _eval_one_threshold_flat(thr, mg_values, starts_flat, confs_flat, hit_flat, bounds, offsets,
+                             gt_events_all, window_size, hz, stride, label_mode):
+    """run_grid 并行版用：接收扁平numpy数组而不是 dog_window_records，
+    每条狗切片按阈值算命中区间、重建片段，再扫一遍 merge_gap。"""
+    hits_over_thr = hit_flat & (confs_flat >= thr)
+    raw_segs = []
+    for i in range(len(bounds) - 1):
+        s, e = bounds[i], bounds[i + 1]
+        if s == e:
+            continue
+        segs = _segments_from_hits(hits_over_thr[s:e], starts_flat[s:e], window_size, hz, stride, label_mode)
+        raw_segs.extend((ss + offsets[i], ee + offsets[i]) for ss, ee in segs)
+    raw_segs.sort()
+    rows = []
+    for mg in mg_values:
+        (n_det, lib_p, lib_r, lib_f1, n_d, n_f, n_m, n_insert,
+         f1e_p, f1e_r, f1e) = eval_at_merge_gap(gt_events_all, raw_segs, mg)
+        rows.append((thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r))
+    return rows
+
+
 def compute_f1e(detailed):
     """按论文定义的事件级 F1e：TP=C，FN=D+F+FM+M（碎片化/合并都算错误），
     FP=M'+FM'+F'+I'。与 ward-metrics 库自带、把"合并"当命中的 precision/
@@ -413,24 +494,27 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
     [(thr, mg, n_det, n_d, n_f, n_m, n_insert, f1e_p, f1e_r, f1e, lib_p, lib_r), ...]
     耗时主要在按阈值重建预测片段这一层（外层循环），gap 合并很快。
 
-    workers != 1 时并行按阈值分发，但这里故意用 backend="threading"、不用
-    build_dataset()那边的"loky"多进程：每个阈值任务都要用到 dog_window_records
-    这一整份数据（可能是几十万到上百万个窗口的标签+置信度），loky多进程每次
-    派发任务都要把这一整份数据重新pickle、通过进程间通信传给子进程，阈值数量
-    一多，这个序列化开销会远远盖过并行本身省下的时间，实测表现跟卡住一样。
-    threading共享内存不需要序列化传输，虽然纯Python循环受GIL限制、并行加速
-    有限，但至少不会比单线程更慢。真正的CPU密集部分（wardmetrics的eval_events）
-    是纯Python实现，指望不上GIL之外的并行收益，这里主要是避免多进程的传输坑。"""
+    workers != 1 时用 joblib 的 loky（多进程）按阈值并行——纯Python循环受GIL
+    限制，多线程根本无法并行、白搭；真正要加速必须用多进程绕开GIL。多进程的
+    代价是每次派发任务都要序列化数据传给子进程：如果直接传 dog_window_records
+    （687个python list，每个list几千个字符串），101个阈值重复序列化101次，
+    这个开销比省下的计算时间还大。所以先用 _flatten_records() 把数据转成几个
+    大的numpy数组——joblib/loky 对超过阈值大小的numpy数组会自动用内存映射
+    共享（写一次磁盘文件，各子进程直接映射读取，不需要每次完整拷贝+反序列化），
+    这样才能真正拿到多进程的加速。"""
     if workers and workers != 1:
         from joblib import Parallel, delayed
         from tqdm import tqdm
+        starts_flat, confs_flat, hit_flat, bounds, offsets = _flatten_records(
+            dog_window_records, target_label)
         n_jobs = workers if workers > 0 else -1
         it = thr_values
         if show_progress:
             it = tqdm(thr_values, desc=desc, unit="thr")
-        nested = Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(_eval_one_threshold)(thr, mg_values, dog_window_records, gt_events_all,
-                                         target_label, window_size, hz, stride, label_mode)
+        nested = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_eval_one_threshold_flat)(thr, mg_values, starts_flat, confs_flat, hit_flat,
+                                              bounds, offsets, gt_events_all,
+                                              window_size, hz, stride, label_mode)
             for thr in it
         )
         return [row for rows in nested for row in rows]
