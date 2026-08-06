@@ -87,11 +87,105 @@ def sibling_stem(stem: str, target_cam: int) -> str:
     return re.sub(r"cam\d_imu\d", f"cam{target_cam}_imu{target_cam}", stem)
 
 
+_WINDOWS_CACHE = {}
+_WINDOWS_CACHE_LOCK = threading.Lock()
+
+
+def load_windows_for_stem(infer_dir: str, stem: str) -> list:
+    """加载某个 stem（比如 xxx_cam1_imu1）对应的 {stem}_infer.json 里的逐窗口预测
+    （ts/label/conf/probs），每个stem只读一次盘，同一批clip任务共用缓存。
+    找不到文件时返回空列表（比如只有一路IMU跑了推理，另一路没跑）。"""
+    with _WINDOWS_CACHE_LOCK:
+        if stem in _WINDOWS_CACHE:
+            return _WINDOWS_CACHE[stem]
+    path = os.path.join(infer_dir, f"{stem}_infer.json")
+    windows = []
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                windows = json.load(f).get("windows", [])
+        except Exception as e:
+            print(f"  [警告] 读取 {path} 失败: {e}")
+    with _WINDOWS_CACHE_LOCK:
+        _WINDOWS_CACHE[stem] = windows
+    return windows
+
+
+def _ass_time(sec: float) -> str:
+    sec = max(0.0, sec)
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = sec % 60
+    return f"{h:d}:{m:02d}:{s:05.2f}"
+
+
+ASS_HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
+Style: conf,Noto Sans CJK SC,46,&H0000D7FF,&H00000000,&H80000000,1,2,1,9,10,10,24
+[Events]
+Format: Layer, Start, End, Style, Text
+"""
+
+
+def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_duration: float,
+                        out_ass_path: str, label_text: str, target_label: str = "抓挠") -> bool:
+    """把某一路IMU的逐窗口置信度，转成跟裁剪后视频时间轴对齐的ASS字幕文件，
+    烧录到右上角(Alignment=9)。
+
+    时间换算：cut_clip()里视频用 -ss rel_start 从原始视频（未裁剪）的
+    rel_start秒处开始截取，输出clip自己的0点对应原始视频的rel_start秒。
+    某个窗口的绝对时间戳ts，先换算成"原始视频相对秒数" = ts_abs - video_t0，
+    再减掉rel_start，就是这个窗口在裁剪后clip里的时间点。
+    """
+    events = []
+    filtered = []
+    for w in windows:
+        ts_str = w.get("ts")
+        if not ts_str:
+            continue
+        abs_sec = ts_to_sec(ts_str)
+        rel_sec = (abs_sec - video_t0) - rel_start
+        if -1.0 <= rel_sec <= clip_duration + 1.0:
+            conf = w.get("probs", {}).get(target_label)
+            if conf is None:
+                conf = w.get("conf", 0.0) if w.get("label") == target_label else 0.0
+            filtered.append((rel_sec, conf))
+    if not filtered:
+        return False
+    filtered.sort(key=lambda x: x[0])
+
+    for i, (t0, conf) in enumerate(filtered):
+        t1 = filtered[i + 1][0] if i + 1 < len(filtered) else t0 + 0.5
+        t0c = max(0.0, min(t0, clip_duration))
+        t1c = max(t0c + 0.02, min(t1, clip_duration))
+        if t0c >= clip_duration:
+            continue
+        text = f"{label_text} {target_label}:{conf:.2f}"
+        events.append(f"Dialogue: 0,{_ass_time(t0c)},{_ass_time(t1c)},conf,{text}")
+
+    if not events:
+        return False
+    with open(out_ass_path, "w", encoding="utf-8") as f:
+        f.write(ASS_HEADER)
+        f.write("\n".join(events) + "\n")
+    return True
+
+
 def cut_clip(video_path: str, start_abs: float, end_abs: float,
-             out_path: str, context_s: float, video_t0: float = 0.0) -> bool:
+             out_path: str, context_s: float, video_t0: float = 0.0,
+             windows: list = None, label_text: str = "") -> bool:
     """
     start_abs / end_abs: 午夜起始的绝对秒数
     video_t0: 视频第一帧对应的绝对秒数（从 CSV 第一行读取）
+    windows: 若提供该路IMU自己的逐窗口预测（{stem}_infer.json里的windows数组），
+      会在右上角烧录实时抓挠置信度字幕，方便复查时直接看置信度曲线，不用
+      对照日志猜哪一段模型信心高/低。传 None 或空列表则不烧字幕，跟以前
+      行为一致。
     """
     rel_start = max(0.0, (start_abs - video_t0) - context_s)
     rel_end   = (end_abs - video_t0) + context_s
@@ -112,6 +206,19 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
     #      抢核反而更慢。显式限制每个进程用少量线程，让"并行进程数"而不是
     #      "单进程内部线程数"来吃满CPU，这是many-parallel-encodes场景的
     #      标准优化方式。
+    vf_chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    ass_path = None
+    if windows:
+        ass_path = out_path + ".ass"
+        ok_sub = build_conf_subtitle(windows, video_t0, rel_start, duration, ass_path, label_text)
+        if ok_sub:
+            # subtitles滤镜的路径里冒号/反斜杠有特殊含义，需要转义；
+            # 单引号包住整个路径，路径本身的单引号也要转义（正常路径不会有，防御一下）
+            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            vf_chain = f"subtitles='{escaped}'," + vf_chain
+        else:
+            ass_path = None  # 没有落在这段时间范围内的窗口，没必要烧字幕
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{rel_start:.3f}",
@@ -126,10 +233,12 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         "-pix_fmt", "yuv420p",
         "-an",                       # 原始视频无音频，明确丢弃避免 aac 编码报错
         "-movflags", "+faststart",   # moov atom 放文件头，浏览器流式播放必需
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # 确保宽高为偶数
+        "-vf", vf_chain,             # 确保宽高为偶数，可选叠加置信度字幕
         out_path,
     ]
     ret = subprocess.run(cmd, capture_output=True)
+    if ass_path and os.path.exists(ass_path):
+        os.remove(ass_path)  # 字幕已经烧进视频画面了，临时ass文件不用留
     if ret.returncode != 0:
         err = ret.stderr.decode("utf-8", errors="replace")[-400:]
         print(f"    [ffmpeg错误] {err}")
@@ -210,8 +319,12 @@ def _process_one(task: dict) -> dict:
     cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
     cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + ".csv")  # 检测狗的 CSV
 
-    ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0) if (cam1_mp4 and has_ffmpeg) else False
-    ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0) if (cam2_mp4 and has_ffmpeg) else False
+    windows1 = task.get("windows1")  # cam1自己的imu1逐窗口置信度（可能为空=没有对应_infer.json）
+    windows2 = task.get("windows2")  # cam2自己的imu2逐窗口置信度
+    ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0,
+                       windows=windows1, label_text="IMU1") if (cam1_mp4 and has_ffmpeg) else False
+    ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0,
+                       windows=windows2, label_text="IMU2") if (cam2_mp4 and has_ffmpeg) else False
     ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
     if secondary_dir:
@@ -240,6 +353,10 @@ def main():
                              "both=两套分桶同时保留（conf_max找漏检更方便、conf_mean误报少更稳，"
                              "两个都想看的时候用这个，不用跑两遍）。both模式下视频只真正裁剪一次，"
                              "第二套分桶目录里放的是软链接，不会重复编码、不会占用双倍磁盘")
+    parser.add_argument("--no_conf_overlay", action="store_true",
+                        help="不烧录右上角实时置信度字幕（默认会烧，读取每路IMU自己的"
+                             "{stem}_infer.json里的逐窗口置信度）。传这个可以跳过读取/"
+                             "烧字幕的开销，适合只是想快速看效果、不需要置信度曲线的场景")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -290,6 +407,13 @@ def main():
         cam2_mp4 = find_video(stem2, args.video_dir)
         video_t0 = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
 
+        # 各自IMU自己的逐窗口置信度，用于烧录右上角实时置信度字幕；
+        # stem1/stem2各自有独立的_infer.json（两路IMU分别跑的推理），
+        # 不是检测触发的那一路也应该有自己的推理结果文件，除非那一路
+        # 压根没跑推理，这时优雅降级成不烧字幕（cut_clip里windows为空会跳过）
+        windows1 = load_windows_for_stem(args.infer_dir, stem1) if not args.no_conf_overlay else []
+        windows2 = load_windows_for_stem(args.infer_dir, stem2) if not args.no_conf_overlay else []
+
         for idx, seg in enumerate(segs, 1):
             t0_str = seg.get("start_ts", "") or ""
             t1_str = seg.get("end_ts",   "") or ""
@@ -325,6 +449,7 @@ def main():
                 "bin_label_mean": bin_label_mean, "secondary_dir": secondary_dir,
                 "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
+                "windows1": windows1, "windows2": windows2,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
                         "conf_mean": conf_mean, "conf_max": conf_max},
                 "csv_basename": csv_basename, "bin_label": bin_label,
