@@ -545,8 +545,14 @@ def main():
         both_note = ("（按conf_max分桶，实际裁剪落在 by_conf_max/；"
                       "by_conf_mean/ 下是同样这些片段按conf_mean重新分桶后的软链接视图）")
     print(f"\n共 {total} 段抓挠，分布在 {len(bin_logs)} 个置信度区间{both_note}")
+    print(f"  按 conf_max 分桶（by_conf_max/）：")
     for bl in sorted(bin_logs):
-        print(f"  clips_{bl}/: {len(bin_logs[bl])} 段")
+        print(f"    clips_{bl}/: {len(bin_logs[bl])} 段")
+
+    if is_both:
+        print(f"  按 conf_mean 分桶（by_conf_mean/）：")
+        for bl in sorted(bin_logs_mean):
+            print(f"    clips_{bl}/: {len(bin_logs_mean[bl])} 段")
 
 
 if __name__ == "__main__":
