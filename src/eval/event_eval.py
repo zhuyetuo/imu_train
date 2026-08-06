@@ -16,7 +16,7 @@
     --merge_gap 1 1.5 2 2.5 3
 
 原理:
-  1. 从已标注CSV按 dog_id 提取真实的目标行为连续片段（事件），单位转成秒。
+  1. 从已标注CSV按 record_id 提取真实的目标行为连续片段（事件），单位转成秒。
   2. 用给定模型对同一份数据做滑窗推理一次，取每个窗口 argmax 标签 + 该标签
      的置信度（predict_proba 最大值），逻辑与 infer_csv_scratch.py 一致。
   3. 先打印"窗口级置信度分布"：预测为 target_label 的窗口里，有多少落在
@@ -55,7 +55,7 @@ except ImportError:
 ACC_CANDIDATES  = [["acc_x", "acc_y", "acc_z"], ["AccX", "AccY", "AccZ"], ["AX", "AY", "AZ"], ["ax", "ay", "az"]]
 GYRO_CANDIDATES = [["gyro_x", "gyro_y", "gyro_z"], ["gyr_x", "gyr_y", "gyr_z"], ["GyroX", "GyroY", "GyroZ"], ["GX", "GY", "GZ"]]
 
-DOG_TIME_OFFSET = 1e7  # 每条狗的时间轴偏移量，避免跨狗事件在拼接后重叠
+RECORD_TIME_OFFSET = 1e7  # 每条狗的时间轴偏移量，避免跨狗事件在拼接后重叠
 
 
 class Tee:
@@ -120,7 +120,7 @@ def window_majority_labels(labels, starts, window_size):
     return [Counter(labels[s:s + window_size]).most_common(1)[0][0] for s in starts]
 
 
-def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
+def _process_one_record(record_id, i, df, acc_cols, gyro_cols, record_id_col, label_col,
                      model, classes, window_size, stride, hz, target_label,
                      has_timestamp=False, gap_tolerance=1.5):
     """单条狗的完整处理（真实事件提取 + 滑窗推理），供并行调用。
@@ -131,9 +131,9 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
     如果中间没有别的标注，会在数组里紧挨着，单靠标签数组分不出来。
     gap_tolerance: 相邻两行时间差超过 gap_tolerance/hz 秒就认为不是真连续
     （正常单帧间隔是1/hz，给1.5倍冗余容忍轻微的采样抖动）。"""
-    sub = df[df[dog_id_col] == dog_id].reset_index(drop=True)
+    sub = df[df[record_id_col] == record_id].reset_index(drop=True)
     labels = sub[label_col].values
-    offset = i * DOG_TIME_OFFSET
+    offset = i * RECORD_TIME_OFFSET
 
     break_before = None
     if has_timestamp:
@@ -149,7 +149,7 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
         if lbl == target_label:
             local_start, local_end = start / hz, end / hz
             gt_events.append((local_start + offset, local_end + offset))
-            gt_meta.append((dog_id, local_start, local_end,
+            gt_meta.append((record_id, local_start, local_end,
                             local_start + offset, local_end + offset))
 
     # break_before 强制切开的两个事件，边界值本来就是"行下标/hz"算出来的，
@@ -166,13 +166,13 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
         if cur_start <= prev_end:
             shift = (prev_end - cur_start) + EPS
             gt_events[i] = (cur_start + shift, cur_end + shift)
-            m_dog, m_ls, m_le, m_gs, m_ge = gt_meta[i]
-            gt_meta[i] = (m_dog, m_ls + shift, m_le + shift, m_gs + shift, m_ge + shift)
+            m_record, m_ls, m_le, m_gs, m_ge = gt_meta[i]
+            gt_meta[i] = (m_record, m_ls + shift, m_le + shift, m_gs + shift, m_ge + shift)
 
     data6 = np.concatenate(
         [sub[acc_cols].values, sub[gyro_cols].values], axis=1
     ).astype(np.float32)
-    pred_labels, pred_confs, starts = predict_dog(data6, model, classes, window_size, stride, hz)
+    pred_labels, pred_confs, starts = predict_record(data6, model, classes, window_size, stride, hz)
     target_confs = [c for lbl, c in zip(pred_labels, pred_confs) if lbl == target_label]
     y_true = window_majority_labels(labels, starts, window_size)
 
@@ -184,7 +184,7 @@ def _process_one_dog(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
     }
 
 
-def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
+def build_dataset(df, acc_cols, gyro_cols, record_ids, record_id_col, label_col,
                   model, classes, window_size, stride, hz, target_label,
                   show_progress=True, workers=-1, has_timestamp=False):
     """对全部狗跑一遍推理 + 提取真实事件，返回本次评估需要的全部中间数据。
@@ -196,27 +196,27 @@ def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
     gt_events_all = []
     gt_events_meta = []
     target_window_confs_all = []
-    dog_window_records = []
+    record_window_records = []
     y_true_windows = []
     y_pred_windows = []
 
     from joblib import Parallel, delayed
     from tqdm import tqdm
     n_jobs = workers if workers > 0 else -1
-    dog_iter = enumerate(dog_ids)
+    record_iter = enumerate(record_ids)
     if show_progress:
-        dog_iter = enumerate(tqdm(dog_ids, desc="逐狗推理", unit="狗"))
+        record_iter = enumerate(tqdm(record_ids, desc="逐条记录推理", unit="条"))
     results = Parallel(n_jobs=n_jobs, backend="loky")(
-        delayed(_process_one_dog)(dog_id, i, df, acc_cols, gyro_cols, dog_id_col, label_col,
+        delayed(_process_one_record)(record_id, i, df, acc_cols, gyro_cols, record_id_col, label_col,
                                   model, classes, window_size, stride, hz, target_label,
                                   has_timestamp=has_timestamp)
-        for i, dog_id in dog_iter
+        for i, record_id in record_iter
     )
 
     for r in results:
         gt_events_all.extend(r["gt_events"])
         gt_events_meta.extend(r["gt_meta"])
-        dog_window_records.append(r["window_record"])
+        record_window_records.append(r["window_record"])
         target_window_confs_all.extend(r["target_confs"])
         y_true_windows.extend(r["y_true"])
         y_pred_windows.extend(r["y_pred"])
@@ -230,13 +230,13 @@ def build_dataset(df, acc_cols, gyro_cols, dog_ids, dog_id_col, label_col,
         "gt_events_all": gt_events_all,
         "gt_events_meta": gt_events_meta,
         "target_window_confs_all": target_window_confs_all,
-        "dog_window_records": dog_window_records,
+        "record_window_records": record_window_records,
         "y_true_windows": y_true_windows,
         "y_pred_windows": y_pred_windows,
     }
 
 
-def predict_dog(data6, model, classes, window_size, stride, hz):
+def predict_record(data6, model, classes, window_size, stride, hz):
     """对单条狗的完整原始信号做滑窗推理，返回 (pred_labels, pred_confs, start_indices)。
     pred_confs 是每个窗口 argmax 类别自身的概率（与 infer_csv_scratch.py 语义一致）。"""
     X, starts = sliding_windows(data6, window_size, stride)
@@ -271,13 +271,13 @@ def build_project_lookup(json_dir, pattern="project-*.json"):
     return lookup
 
 
-def print_project_info(dog_id, project_lookup):
-    """按 dog_id（如 task496_imu1）反查并打印所属 project 文件 + task_id + video/csv 链接。
+def print_project_info(record_id, project_lookup):
+    """按 record_id（如 task496_imu1）反查并打印所属 project 文件 + task_id + video/csv 链接。
     project 下通常有很多个待标注文件，光有 project 编号定位不到具体是哪一条，
     必须带上 task_id（Label Studio Data Manager 里按这个搜索/筛选）。"""
-    tid = extract_task_id(dog_id)
+    tid = extract_task_id(record_id)
     if tid is None or tid not in project_lookup:
-        print(f"      [未找到 {dog_id} 对应的 project 信息]")
+        print(f"      [未找到 {record_id} 对应的 project 信息]")
         return
     fname, project_no, task = project_lookup[tid]
     inner_id = task.get("inner_id")
@@ -292,13 +292,13 @@ def print_project_info(dog_id, project_lookup):
 
 def find_merge_groups(gt_events_meta, det_events):
     """找出被同一个预测事件"吃进去"的多个真实事件（>=2个才算合并组）。
-    gt_events_meta: [(dog_id, local_start, local_end, global_start, global_end), ...]
+    gt_events_meta: [(record_id, local_start, local_end, global_start, global_end), ...]
     det_events: [(global_start, global_end), ...] 已按 merge_gap 合并后的预测事件
-    返回: [[(dog_id, local_start, local_end), ...], ...] 每个子列表是一组被合并的真实事件，按时间排序"""
+    返回: [[(record_id, local_start, local_end), ...], ...] 每个子列表是一组被合并的真实事件，按时间排序"""
     groups = []
     for det_start, det_end in det_events:
         hits = [
-            (dog_id, ls, le) for dog_id, ls, le, gs, ge in gt_events_meta
+            (record_id, ls, le) for record_id, ls, le, gs, ge in gt_events_meta
             if gs < det_end and ge > det_start  # 与预测事件有重叠
         ]
         if len(hits) >= 2:
@@ -307,19 +307,19 @@ def find_merge_groups(gt_events_meta, det_events):
     return groups
 
 
-def real_time_gap_seconds(dog_id, prev_end_local, cur_start_local, hz, dog_ts_map):
+def real_time_gap_seconds(record_id, prev_end_local, cur_start_local, hz, record_ts_map):
     """算两个local_sec之间的真实间隔（用timestamp列查出的实际经过时间），
     而不是直接拿local_sec相减。
 
     为什么不能直接相减：像"两次抓挠中间隔了5分钟但标注之间没有别的标注"
     这种情况，两段在CSV行序号上是紧挨着的，local_sec本身就是"行号/hz"算出来
     的，没法反映中间真实流逝的时间；而且这类事件在事件提取阶段被
-    _process_one_dog的break_before逻辑强制拆开后，为了不被wardmetrics库
+    _process_one_record的break_before逻辑强制拆开后，为了不被wardmetrics库
     自己的合并逻辑（首尾相接就合并）误伤，又加了一个可忽略不计(1e-6s)的
     边界错开——直接相减会算出接近0的"间隔"，完全掩盖了真实的时间跨度。
     这里改用timestamp列查两头的绝对时间戳，做真正有意义的差值；没有
     timestamp列时才退化为直接相减。"""
-    ts_series = dog_ts_map.get(dog_id)
+    ts_series = record_ts_map.get(record_id)
     if ts_series is None or len(ts_series) == 0:
         return cur_start_local - prev_end_local
 
@@ -338,10 +338,10 @@ def real_time_gap_seconds(dog_id, prev_end_local, cur_start_local, hz, dog_ts_ma
     return (t1 - t0).total_seconds()
 
 
-def local_sec_to_ts_str(dog_id, local_sec, hz, dog_ts_map):
+def local_sec_to_ts_str(record_id, local_sec, hz, record_ts_map):
     """把某条狗内部的相对秒数换算成 CSV 里的绝对时间戳字符串，供人工去原始CSV/视频里核对。
     没有 timestamp 列（旧数据）或越界时返回 None。"""
-    ts_series = dog_ts_map.get(dog_id)
+    ts_series = record_ts_map.get(record_id)
     if ts_series is None or len(ts_series) == 0:
         return None
     idx = int(round(local_sec * hz))
@@ -405,12 +405,12 @@ def pred_windows_to_segments(pred_labels, pred_confs, starts, window_size, hz, t
     return raw_segs
 
 
-def _flatten_records(dog_window_records, target_label):
-    """把 dog_window_records（687条狗，每条是 python list-of-str 的标签+置信度+起点）
+def _flatten_records(record_window_records, target_label):
+    """把 record_window_records（687条记录，每条是 python list-of-str 的标签+置信度+起点）
     转成几个大的 numpy 数组：starts/confs/hit 拼接成三个扁平数组，bounds 记录
     每条狗在扁平数组里的 [start_idx, end_idx) 区间，offsets 是每条狗的时间偏移。
 
-    这是为了给 run_grid 的多进程并行用。之前直接把 dog_window_records（687个
+    这是为了给 run_grid 的多进程并行用。之前直接把 record_window_records（687个
     python list，每个list里是几千个字符串）传给 joblib 的多进程worker，每次
     派发任务都要重新pickle这一大坨python对象，101个阈值重复101次，开销比省下
     的计算时间还大。改成先转成大的numpy数组，joblib/loky 对超过一定大小的
@@ -419,8 +419,8 @@ def _flatten_records(dog_window_records, target_label):
     线程之间根本不会并行，等于白跑。"""
     starts_parts, confs_parts, hit_parts = [], [], []
     bounds = [0]
-    offsets = np.empty(len(dog_window_records), dtype=np.float64)
-    for i, (pred_labels, pred_confs, starts, offset) in enumerate(dog_window_records):
+    offsets = np.empty(len(record_window_records), dtype=np.float64)
+    for i, (pred_labels, pred_confs, starts, offset) in enumerate(record_window_records):
         starts_parts.append(np.asarray(starts, dtype=np.int64))
         confs_parts.append(np.asarray(pred_confs, dtype=np.float32))
         hit_parts.append(np.asarray([lbl == target_label for lbl in pred_labels], dtype=bool))
@@ -467,7 +467,7 @@ def _segments_from_hits(hits, starts, window_size, hz, stride, label_mode):
 
 def _eval_one_threshold_flat(thr, mg_values, starts_flat, confs_flat, hit_flat, bounds, offsets,
                              gt_events_all, window_size, hz, stride, label_mode):
-    """run_grid 并行版用：接收扁平numpy数组而不是 dog_window_records，
+    """run_grid 并行版用：接收扁平numpy数组而不是 record_window_records，
     每条狗切片按阈值算命中区间、重建片段，再扫一遍 merge_gap。"""
     hits_over_thr = hit_flat & (confs_flat >= thr)
     raw_segs = []
@@ -499,13 +499,13 @@ def compute_f1e(detailed):
     return p, r, f1e
 
 
-def _eval_one_threshold(thr, mg_values, dog_window_records, gt_events_all,
+def _eval_one_threshold(thr, mg_values, record_window_records, gt_events_all,
                         target_label, window_size, hz, stride, label_mode):
     """单个置信度阈值下，扫完所有 merge_gap 取值，返回这一批结果行。
     按阈值拆成独立函数是为了给 run_grid 的多进程并行用（每个阈值互不依赖，
     重建预测片段+跑 wardmetrics 都是纯CPU计算，核多、狗多、事件多时并行收益明显）。"""
     raw_segs = []
-    for pred_labels, pred_confs, starts, offset in dog_window_records:
+    for pred_labels, pred_confs, starts, offset in record_window_records:
         segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
                                         hz, target_label, thr, stride, label_mode)
         raw_segs.extend((s + offset, e + offset) for s, e in segs)
@@ -518,7 +518,7 @@ def _eval_one_threshold(thr, mg_values, dog_window_records, gt_events_all,
     return rows
 
 
-def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
+def run_grid(thr_values, mg_values, record_window_records, gt_events_all,
              target_label, window_size, hz, stride=None, label_mode="majority",
              desc="网格搜索", show_progress=True, workers=1):
     """跑一遍 (置信度阈值 x merge_gap) 网格，返回结果列表
@@ -527,7 +527,7 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
 
     workers != 1 时用 joblib 的 loky（多进程）按阈值并行——纯Python循环受GIL
     限制，多线程根本无法并行、白搭；真正要加速必须用多进程绕开GIL。多进程的
-    代价是每次派发任务都要序列化数据传给子进程：如果直接传 dog_window_records
+    代价是每次派发任务都要序列化数据传给子进程：如果直接传 record_window_records
     （687个python list，每个list几千个字符串），101个阈值重复序列化101次，
     这个开销比省下的计算时间还大。所以先用 _flatten_records() 把数据转成几个
     大的numpy数组——joblib/loky 对超过阈值大小的numpy数组会自动用内存映射
@@ -537,7 +537,7 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
         from joblib import Parallel, delayed
         from tqdm import tqdm
         starts_flat, confs_flat, hit_flat, bounds, offsets = _flatten_records(
-            dog_window_records, target_label)
+            record_window_records, target_label)
         n_jobs = workers if workers > 0 else -1
         it = thr_values
         if show_progress:
@@ -557,7 +557,7 @@ def run_grid(thr_values, mg_values, dog_window_records, gt_events_all,
         from tqdm import tqdm
         it = tqdm(thr_values, desc=desc, unit="thr")
     for thr in it:
-        rows = _eval_one_threshold(thr, mg_values, dog_window_records, gt_events_all,
+        rows = _eval_one_threshold(thr, mg_values, record_window_records, gt_events_all,
                                    target_label, window_size, hz, stride, label_mode)
         results.extend(rows)
         if rows:
@@ -614,7 +614,7 @@ def main():
     ap.add_argument("--model", required=True, help="模型 .pkl 路径")
     ap.add_argument("--hz", type=int, default=16)
     ap.add_argument("--target_label", default="抓挠")
-    ap.add_argument("--dog_id_col", default="dog_id")
+    ap.add_argument("--record_id_col", default="record_id")
     ap.add_argument("--label_col", default="label")
     ap.add_argument("--merge_gap", type=float, nargs="+",
                      default=[1.0, 1.5, 2.0, 2.5, 3.0],
@@ -647,7 +647,7 @@ def main():
     ap.add_argument("--full_gap_step", type=float, default=0.1)
     ap.add_argument("--json_dir", default="",
                      help="Label Studio project-*.json 所在目录（可选）。传了的话，"
-                          "被合并事件组/逐条对应表会顺带打印每个 dog_id 对应的 project "
+                          "被合并事件组/逐条对应表会顺带打印每个 record_id 对应的 project "
                           "文件和 video/csv 链接，不用再单独跑 find_task_project.py")
     ap.add_argument("--log_file", default="",
                      help="可选：把完整输出（含逐条事件对应表）同时保存到这个文件，"
@@ -661,7 +661,7 @@ def main():
                           "（0.0625s=16Hz下1个采样点，是能做到的最细步长）。传了这个参数会跳过"
                           "正常的单步长完整分析，只输出步长对比汇总")
     ap.add_argument("--workers", type=int, default=-1,
-                     help="逐狗推理的并行进程数（默认-1=用全部CPU核）。特征提取是纯CPU计算，"
+                     help="逐条记录推理的并行进程数（默认-1=用全部CPU核）。特征提取是纯CPU计算，"
                           "多进程能真正利用多核；步长越密、狗越多，并行收益越明显")
     args = ap.parse_args()
 
@@ -700,15 +700,15 @@ def main():
     if acc_cols is None or gyro_cols is None:
         print(f"[错误] 找不到 acc/gyro 列: {list(df.columns)}")
         return
-    dog_ids = sorted(df[args.dog_id_col].unique())
+    record_ids = sorted(df[args.record_id_col].unique())
 
     # ── 可选的绝对时间戳列（labelstudio_to_custom.py 新版才有，旧数据没有则优雅降级）──
     has_ts = "timestamp" in df.columns
-    dog_ts_map = {}
+    record_ts_map = {}
     if has_ts:
         ts_all = pd.to_datetime(df["timestamp"], errors="coerce")
-        for dog_id in dog_ids:
-            dog_ts_map[dog_id] = ts_all[df[args.dog_id_col] == dog_id].reset_index(drop=True)
+        for record_id in record_ids:
+            record_ts_map[record_id] = ts_all[df[args.record_id_col] == record_id].reset_index(drop=True)
     else:
         print("[提示] CSV 里没有 timestamp 列（用旧版 labelstudio_to_custom.py 生成的），"
               "逐条对应表将只显示相对秒数，不显示绝对时间戳；"
@@ -722,14 +722,14 @@ def main():
         for si, cand_stride_s in enumerate(args.stride_compare, 1):
             cand_stride = max(1, round(cand_stride_s * args.hz))
             print(f"\n[{si}/{len(args.stride_compare)}] 步长={cand_stride_s}s（{cand_stride}个采样点）推理中...")
-            ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
+            ds = build_dataset(df, acc_cols, gyro_cols, record_ids, args.record_id_col, args.label_col,
                                model, classes, window_size, cand_stride, args.hz, args.target_label,
                                workers=args.workers, has_timestamp=has_ts)
             if not ds["gt_events_all"]:
                 print("  [警告] 没有真实事件，跳过")
                 continue
-            n_windows = sum(len(r[0]) for r in ds["dog_window_records"])
-            grid_results = run_grid(args.confidence_threshold, args.merge_gap, ds["dog_window_records"],
+            n_windows = sum(len(r[0]) for r in ds["record_window_records"])
+            grid_results = run_grid(args.confidence_threshold, args.merge_gap, ds["record_window_records"],
                                     ds["gt_events_all"], args.target_label, window_size, args.hz,
                                     stride=cand_stride, label_mode=label_mode,
                                     desc=f"  阈值×gap网格(stride={cand_stride_s}s)",
@@ -773,13 +773,13 @@ def main():
         return
 
     # ── 单一步长模式（默认，跟原来一样）──────────────────────────────────
-    ds = build_dataset(df, acc_cols, gyro_cols, dog_ids, args.dog_id_col, args.label_col,
+    ds = build_dataset(df, acc_cols, gyro_cols, record_ids, args.record_id_col, args.label_col,
                        model, classes, window_size, stride, args.hz, args.target_label,
                        workers=args.workers, has_timestamp=has_ts)
     gt_events_all = ds["gt_events_all"]
     gt_events_meta = ds["gt_events_meta"]
     target_window_confs_all = ds["target_window_confs_all"]
-    dog_window_records = ds["dog_window_records"]
+    record_window_records = ds["record_window_records"]
     y_true_windows = ds["y_true_windows"]
     y_pred_windows = ds["y_pred_windows"]
 
@@ -836,7 +836,7 @@ def main():
         print(f"\n[全局网格] thr∈[{args.full_thr_start},{args.full_thr_stop}]步长{args.full_thr_step} "
               f"× gap∈[{args.full_gap_start},{args.full_gap_stop}]步长{args.full_gap_step}"
               f"，共 {len(full_thr)}×{len(full_mg)}={len(full_thr)*len(full_mg)} 组合")
-        full_results = run_grid(full_thr, full_mg, dog_window_records, gt_events_all,
+        full_results = run_grid(full_thr, full_mg, record_window_records, gt_events_all,
                                 args.target_label, window_size, args.hz,
                                 stride=stride, label_mode=label_mode, desc="全局网格搜索",
                                 workers=args.workers)
@@ -845,7 +845,7 @@ def main():
                          f"全局网格搜索 Top 20（{len(full_results)} 组合中选出）", top_n=20)
     else:
         # ── 第一阶段：粗网格搜索 ────────────────────────────────────────────
-        coarse_results = run_grid(args.confidence_threshold, args.merge_gap, dog_window_records,
+        coarse_results = run_grid(args.confidence_threshold, args.merge_gap, record_window_records,
                                   gt_events_all, args.target_label, window_size, args.hz,
                                   stride=stride, label_mode=label_mode, desc="粗网格搜索",
                                   workers=args.workers)
@@ -871,7 +871,7 @@ def main():
             fine_thr = [round(thr_lo + i * args.refine_thr_step, 4) for i in range(n_thr)]
             fine_mg = [round(mg_lo + i * args.refine_gap_step, 4) for i in range(n_mg)]
 
-            fine_results = run_grid(fine_thr, fine_mg, dog_window_records,
+            fine_results = run_grid(fine_thr, fine_mg, record_window_records,
                                     gt_events_all, args.target_label, window_size, args.hz,
                                     stride=stride, label_mode=label_mode, desc="精细网格搜索",
                                     workers=args.workers)
@@ -895,7 +895,7 @@ def main():
     # ── 推荐配置下，重新算一遍拿到完整明细（C/D/F/FM/M/I' 等），供下面拆解和逐条表复用 ──
     best_thr, best_mg = best[0], best[1]
     raw_segs = []
-    for pred_labels, pred_confs, starts, offset in dog_window_records:
+    for pred_labels, pred_confs, starts, offset in record_window_records:
         segs = pred_windows_to_segments(pred_labels, pred_confs, starts, window_size,
                                         args.hz, args.target_label, best_thr, stride, label_mode)
         raw_segs.extend((s + offset, e + offset) for s, e in segs)
@@ -961,51 +961,51 @@ def main():
         emoji, name = SCORE_INFO.get(score, ("", score))
         return f"{emoji} {score}={name}" if emoji else f"{score}"
 
-    # 把纯误报（I'）也定位到所属 dog_id + 局部时间，混入同一份逐条表里一起按时间/dog展示
-    insertion_rows = []  # (dog_id, local_start, local_end, global_start)
+    # 把纯误报（I'）也定位到所属 record_id + 局部时间，混入同一份逐条表里一起按时间/记录展示
+    insertion_rows = []  # (record_id, local_start, local_end, global_start)
     for (ds, de), dscore in zip(det_events_best, det_scores_best):
         if dscore == "I'":
-            dog_idx = int(ds // DOG_TIME_OFFSET)
-            d_id = dog_ids[dog_idx] if 0 <= dog_idx < len(dog_ids) else f"(未知,offset={ds:.0f})"
-            offset = dog_idx * DOG_TIME_OFFSET
+            record_idx = int(ds // RECORD_TIME_OFFSET)
+            d_id = record_ids[record_idx] if 0 <= record_idx < len(record_ids) else f"(未知,offset={ds:.0f})"
+            offset = record_idx * RECORD_TIME_OFFSET
             insertion_rows.append((d_id, ds - offset, de - offset, ds))
 
-    all_rows = [(dog_id, ls, gs, "event", score, le, ge)
-                for (dog_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best)] + \
-               [(dog_id, ls, gs, "insertion", "I'", le, None)
-                for dog_id, ls, le, gs in insertion_rows]
-    all_rows.sort(key=lambda r: r[2])  # 按全局时间排（天然按 dog 分块）
+    all_rows = [(record_id, ls, gs, "event", score, le, ge)
+                for (record_id, ls, le, gs, ge), score in zip(gt_events_meta, gt_scores_best)] + \
+               [(record_id, ls, gs, "insertion", "I'", le, None)
+                for record_id, ls, le, gs in insertion_rows]
+    all_rows.sort(key=lambda r: r[2])  # 按全局时间排（天然按记录分块）
 
     print(f"\n{'='*90}")
     print(f"  全部 {n_gt} 个真实事件 + {len(insertion_rows)} 个纯误报逐条对应表（供逐条去 Label Studio 复查）")
     print(f"{'='*90}")
     print("  图例: " + "  ".join(f"{v[0]} {k}={v[1]}" for k, v in SCORE_INFO.items()))
-    last_dog_id = None
-    for dog_id, ls, gs, kind, score, le, ge in all_rows:
-        if dog_id != last_dog_id:
+    last_record_id = None
+    for record_id, ls, gs, kind, score, le, ge in all_rows:
+        if record_id != last_record_id:
             print(f"\n  {'-'*86}")
-            print(f"  dog_id={dog_id}")
+            print(f"  record_id={record_id}")
             if project_lookup is not None:
-                print_project_info(dog_id, project_lookup)
-            last_dog_id = dog_id
+                print_project_info(record_id, project_lookup)
+            last_record_id = record_id
         if kind == "event":
             overlaps = [(ds2 - (gs - ls), de2 - (ge - le)) for ds2, de2 in det_events_best if ds2 < ge and de2 > gs]
             overlap_str = ", ".join(f"{ds2:.2f}s-{de2:.2f}s" for ds2, de2 in overlaps) if overlaps else "(none)"
             print(f"    [{score_tag(score)}]  real:{ls:>8.2f}s-{le:>8.2f}s   pred:{overlap_str}")
-            real_ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
-            real_ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            real_ts_start = local_sec_to_ts_str(record_id, ls, args.hz, record_ts_map)
+            real_ts_end = local_sec_to_ts_str(record_id, le, args.hz, record_ts_map)
             if real_ts_start is not None:
                 print(f"        真实标注时间戳: {real_ts_start} → {real_ts_end}")
             for ds2, de2 in overlaps:
-                pred_ts_start = local_sec_to_ts_str(dog_id, ds2, args.hz, dog_ts_map)
-                pred_ts_end = local_sec_to_ts_str(dog_id, de2, args.hz, dog_ts_map)
+                pred_ts_start = local_sec_to_ts_str(record_id, ds2, args.hz, record_ts_map)
+                pred_ts_end = local_sec_to_ts_str(record_id, de2, args.hz, record_ts_map)
                 if pred_ts_start is not None:
                     print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
         else:
             print(f"    [{score_tag(score)}]  real:(none)              pred:{ls:.2f}s-{le:.2f}s"
                   f"  ← 模型预测但没有对应真实事件，建议核实是不是漏标")
-            pred_ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
-            pred_ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+            pred_ts_start = local_sec_to_ts_str(record_id, ls, args.hz, record_ts_map)
+            pred_ts_end = local_sec_to_ts_str(record_id, le, args.hz, record_ts_map)
             if pred_ts_start is not None:
                 print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
 
@@ -1019,18 +1019,18 @@ def main():
         print("  没有发现被合并的事件组")
     else:
         for gi, group in enumerate(merge_groups, 1):
-            dog_id = group[0][0]
-            print(f"  组{gi}  dog_id={dog_id}  共{len(group)}个真实事件被合并:")
+            record_id = group[0][0]
+            print(f"  组{gi}  record_id={record_id}  共{len(group)}个真实事件被合并:")
             if project_lookup is not None:
-                print_project_info(dog_id, project_lookup)
-            for j, (dog_id, ls, le) in enumerate(group):
+                print_project_info(record_id, project_lookup)
+            for j, (record_id, ls, le) in enumerate(group):
                 gap_str = ""
                 if j > 0:
-                    gap = real_time_gap_seconds(dog_id, group[j - 1][2], ls, args.hz, dog_ts_map)
+                    gap = real_time_gap_seconds(record_id, group[j - 1][2], ls, args.hz, record_ts_map)
                     gap_str = f"    (距上一事件真实间隔 {gap:.2f}s)"
                 print(f"      {ls:>8.2f}s → {le:>8.2f}s{gap_str}")
-                ts_start = local_sec_to_ts_str(dog_id, ls, args.hz, dog_ts_map)
-                ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
+                ts_start = local_sec_to_ts_str(record_id, ls, args.hz, record_ts_map)
+                ts_end = local_sec_to_ts_str(record_id, le, args.hz, record_ts_map)
                 if ts_start is not None:
                     print(f"        绝对时间戳: {ts_start} → {ts_end}")
         print(f"""
@@ -1065,14 +1065,14 @@ def main():
         if extra_note:
             print(extra_note)
 
-    d_durations = [le - ls for (dog_id, ls, le, gs, ge), score
+    d_durations = [le - ls for (record_id, ls, le, gs, ge), score
                    in zip(gt_events_meta, gt_scores_best) if score == "D"]
     print_bucket_stats(
         "漏检(D)事件按时长分桶统计", d_durations, DUR_BUCKETS, "没有漏检事件",
         "  （如果<1s/1-3s短片段占比明显偏高，说明模型大概率是被短促、信号弱的片段难住了；"
         "如果长短都有、分布均匀，更可能是真的没学好，不是片段太短的问题）")
 
-    i_durations = [le - ls for dog_id, ls, le, gs in insertion_rows]
+    i_durations = [le - ls for record_id, ls, le, gs in insertion_rows]
     print_bucket_stats(
         "纯误报(I')按时长分桶统计", i_durations, DUR_BUCKETS, "没有纯误报",
         "  （如果<1s/1-3s短片段占多数，很可能是零星的高置信度噪声窗口，"
@@ -1081,7 +1081,7 @@ def main():
         "更值得怀疑模型是不是把某个相似动作（比如舔身体/甩身体）学成了抓挠，"
         "建议去上面逐条表里点开对应project核实是不是漏标了抓挠，或者模型误判成了别的相似行为）")
 
-    merge_gaps = [real_time_gap_seconds(group[j][0], group[j - 1][2], group[j][1], args.hz, dog_ts_map)
+    merge_gaps = [real_time_gap_seconds(group[j][0], group[j - 1][2], group[j][1], args.hz, record_ts_map)
                   for group in merge_groups for j in range(1, len(group))]
     close5 = sum(1 for g in merge_gaps if g < 5) if merge_gaps else 0
     print_bucket_stats(

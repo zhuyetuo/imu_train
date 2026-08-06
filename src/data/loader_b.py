@@ -41,7 +41,7 @@ def load_dataset_b(csv_path: str) -> tuple:
     for dog_id in dog_ids:
         sub = df[df[DOG_ID_COL] == dog_id]
         records.append({
-            "dog_id": f"B_{dog_id}",   # 加前缀避免与数据集A的ID冲突
+            "record_id": f"B_{dog_id}",   # 加前缀避免与数据集A的ID冲突
             "data": sub[COLLAR_COLS].values.astype(np.float32),
             "labels": sub[LABEL_COL].values,
         })

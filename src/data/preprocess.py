@@ -105,11 +105,11 @@ def sliding_window(data, labels, window_size, stride, keep_label_set=None,
             np.array(y_seg, dtype=np.int64))
 
 
-def split_by_dog(records, train_r, val_r, seed):
+def split_by_record(records, train_r, val_r, seed):
     rng = np.random.default_rng(seed)
-    dog_ids = [r["dog_id"] for r in records]
-    rng.shuffle(dog_ids)
-    n = len(dog_ids)
+    record_ids = [r["record_id"] for r in records]
+    rng.shuffle(record_ids)
+    n = len(record_ids)
     n_train = int(n * train_r)
     n_val = int(n * val_r)
     # 数据集较小时保证 val 和 test 各至少 1 个 ID
@@ -117,9 +117,9 @@ def split_by_dog(records, train_r, val_r, seed):
         n_val = 1
     if n - n_train - n_val == 0 and n >= 3:
         n_train = max(1, n_train - 1)
-    return (set(dog_ids[:n_train]),
-            set(dog_ids[n_train:n_train + n_val]),
-            set(dog_ids[n_train + n_val:]))
+    return (set(record_ids[:n_train]),
+            set(record_ids[n_train:n_train + n_val]),
+            set(record_ids[n_train + n_val:]))
 
 
 def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_r, seed):
@@ -243,13 +243,13 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
             np.concatenate(y_seq_all), np.concatenate(y_seg_all))
 
 
-def process_split(records, dog_ids_set, window_size, stride, le, keep_label_set=None,
+def process_split(records, record_ids_set, window_size, stride, le, keep_label_set=None,
                   use_gravity_align=True, label_mode="majority"):
     X_all, y_all, y_seq_all, y_seg_all = [], [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     next_seg_id = 0
     for r in records:
-        if r["dog_id"] not in dog_ids_set:
+        if r["record_id"] not in record_ids_set:
             continue
         data, labels = r["data"], r["labels"]
         mask = np.isin(labels, list(keep_label_set)) if keep_label_set else np.ones(len(labels), bool)
@@ -366,7 +366,7 @@ def main(args):
 
     test_r_display = max(0.0, round(1 - train_r - val_r, 6))  # 避免浮点误差显示成 -0%
     if strategy == "subject":
-        train_ids, val_ids, test_ids = split_by_dog(records, train_r, val_r, seed)
+        train_ids, val_ids, test_ids = split_by_record(records, train_r, val_r, seed)
         print(f"[preprocess] 按 subject 划分: train={len(train_ids)}, val={len(val_ids)}, test={len(test_ids)}")
     elif strategy == "label_concat":
         train_ids = val_ids = test_ids = None
@@ -405,7 +405,7 @@ def main(args):
              X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
         else:
             # 先把所有窗口提取出来，再按连续片段分组划分（避免高度重叠窗口跨集合泄漏）
-            all_ids = set(r["dog_id"] for r in ds_records)
+            all_ids = set(r["record_id"] for r in ds_records)
             X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
@@ -424,9 +424,9 @@ def main(args):
             "train_ratio": str(train_r),
             "val_ratio":   str(val_r),
             "test_ratio":  str(round(1.0 - train_r - val_r, 6)),
-            "train_dog_ids": str(list(train_ids)) if train_ids is not None else "[]",
-            "val_dog_ids":   str(list(val_ids))   if val_ids   is not None else "[]",
-            "test_dog_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
+            "train_record_ids": str(list(train_ids)) if train_ids is not None else "[]",
+            "val_record_ids":   str(list(val_ids))   if val_ids   is not None else "[]",
+            "test_record_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
             "dataset": args.dataset,
             "gravity_aligned": str(not args.no_gravity_align),
         }

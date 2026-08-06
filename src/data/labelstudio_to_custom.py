@@ -6,7 +6,11 @@ Label Studio 导出格式（时间序列标注）:
   annotations 里包含多个时间段 + 标签（timeserieslabels）。
 
 输出格式（与 loader_custom.py 兼容）:
-  subject_id, label, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
+  record_id, label, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z
+
+  注：record_id 不是真实的狗ID，是"task编号+传感器路数"拼出来的分组键
+  （比如 task496_imu1），一次录制/一路传感器算一个record_id，跟实际有
+  多少条不同的狗没有直接对应关系，只是用来做数据集划分时的分组单位。
 
 用法:
   # CSV 从 URL 下载（需要设备在线）
@@ -139,7 +143,7 @@ def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
     rows = []
     for i in range(len(seg_df)):
         rows.append({
-            "dog_id": subject_id,
+            "record_id": subject_id,
             "label":  label,
             "timestamp": ts[i],
             "acc_x":  acc[i, 0], "acc_y": acc[i, 1], "acc_z": acc[i, 2],
@@ -225,9 +229,9 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
 
     out = pd.DataFrame(rows)
     # 标注段是按 Label Studio 导出顺序拼接的，不一定按时间先后，
-    # 必须按 (dog_id, timestamp) 重新排序，否则同一个 dog_id 内部的
+    # 必须按 (record_id, timestamp) 重新排序，否则同一个 record_id 内部的
     # "局部秒数"跟真实时间顺序对不上（窗口切分、事件时间戳换算都会错）
-    out = out.sort_values(["dog_id", "timestamp"], kind="stable").reset_index(drop=True)
+    out = out.sort_values(["record_id", "timestamp"], kind="stable").reset_index(drop=True)
     return out
 
 
@@ -262,7 +266,7 @@ def main():
 
     print(f"\n── 汇总 ──")
     print(f"总行数: {len(out_df)}")
-    print(f"subject 数: {out_df['dog_id'].nunique()}")
+    print(f"subject 数: {out_df['record_id'].nunique()}")
     counts = out_df["label"].value_counts()
     for label, cnt in counts.items():
         print(f"  {label}: {cnt} 行")

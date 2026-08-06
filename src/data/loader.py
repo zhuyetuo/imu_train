@@ -21,7 +21,7 @@ DOG_ID_COL = "DogID"
 def load_dataset_files(csv_dir: str, dog_info_path: str = None) -> tuple:
     """
     读取大 CSV，按 DogID 拆分，返回每条狗的记录列表。
-    每条记录: {dog_id, data (np.float32), labels (np.ndarray)}
+    每条记录: {record_id, data (np.float32), labels (np.ndarray)}
     """
     csv_files = sorted(glob.glob(os.path.join(csv_dir, "**/*.csv"), recursive=True))
     if not csv_files:
@@ -48,7 +48,7 @@ def load_dataset_files(csv_dir: str, dog_info_path: str = None) -> tuple:
     for dog_id in dog_ids:
         sub = df[df[DOG_ID_COL] == dog_id]
         records.append({
-            "dog_id": str(dog_id),
+            "record_id": str(dog_id),
             "data": sub[COLLAR_COLS].values.astype(np.float32),
             "labels": sub[LABEL_COL].values,
         })

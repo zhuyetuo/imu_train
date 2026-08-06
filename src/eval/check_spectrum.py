@@ -4,8 +4,8 @@
 两种模式：
 
 1. 已标注数据模式 --labeled_csv（推荐先跑这个，标签是真值，不受模型误判干扰）
-   读取 loader_custom.py 同格式的合并CSV（dog_id/label/acc_x.../gyr_z 逐行标签），
-   按 dog_id 内连续同标签片段切分，按标签分组统计频谱。
+   读取 loader_custom.py 同格式的合并CSV（record_id/label/acc_x.../gyr_z 逐行标签），
+   按 record_id 内连续同标签片段切分，按标签分组统计频谱。
 
      python src/eval/check_spectrum.py \\
        --labeled_csv data/raw_custom/2026_7_30/merged_2026_7_30.csv --hz 16
@@ -136,7 +136,7 @@ def run_labeled_mode(args):
     df = pd.read_csv(args.labeled_csv)
     df.columns = [c.strip().lstrip("﻿") for c in df.columns]
 
-    missing = [c for c in [args.dog_id_col, args.label_col] if c not in df.columns]
+    missing = [c for c in [args.record_id_col, args.label_col] if c not in df.columns]
     if missing:
         print(f"[错误] CSV 缺少列: {missing}，现有列: {list(df.columns)}")
         return
@@ -151,7 +151,7 @@ def run_labeled_mode(args):
     group_edge_ratios = {}  # label -> {ch_name: [ratios]}
     n_segs_total = 0
 
-    for dog_id, sub in df.groupby(args.dog_id_col):
+    for record_id, sub in df.groupby(args.record_id_col):
         labels = sub[args.label_col].values
         segs = find_contiguous_segments(labels, min_len)
         for start, end, label in segs:
@@ -248,12 +248,12 @@ def main():
     ap = argparse.ArgumentParser(description="检查真实数据频谱，评估混叠风险")
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--labeled_csv", default=None,
-                       help="已标注数据模式：合并CSV路径（含 dog_id/label/acc_x.../gyr_z 逐行标签）")
+                       help="已标注数据模式：合并CSV路径（含 record_id/label/acc_x.../gyr_z 逐行标签）")
     mode.add_argument("--csv", nargs="+", default=None,
                        help="推理预测数据模式：clip CSV 路径或 glob 模式（可多个）")
     ap.add_argument("--hz", type=int, default=16)
     ap.add_argument("--label", default="", help="推理模式下仅用于打印标题")
-    ap.add_argument("--dog_id_col", default="dog_id", help="标注模式：狗ID列名")
+    ap.add_argument("--record_id_col", default="record_id", help="标注模式：记录ID列名（不是真实狗ID，是task+传感器拼出来的分组键）")
     ap.add_argument("--label_col", default="label", help="标注模式：标签列名")
     ap.add_argument("--min_seg_s", type=float, default=2.0,
                      help="标注模式：连续同标签片段最短秒数，短于此长度的片段丢弃（默认2秒）")
