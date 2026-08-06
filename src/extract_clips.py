@@ -133,15 +133,29 @@ Format: Layer, Start, End, Style, Text
 
 
 def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_duration: float,
+                        event_start_abs: float, event_end_abs: float,
                         out_ass_path: str, label_text: str, target_label: str = "抓挠") -> bool:
     """把某一路IMU的逐窗口置信度，转成跟裁剪后视频时间轴对齐的ASS字幕文件，
     烧录到右上角(Alignment=9)。
 
+    只在真正的事件时间范围[event_start_abs, event_end_abs]内显示字幕——
+    clip本身前后会用context_s多留一段缓冲（给人看前因后果），但那段缓冲不是
+    事件本身，缓冲区间里模型的真实置信度往往偏低，如果整段clip全程都显示
+    数字，容易让人误以为缓冲区间也是"检测到抓挠"的一部分，所以缓冲段不烧
+    字幕，只在真实事件区间内显示，跟真实标注/检测范围严格对应。
+
     时间换算：cut_clip()里视频用 -ss rel_start 从原始视频（未裁剪）的
     rel_start秒处开始截取，输出clip自己的0点对应原始视频的rel_start秒。
-    某个窗口的绝对时间戳ts，先换算成"原始视频相对秒数" = ts_abs - video_t0，
-    再减掉rel_start，就是这个窗口在裁剪后clip里的时间点。
+    某个时间点的绝对秒数，先换算成"原始视频相对秒数" = abs_sec - video_t0，
+    再减掉rel_start，就是这个时间点在裁剪后clip里的位置。
     """
+    event_rel_start = (event_start_abs - video_t0) - rel_start
+    event_rel_end   = (event_end_abs   - video_t0) - rel_start
+    event_rel_start = max(0.0, min(event_rel_start, clip_duration))
+    event_rel_end   = max(0.0, min(event_rel_end,   clip_duration))
+    if event_rel_end <= event_rel_start:
+        return False
+
     events = []
     filtered = []
     for w in windows:
@@ -150,7 +164,9 @@ def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_d
             continue
         abs_sec = ts_to_sec(ts_str)
         rel_sec = (abs_sec - video_t0) - rel_start
-        if -1.0 <= rel_sec <= clip_duration + 1.0:
+        # 只保留落在真实事件时间范围内的窗口（留一点点容差，覆盖窗口本身
+        # 跨越事件边界的情况，避免边界上刚好差一帧就整个不显示）
+        if (event_rel_start - 0.5) <= rel_sec <= (event_rel_end + 0.5):
             conf = w.get("probs", {}).get(target_label)
             if conf is None:
                 conf = w.get("conf", 0.0) if w.get("label") == target_label else 0.0
@@ -161,9 +177,9 @@ def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_d
 
     for i, (t0, conf) in enumerate(filtered):
         t1 = filtered[i + 1][0] if i + 1 < len(filtered) else t0 + 0.5
-        t0c = max(0.0, min(t0, clip_duration))
-        t1c = max(t0c + 0.02, min(t1, clip_duration))
-        if t0c >= clip_duration:
+        t0c = max(event_rel_start, min(t0, event_rel_end))
+        t1c = max(t0c + 0.02, min(t1, event_rel_end))
+        if t0c >= event_rel_end:
             continue
         text = f"{label_text} {target_label}:{conf:.2f}"
         events.append(f"Dialogue: 0,{_ass_time(t0c)},{_ass_time(t1c)},conf,{text}")
@@ -210,7 +226,8 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
     ass_path = None
     if windows:
         ass_path = out_path + ".ass"
-        ok_sub = build_conf_subtitle(windows, video_t0, rel_start, duration, ass_path, label_text)
+        ok_sub = build_conf_subtitle(windows, video_t0, rel_start, duration,
+                                     start_abs, end_abs, ass_path, label_text)
         if ok_sub:
             # subtitles滤镜的路径里冒号/反斜杠有特殊含义，需要转义；
             # 单引号包住整个路径，路径本身的单引号也要转义（正常路径不会有，防御一下）
