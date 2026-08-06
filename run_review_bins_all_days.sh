@@ -142,24 +142,37 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
 fi
 
 # ── 生成 Label Studio 复查任务 ────────────────────────────
+# BIN_BY=both 时，clips_*/ 分别在 out_dir/by_conf_max/ 和 out_dir/by_conf_mean/
+# 两个子目录下（extract_clips.py --bin_by both 的输出结构），不再直接在 out_dir
+# 下面，所以要分别对这两个子目录各生成一份 labelstudio_review.json；
+# 单一分桶模式(conf_max/conf_mean)行为不变，还是 out_dir 下一份。
 echo ""
 echo "▶ 生成 Label Studio 复查任务..."
 
+video_prefix_arg=""
+[[ -n "$LS_VIDEO_URL_PREFIX" ]] && video_prefix_arg="--video_url_prefix $LS_VIDEO_URL_PREFIX"
+
 for day in "${days[@]}"; do
     out_dir="$RESULT_ROOT/$day"
-    ls_json="$out_dir/labelstudio_review.json"
 
-    video_prefix_arg=""
-    [[ -n "$LS_VIDEO_URL_PREFIX" ]] && video_prefix_arg="--video_url_prefix $LS_VIDEO_URL_PREFIX"
-    python src/review_to_labelstudio.py \
-        --infer_dir "$out_dir" \
-        --output "$ls_json" \
-        --csv_url_prefix "$LS_URL_PREFIX" \
-        $video_prefix_arg \
-        --use_clips \
-        --mode "$LS_MODE"
+    if [[ "$BIN_BY" == "both" ]]; then
+        clip_subdirs=("by_conf_max" "by_conf_mean")
+    else
+        clip_subdirs=("")
+    fi
 
-    echo "  $day → $ls_json"
+    for sub in "${clip_subdirs[@]}"; do
+        scan_dir="$out_dir${sub:+/$sub}"
+        ls_json="$scan_dir/labelstudio_review.json"
+        python src/review_to_labelstudio.py \
+            --infer_dir "$scan_dir" \
+            --output "$ls_json" \
+            --csv_url_prefix "$LS_URL_PREFIX" \
+            $video_prefix_arg \
+            --use_clips \
+            --mode "$LS_MODE"
+        echo "  $day${sub:+ [$sub]} → $ls_json"
+    done
 done
 
 # ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
@@ -182,6 +195,14 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
 
     for day in "${days[@]}"; do
         out_dir="$RESULT_ROOT/$day"
+        # BIN_BY=both 时只扫 by_conf_max/（canonical，实际文件所在地），
+        # by_conf_mean/ 下都是指向同一批文件的软链接，同名文件复制一次就够，
+        # 扫两遍只会重复拷贝相同内容、把 n_copied 算重复。
+        if [[ "$BIN_BY" == "both" ]]; then
+            clips_root="$out_dir/by_conf_max"
+        else
+            clips_root="$out_dir"
+        fi
         # clips_*/ 里的 CSV → MEDIA_DIR/，MP4 → MEDIA_DIR/transcoded/
         while IFS= read -r -d '' f; do
             ext="${f##*.}"
@@ -190,7 +211,7 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
             else
                 _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
             fi
-        done < <(find "$out_dir"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+        done < <(find "$clips_root"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
     done
     echo "  新复制: $n_copied 个，已存在跳过: $n_skip 个"
 fi
@@ -221,7 +242,13 @@ echo "  ────────────────"
 echo "  合计: $total_files 个文件，$total_scratch 段抓挠"
 echo ""
 echo "Label Studio 导入方式:"
-echo "  每个日期目录下的 labelstudio_review.json 可直接导入 Label Studio"
+if [[ "$BIN_BY" == "both" ]]; then
+    echo "  BIN_BY=both：每个日期目录下有两份，分别导入："
+    echo "    <日期>/by_conf_max/labelstudio_review.json"
+    echo "    <日期>/by_conf_mean/labelstudio_review.json"
+else
+    echo "  每个日期目录下的 labelstudio_review.json 可直接导入 Label Studio"
+fi
 echo "  Label Studio → Import → 选择 JSON 文件"
 echo ""
 echo "完成！结果目录: $RESULT_ROOT"
