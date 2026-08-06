@@ -332,9 +332,17 @@ def _process_one(task: dict) -> dict:
     pad_end   = end_sec + args.context_s
 
     detected_stem = task["detected_stem"]
-    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + ".mp4")
-    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + ".mp4")
-    cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + ".csv")  # 检测狗的 CSV
+    # run_tag（一般是RESULT_ROOT的名字，比如"infer_result_majority_syn"）拼进
+    # 文件名末尾：不同模型/不同次运行的推理结果，文件名本来只由"CSV名+第几段+
+    # 起止时间"决定，如果两次运行检测到时间重叠的事件，文件名会完全一样，
+    # 复制到共享的Nginx媒体目录时后一次会静默覆盖前一次，Label Studio里的
+    # 复查任务链接的还是旧文件名但内容已经被换掉，数据会错乱。加这个标签
+    # 保证跨运行文件名互不冲突，而且是确定性的、能看出源头，不用随机UUID
+    # （UUID虽然也能保证唯一，但看不出是哪次运行产出的，出问题不好排查）。
+    run_suffix = f"_{args.run_tag}" if args.run_tag else ""
+    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + suffix + run_suffix + ".mp4")
+    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + suffix + run_suffix + ".mp4")
+    cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + run_suffix + ".csv")  # 检测狗的 CSV
 
     windows1 = task.get("windows1")  # cam1自己的imu1逐窗口置信度（可能为空=没有对应_infer.json）
     windows2 = task.get("windows2")  # cam2自己的imu2逐窗口置信度
@@ -374,6 +382,14 @@ def main():
                         help="不烧录右上角实时置信度字幕（默认会烧，读取每路IMU自己的"
                              "{stem}_infer.json里的逐窗口置信度）。传这个可以跳过读取/"
                              "烧字幕的开销，适合只是想快速看效果、不需要置信度曲线的场景")
+    parser.add_argument("--run_tag", default="",
+                        help="拼进裁剪出的mp4/csv文件名末尾的标识（建议传这次运行用的"
+                             "RESULT_ROOT名字，比如'infer_result_majority_syn'）。"
+                             "不同模型/不同次运行如果检测到时间重叠的事件，文件名默认"
+                             "只由CSV名+第几段+起止时间决定，会完全一样，复制到共享的"
+                             "Nginx媒体目录时后一次会静默覆盖前一次，导致Label Studio里"
+                             "复查任务链接的文件名对不上实际内容。留空则不加（跟以前"
+                             "行为一致），多次运行结果会共用同一个媒体目录时强烈建议传")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
