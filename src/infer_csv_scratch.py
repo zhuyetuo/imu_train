@@ -106,7 +106,7 @@ def sliding_windows(data, window_size, stride):
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
-               output_dir=None, min_windows=1, keep_isolated=True, **kwargs):
+               output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority", **kwargs):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -157,11 +157,25 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
 
+    # 单个窗口在原始时间轴上对应的 (起点采样点, 终点采样点)，取决于训练时的 label_mode：
+    #   "majority"（默认）：一个正例窗口代表"这一整个window_size都是目标行为"，
+    #     窗口起点到窗口终点整段对应，这是训练时多数投票的语义。
+    #   "center"：一个正例窗口只代表"窗口正中心这一瞬间是目标行为"，只用窗口
+    #     中心点前后半个步长(stride/2)去覆盖时间轴，不铺满整个窗口——否则中心点
+    #     标注法带来的边界精度收益在推理这一步就白费了（跟 event_eval.py 里
+    #     pred_windows_to_segments() 的逻辑保持一致）。
+    def window_bounds(s):
+        if label_mode == "center":
+            center = s + window_size / 2
+            half_pad = stride / 2
+            return center - half_pad, center + half_pad
+        return s, s + window_size
+
     # 打印逐窗口结果
     scratch_segs = []
     in_scratch   = False
-    seg_start_ts = None
-    seg_start_i  = None
+    run_first_i  = None
+    run_last_i   = None
 
     if not quiet:
         print(f"  {'时间':<22} {'预测':<6} {'置信度':>6}")
@@ -179,18 +193,21 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             print(f"  {t_str:<22} {label:<6} {conf:>6.2f}{marker}")
 
         # 合并连续抓挠片段
-        if label == "抓挠" and not in_scratch:
-            in_scratch   = True
-            seg_start_ts = t
-            seg_start_i  = start_i
-        elif label != "抓挠" and in_scratch:
+        if label == "抓挠":
+            if not in_scratch:
+                in_scratch  = True
+                run_first_i = start_i
+            run_last_i = start_i
+        elif in_scratch:
             in_scratch = False
-            seg_end_ts = idx_to_ts(start_i)
-            scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_i))
+            s0, _ = window_bounds(run_first_i)
+            _, e1 = window_bounds(run_last_i)
+            scratch_segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
 
     if in_scratch:
-        seg_end_ts = idx_to_ts(start_indices[-1] + window_size)
-        scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_indices[-1]))
+        s0, _ = window_bounds(run_first_i)
+        _, e1 = window_bounds(run_last_i)
+        scratch_segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
 
     # 汇总
     n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
@@ -332,6 +349,7 @@ def main():
     model = joblib.load(args.model)
     meta_path = args.model.replace(".pkl", ".json")
     classes, gravity_aligned, t_hz, t_window_s, t_stride_s = [], True, 16, 2.0, 1.0
+    label_mode = "majority"
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
@@ -340,7 +358,9 @@ def main():
         t_hz           = int(meta.get("hz", 16))
         t_window_s     = float(meta.get("window_s", 2.0))
         t_stride_s     = float(meta.get("stride_s", 1.0))
-        print(f"[模型] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s  重力对齐={gravity_aligned}")
+        label_mode     = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
+        print(f"[模型] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s  "
+              f"重力对齐={gravity_aligned}  label_mode={label_mode}")
         print(f"[模型] 类别: {classes}")
     else:
         classes = list(model.classes_) if hasattr(model, "classes_") else []
@@ -387,6 +407,7 @@ def main():
                               merge_gap_s=args.merge_gap,
                               min_windows=args.min_windows,
                               keep_isolated=not args.no_keep_isolated,
+                              label_mode=label_mode,
                               output_dir=out_dir)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
