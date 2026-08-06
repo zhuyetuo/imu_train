@@ -26,6 +26,10 @@ TEST_RATIO="0.0"          # 测试集比例（默认0=无测试集，纠错循�
 LABEL_MODE="majority"     # majority=多数投票（默认，原有行为），center=窗口标签取中心帧
 STRIDE_S=""               # 训练窗口步长秒数（留空=用 configs/data.yaml 默认值1秒）
 FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
+TAG=""                    # 输出目录后缀（留空=不加，跟原来路径一致）。
+                           # 同一个DATE想同时保留majority/center两个版本的模型时，
+                           # 各自传一个不同的--tag，避免第二次跑把第一次的processed_dir/
+                           # results覆盖掉（两次跑的PROCESSED_DIR/结果目录名都会带上这个后缀）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -41,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --label_mode)     LABEL_MODE="$2";     shift 2 ;;
     --stride_s)       STRIDE_S="$2";       shift 2 ;;
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
+    --tag)            TAG="$2";            shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -50,13 +55,13 @@ if [[ -z "$DATE" ]]; then
   exit 1
 fi
 
-PROCESSED_DIR="data/processed_${DATE}"
+PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
 CSV="data/raw_custom/${DATE}/merged_${DATE}.csv"
 JSON="data/raw_custom/${DATE}/merged_tmp.json"
-SYNTHETIC="data/synthetic/scratch_${DATE}.npz"
+SYNTHETIC="data/synthetic/scratch_${DATE}${TAG:+_$TAG}.npz"
 
 echo "=================================================="
-echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG"
+echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG${TAG:+   tag: $TAG}"
 echo "=================================================="
 
 # ── 检查输入文件 ──────────────────────────────────────────
@@ -143,6 +148,7 @@ echo "── 方案 B（带合成）──"
 _show_log /tmp/train_with_syn.log
 
 echo ""
+DATASET_TAG=$(basename "$PROCESSED_DIR")
 echo "模型路径:"
-echo "  纯标注: ${RESULTS_DIR}/processed_${DATE}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
-echo "  带合成: ${RESULTS_DIR}/processed_${DATE}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
+echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
+echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
