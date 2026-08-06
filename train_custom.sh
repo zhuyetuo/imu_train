@@ -68,8 +68,9 @@ if [[ -z "$DATE" ]]; then
 fi
 
 PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
-CSV="data/raw_custom/${DATE}/merged_${DATE}.csv"
-JSON="data/raw_custom/${DATE}/merged_tmp.json"
+DATA_DIR="data/raw_custom/${DATE}"
+CSV="${DATA_DIR}/merged_${DATE}.csv"
+JSON="${DATA_DIR}/merged_tmp.json"
 SYNTHETIC="data/synthetic/scratch_${DATE}${TAG:+_$TAG}.npz"
 DATASET_TAG=$(basename "$PROCESSED_DIR")
 
@@ -89,17 +90,38 @@ if [[ "$CLEAN" == "1" ]]; then
   rm -f "$SYNTHETIC"
 fi
 
+# ── 步骤0：合并 project-*.json → merged_tmp.json（唯一需要手动维护的源文件
+# 是 Label Studio 导出的 project-*.json，其余都是可以随时删掉、重新生成的
+# 派生文件：merged_tmp.json/merged_<DATE>.csv/processed_dir/results/合成npz。
+# --clean 或 merged_tmp.json 不存在时自动重新合并，不用再手动跑那段
+# python -c 合并脚本）──
+if [[ ! -f "$JSON" || "$CLEAN" == "1" ]]; then
+  n_project_json=$(find "$DATA_DIR" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
+  if [[ "$n_project_json" -eq 0 ]]; then
+    echo "[错误] $DATA_DIR 下没有找到任何 project-*.json"
+    echo "需要先把 Label Studio 导出的 project-*.json 放到这个目录下"
+    exit 1
+  fi
+  echo ""
+  echo "▶ 步骤0：合并 $DATA_DIR 下 $n_project_json 个 project-*.json → $JSON ..."
+  python -c "
+import json, glob, sys
+files = sorted(glob.glob(sys.argv[1]))
+merged = []
+for f in files:
+    merged += json.load(open(f, encoding='utf-8'))
+    print(f'  加载: {f}')
+json.dump(merged, open(sys.argv[2], 'w'), ensure_ascii=False)
+print(f'合并完成，共 {len(merged)} 条任务')
+" "${DATA_DIR}/project-*.json" "$JSON"
+fi
+
 # ── 步骤1：生成训练CSV（CSV不存在，或者--clean要求从头全新生成时自动跑）──
 # 注意：这里不传 --keep_labels 的值，等于保留全部标签——remap_custom_3class.yaml
 # 需要看到甩身体/舔身体/啃身体等原始细分类别才能把它们折算进"活动"类当负样本，
 # 之前这里默认只留3类，把这些数据在到达remap之前就丢掉了，是踩过的坑，见
 # configs/data.yaml 里 custom.keep_labels 的注释。
 if [[ ! -f "$CSV" || "$CLEAN" == "1" ]]; then
-  if [[ ! -f "$JSON" ]]; then
-    echo "[错误] 找不到标注JSON: $JSON"
-    echo "需要先有 Label Studio 导出的合并JSON才能生成训练CSV"
-    exit 1
-  fi
   echo ""
   echo "▶ 步骤1：生成训练CSV（$CSV 不存在或 --clean 要求重新生成）..."
   python src/data/labelstudio_to_custom.py \
