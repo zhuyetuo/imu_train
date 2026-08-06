@@ -131,13 +131,18 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
         out_dir="$RESULT_ROOT/$day"
         video_dir="$DATA_ROOT/$day"
         echo "  $day ..."
+        # --run_tag 自动用 RESULT_ROOT 的名字，保证不同次运行（比如对比
+        # 带合成/不带合成两个模型）裁出来的clip文件名不会撞在一起——如果
+        # 后面还会把clip复制到共享的Nginx媒体目录，撞名会导致后一次运行
+        # 静默覆盖前一次的文件，看似还在但内容已经被换掉了
         python src/extract_clips.py \
             --infer_dir  "$out_dir/_infer" \
             --video_dir  "$video_dir" \
             --output_dir "$out_dir" \
             --context_s  "$CONTEXT_S" \
             --workers    "${CLIP_WORKERS:-4}" \
-            --bin_by     "$BIN_BY"
+            --bin_by     "$BIN_BY" \
+            --run_tag    "$(basename "$RESULT_ROOT")"
     done
 fi
 
