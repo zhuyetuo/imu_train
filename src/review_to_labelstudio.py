@@ -50,12 +50,19 @@ def session_key(basename: str) -> str:
 
 
 def clip_key(basename: str) -> str:
-    """提取 clip 唯一键（去掉 cam1/cam2 差异）
+    """提取 clip 唯一键（去掉 cam1/cam2 差异，以及触发检测的IMU标识）
     multicam_20260717_185620_cam1_imu1_resampled16hz_clip01_185907-185910
     → multicam_20260717_185620_clip01_185907-185910
+
+    extract_clips.py 现在支持3条以上的狗共用固定2机位视频：mp4文件名会带
+    "_by{IMU编号}"标识是哪条狗触发的检测（比如_byIMU3），但csv文件名不带
+    这个标识（csv本身的stem里已经有实际IMU编号了，不需要再加）。这里必须
+    把"_byIMU..."也去掉，不然同一个clip的mp4和csv算出来的key不一样，
+    会被误判成两个不同的clip，导致有的任务缺视频、有的缺csv。
     """
     stem = os.path.splitext(basename)[0]
     stem = re.sub(r"_cam\d_imu\d", "", stem)
+    stem = re.sub(r"_by[A-Za-z0-9]+", "", stem)
     return stem
 
 
