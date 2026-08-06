@@ -156,7 +156,11 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
             # 从 key 解析日期和时间（如 multicam_20260717_185620_clip03_190408-190410）
             # 日期从会话前缀中提取：multicam_YYYYMMDD_...
             date_m = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", key)
-            time_m = re.search(r"(\d{6})-(\d{6})$", key)
+            # 锚定在"_clipNN_"后面，而不是用$锚定字符串结尾——extract_clips.py的
+            # --run_tag会在文件名末尾追加运行标识（比如_infer_result_majority_syn），
+            # 时间戳段就不再是key的结尾了，用$锚定会匹配失败、导致annotations
+            # 拿不到起止时间、整个标注是空的（这个bug的直接表现）
+            time_m = re.search(r"_clip\d+_(\d{6})-(\d{6})", key)
             if date_m and time_m:
                 date_str = f"{date_m.group(1)}-{date_m.group(2)}-{date_m.group(3)}"
                 def hms_to_ts(hms: str) -> str:
