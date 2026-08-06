@@ -978,6 +978,27 @@ def main():
             if pred_ts_start is not None:
                 print(f"        预测事件时间戳: {pred_ts_start} → {pred_ts_end}")
 
+    # ── 漏检(D)按时长分桶统计：帮助判断是不是短片段/信号弱的问题占多数 ──
+    DUR_BUCKETS = [("<1s", 0, 1), ("1-3s", 1, 3), ("3-9s", 3, 9), ("9s以上", 9, float("inf"))]
+    d_durations = [le - ls for (dog_id, ls, le, gs, ge), score
+                   in zip(gt_events_meta, gt_scores_best) if score == "D"]
+    print(f"\n{'='*90}")
+    print(f"  漏检(D)事件按时长分桶统计（共 {len(d_durations)} 个）")
+    print(f"{'='*90}")
+    if not d_durations:
+        print("  没有漏检事件")
+    else:
+        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
+        print(f"  {'-'*30}")
+        for name, lo, hi in DUR_BUCKETS:
+            in_bucket = [d for d in d_durations if lo <= d < hi]
+            pct = len(in_bucket) / len(d_durations) * 100
+            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
+        print(f"  最短: {min(d_durations):.2f}s   最长: {max(d_durations):.2f}s   "
+              f"平均: {sum(d_durations)/len(d_durations):.2f}s")
+        print(f"  （如果<1s/1-3s短片段占比明显偏高，说明模型大概率是被短促、信号弱的片段难住了；"
+              f"如果长短都有、分布均匀，更可能是真的没学好，不是片段太短的问题）")
+
     # ── 被合并的真实事件组（旧有小结，方便快速定位问题最集中的几组）──
     merge_groups = find_merge_groups(gt_events_meta, det_events_best)
 
@@ -1002,6 +1023,31 @@ def main():
                 ts_end = local_sec_to_ts_str(dog_id, le, args.hz, dog_ts_map)
                 if ts_start is not None:
                     print(f"        绝对时间戳: {ts_start} → {ts_end}")
+
+    # ── 合并组内相邻真实事件间隔按分桶统计：判断M是不是集中在"间隔很短"的情况 ──
+    GAP_BUCKETS = [("<2s", 0, 2), ("2-5s", 2, 5), ("5-10s", 5, 10), ("10s以上", 10, float("inf"))]
+    merge_gaps = [group[j][1] - group[j - 1][2]
+                  for group in merge_groups for j in range(1, len(group))]
+    print(f"\n{'='*90}")
+    print(f"  合并组内相邻真实事件间隔分桶统计（共 {len(merge_gaps)} 个相邻间隔，来自 {len(merge_groups)} 组）")
+    print(f"{'='*90}")
+    if not merge_gaps:
+        print("  没有被合并的事件组")
+    else:
+        print(f"  {'区间':<10}{'个数':>8}{'占比':>8}")
+        print(f"  {'-'*30}")
+        for name, lo, hi in GAP_BUCKETS:
+            in_bucket = [g for g in merge_gaps if lo <= g < hi]
+            pct = len(in_bucket) / len(merge_gaps) * 100
+            print(f"  {name:<10}{len(in_bucket):>8}{pct:>7.1f}%")
+        print(f"  最短间隔: {min(merge_gaps):.2f}s   最长间隔: {max(merge_gaps):.2f}s   "
+              f"平均: {sum(merge_gaps)/len(merge_gaps):.2f}s")
+        close5 = sum(1 for g in merge_gaps if g < 5)
+        print(f"  间隔<5s的占 {close5}/{len(merge_gaps)} = {close5/len(merge_gaps)*100:.1f}%"
+              f"——如果这类『几秒内的连续抓挠算一次事件』在实际场景里可以接受，"
+              f"这部分M造成的F1e扣分可能没那么值得在意，可以考虑单独核实一下"
+              f"多长间隔以内的合并你愿意接受，而不是死磕论文定义的严格F1e")
+
     print(f"""
   上面的秒数是该条狗在合并CSV里的行序号/hz（从这条狗的第一行开始算），
   可以据此去对应的原始录制/Label Studio标注里定位具体时间点核实：
