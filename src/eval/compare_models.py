@@ -141,7 +141,7 @@ def compare_pair(label_a, events_a_by_record, label_b, events_b_by_record):
     total_matched = 0
     total_only_a = 0
     total_only_b = 0
-    start_diffs, dur_diffs, max_diffs, mean_diffs = [], [], [], []
+    start_diffs, end_diffs, dur_diffs, max_diffs, mean_diffs = [], [], [], [], []
 
     for record in all_records:
         evs_a = events_a_by_record.get(record, [])
@@ -158,10 +158,12 @@ def compare_pair(label_a, events_a_by_record, label_b, events_b_by_record):
         print(f"\n  record: {record}")
         for ea, eb in matched:
             start_diff = abs((ea["start"] - eb["start"]).total_seconds())
+            end_diff = abs((ea["end"] - eb["end"]).total_seconds())
             dur_diff = abs(ea["duration"] - eb["duration"])
             max_diff = abs(ea["conf_max"] - eb["conf_max"])
             mean_diff = abs(ea["conf_mean"] - eb["conf_mean"])
             start_diffs.append(start_diff)
+            end_diffs.append(end_diff)
             dur_diffs.append(dur_diff)
             max_diffs.append(max_diff)
             mean_diffs.append(mean_diff)
@@ -169,7 +171,7 @@ def compare_pair(label_a, events_a_by_record, label_b, events_b_by_record):
                   f"(max={ea['conf_max']:.2f},mean={ea['conf_mean']:.2f})  "
                   f"{label_b}:{fmt_ts(eb['start'])}-{fmt_ts(eb['end'])}"
                   f"(max={eb['conf_max']:.2f},mean={eb['conf_mean']:.2f})  "
-                  f"起点差{start_diff:.2f}s 时长差{dur_diff:.2f}s "
+                  f"起点差{start_diff:.2f}s 终点差{end_diff:.2f}s 时长差{dur_diff:.2f}s "
                   f"max差{max_diff:.2f} mean差{mean_diff:.2f}")
         for ea in only_a:
             print(f"    [仅{label_a}测到] {fmt_ts(ea['start'])}-{fmt_ts(ea['end'])}"
@@ -187,6 +189,8 @@ def compare_pair(label_a, events_a_by_record, label_b, events_b_by_record):
     if start_diffs:
         print(f"  配对事件的起点时间差: 平均{sum(start_diffs)/len(start_diffs):.2f}s"
               f"  最大{max(start_diffs):.2f}s")
+        print(f"  配对事件的终点时间差: 平均{sum(end_diffs)/len(end_diffs):.2f}s"
+              f"  最大{max(end_diffs):.2f}s")
         print(f"  配对事件的时长差:     平均{sum(dur_diffs)/len(dur_diffs):.2f}s"
               f"  最大{max(dur_diffs):.2f}s")
         print(f"  配对事件的conf_max差: 平均{sum(max_diffs)/len(max_diffs):.3f}"
