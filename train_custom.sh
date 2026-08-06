@@ -4,6 +4,8 @@
 # 用法:
 #   bash train_custom.sh --date 2026_7_23
 #   bash train_custom.sh --date 2026_7_23 --n_aug 30
+#   bash train_custom.sh --date 2026_7_23 --clean   # 先删掉旧缓存再全新生成，
+#                                                     # 改过预处理/特征相关代码后建议加上
 #
 # 输出:
 #   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
@@ -30,6 +32,11 @@ TAG=""                    # 输出目录后缀（留空=不加，跟原来路径
                            # 同一个DATE想同时保留majority/center两个版本的模型时，
                            # 各自传一个不同的--tag，避免第二次跑把第一次的processed_dir/
                            # results覆盖掉（两次跑的PROCESSED_DIR/结果目录名都会带上这个后缀）
+CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓存(processed_dir/
+                           # results/合成数据npz)再重新生成，默认0=不删（复用已有的）。
+                           # 数据处理逻辑改了但没删缓存，新旧代码生成的中间产物混用，
+                           # 是这几天踩过好几次的坑，改动过预处理/特征相关代码后
+                           # 强烈建议加这个参数，保证是从头全新生成、不会跟旧缓存混着用
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -46,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --stride_s)       STRIDE_S="$2";       shift 2 ;;
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
+    --clean)          CLEAN=1;             shift 1 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -59,10 +67,23 @@ PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
 CSV="data/raw_custom/${DATE}/merged_${DATE}.csv"
 JSON="data/raw_custom/${DATE}/merged_tmp.json"
 SYNTHETIC="data/synthetic/scratch_${DATE}${TAG:+_$TAG}.npz"
+DATASET_TAG=$(basename "$PROCESSED_DIR")
 
 echo "=================================================="
 echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG${TAG:+   tag: $TAG}"
 echo "=================================================="
+
+# ── --clean：先删掉这个DATE+TAG对应的旧缓存，保证从头全新生成 ──────
+if [[ "$CLEAN" == "1" ]]; then
+  echo ""
+  echo "▶ --clean：删除旧缓存..."
+  echo "  rm -rf $PROCESSED_DIR"
+  rm -rf "$PROCESSED_DIR"
+  echo "  rm -rf $RESULTS_DIR/$DATASET_TAG"
+  rm -rf "${RESULTS_DIR:?}/$DATASET_TAG"
+  echo "  rm -f  $SYNTHETIC"
+  rm -f "$SYNTHETIC"
+fi
 
 # ── 检查输入文件 ──────────────────────────────────────────
 if [[ ! -f "$CSV" ]]; then
@@ -123,11 +144,21 @@ python src/ml/train.py --hz "$HZ" --model rf \
   > /tmp/train_with_syn.log 2>&1 &
 PID_B=$!
 
-# ── 等待两个训练完成 ──────────────────────────────────────
+# ── 等待两个训练完成，实时把两边的日志打到当前终端（加[A]/[B]前缀区分）──
+# 之前这里是纯等待，进度条/特征提取日志全写进/tmp的文件里，只能另开
+# 终端手动tail -f才看得到；现在直接在这个终端里实时滚动显示，不用切窗口。
 echo ""
-echo "⏳ 等待两个模型训练完成..."
+echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志，[A]=纯标注 [B]=带合成）..."
+tail -f -n +1 /tmp/train_no_syn.log 2>/dev/null | sed -u 's/^/[A] /' &
+TAIL_A=$!
+tail -f -n +1 /tmp/train_with_syn.log 2>/dev/null | sed -u 's/^/[B] /' &
+TAIL_B=$!
+
 wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 /tmp/train_no_syn.log"
 wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 /tmp/train_with_syn.log"
+
+kill "$TAIL_A" "$TAIL_B" 2>/dev/null
+wait "$TAIL_A" "$TAIL_B" 2>/dev/null
 
 # ── 打印结果对比（过滤进度条噪音）────────────────────────
 _show_log() {
@@ -148,7 +179,6 @@ echo "── 方案 B（带合成）──"
 _show_log /tmp/train_with_syn.log
 
 echo ""
-DATASET_TAG=$(basename "$PROCESSED_DIR")
 echo "模型路径:"
 echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
 echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
