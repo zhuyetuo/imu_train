@@ -198,7 +198,9 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--context_s",  type=float, default=3.0)
     parser.add_argument("--workers",    type=int,   default=4,
-                        help="并行裁剪线程数（默认 4，有 CUDA 建议 2-4）")
+                        help="并行裁剪线程数（默认 4）。裁剪固定用CPU软编码libx264"
+                             "（见下方说明），不是GPU瓶颈，核数多的机器可以调大，"
+                             "比如16核以上的机器可以试试 8~16")
     parser.add_argument("--bin_by", default="conf_max", choices=["conf_max", "conf_mean"],
                         help="置信度分桶依据：conf_max=片段内最高置信度（默认），conf_mean=片段内平均置信度")
     args = parser.parse_args()
@@ -214,7 +216,13 @@ def main():
     if not has_ffmpeg:
         print("[警告] 找不到 ffmpeg，只裁剪 CSV")
 
-    print(f"编码器: {'CUDA (h264_nvenc)' if HAS_CUDA else 'CPU (libx264)'}  并行线程: {args.workers}")
+    # 注意：即使检测到有 CUDA(h264_nvenc)，cut_clip() 里实际固定用的是
+    # CPU软编码 libx264（nvenc 输出在部分浏览器兼容性有问题，见 cut_clip() 里
+    # 的注释），之前这里打印"编码器: CUDA"是误导性的——GPU利用率显示0%不是
+    # 没生效，是压根没用GPU，这是纯CPU瓶颈的活，加并行线程数才有用，加GPU没用。
+    print(f"编码器: CPU (libx264，固定软编码，即使有CUDA也不用——nvenc输出兼容性有问题)"
+          f"  并行线程: {args.workers}"
+          f"{'（检测到有CUDA硬件加速但没用上，纯CPU编码，是有意为之）' if HAS_CUDA else ''}")
 
     # ── 收集所有 clip 任务 ────────────────────────────────────────────────────
     bin_dirs  = {}
@@ -279,13 +287,16 @@ def main():
     print(f"共 {len(all_tasks)} 个 clip 任务，开始并行处理...")
 
     # ── 并行执行 ─────────────────────────────────────────────────────────────
+    from tqdm import tqdm
     bin_logs  = {bl: [] for bl in bin_dirs}
     done = 0
+    pbar = tqdm(total=len(all_tasks), desc="裁剪片段", unit="clip")
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(_process_one, t): t for t in all_tasks}
         for fut in as_completed(futures):
             res = fut.result()
             done += 1
+            pbar.update(1)
             seg       = res["seg"]
             t0_str    = seg["start_ts"]
             t1_str    = seg["end_ts"]
@@ -303,15 +314,16 @@ def main():
             ]
             status = " ".join(parts)
             bin_conf = conf_max if bin_by == "conf_max" else conf_mean
-            print(f"  [{done}/{len(all_tasks)}] [{bin_label}] {res['csv_basename']}  "
-                  f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
-                  f"{bin_by}={bin_conf:.2f}  {status}")
+            tqdm.write(f"  [{done}/{len(all_tasks)}] [{bin_label}] {res['csv_basename']}  "
+                       f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
+                       f"{bin_by}={bin_conf:.2f}  {status}")
 
             line = (f"{res['csv_basename']}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
                     f"\tconf_mean={conf_mean:.3f}\tconf_max={conf_max:.3f}"
                     f"\t{stem1 + suffix + '.mp4'}\t{status}")
             with lock:
                 bin_logs[bin_label].append(line)
+    pbar.close()
 
     for bin_label, lines in sorted(bin_logs.items()):
         log_path = os.path.join(args.output_dir, f"scratch_log_review_{bin_label}.txt")
