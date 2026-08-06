@@ -65,8 +65,13 @@ def parse_ts(s):
 
 def load_model_events(result_root, day):
     """扫描 <result_root>/<day>/_infer/*.json，返回
-    {record(csv_basename): [事件dict, ...]}，事件dict含start/end(datetime)、
-    start_ts/end_ts(原始字符串)、conf_max、conf_mean、duration(秒)。"""
+    (events_by_record, total_records)：
+    events_by_record = {record(csv_basename): [事件dict, ...]}（只包含至少有
+    一个检测事件的record），事件dict含start/end(datetime)、start_ts/end_ts
+    (原始字符串)、conf_max、conf_mean、duration(秒)。
+    total_records = 这一天这个模型总共跑了推理的record数（不管有没有检测到
+    事件），用来算"总共多少条record、其中多少条有抓挠"这个比例，而不是
+    只看"有抓挠的record数"（那个数字容易让人误以为是总量）。"""
     infer_dir = os.path.join(result_root, day, "_infer")
     events_by_record = {}
     infer_jsons = sorted(glob.glob(os.path.join(infer_dir, "*_infer.json")))
@@ -90,7 +95,7 @@ def load_model_events(result_root, day):
             })
         if evs:
             events_by_record[record] = evs
-    return events_by_record
+    return events_by_record, len(infer_jsons)
 
 
 def overlaps(a, b):
@@ -234,15 +239,43 @@ def main():
         print(f"[日志] 输出同时保存到: {args.log_file}\n")
 
     models = {}
+    total_records_seen = None
     for item in args.model:
         if "=" not in item:
             print(f"[错误] --model 格式应为 label=result_root，收到: {item}")
             return
         label, result_root = item.split("=", 1)
-        models[label] = load_model_events(result_root, args.day)
-        n_events = sum(len(v) for v in models[label].values())
-        print(f"[加载] {label} ({result_root}/{args.day})："
-              f"{len(models[label])} 条record，共 {n_events} 个检测事件")
+        events_by_record, n_total = load_model_events(result_root, args.day)
+        models[label] = events_by_record
+        n_events = sum(len(v) for v in events_by_record.values())
+        n_with_events = len(events_by_record)
+        pct = n_with_events / n_total * 100 if n_total else 0.0
+        print(f"[加载] {label} ({result_root}/{args.day})：{args.day} 当天共 {n_total} 条record，"
+              f"其中 {n_with_events} 条（{pct:.1f}%）检测到抓挠，共 {n_events} 个抓挠事件")
+        # 各模型理论上应该扫的是同一批原始record（同一天的同一批文件），
+        # 数量对不上说明有的模型推理没跑全，或者用的数据目录不一致，提醒一下
+        if total_records_seen is not None and n_total != total_records_seen:
+            print(f"  [提示] record总数({n_total})跟之前加载的模型不一致"
+                  f"(之前是{total_records_seen})，可能是这个模型的推理没跑全"
+                  f"或者用的数据目录不一样")
+        total_records_seen = n_total
+
+    # ── 跨模型交集：哪些record是4个模型都判定有抓挠的，哪些是某个模型独有的 ──
+    if len(models) >= 2:
+        print(f"\n{'='*90}")
+        print(f"  跨模型 record 交集分析（判定标准：这条record里模型检测到>=1个抓挠事件）")
+        print(f"{'='*90}")
+        record_sets = {label: set(events.keys()) for label, events in models.items()}
+        common = set.intersection(*record_sets.values())
+        print(f"  {len(models)}个模型共同判定有抓挠的record: {len(common)} 条")
+        for r in sorted(common):
+            print(f"    {r}")
+        for label, rset in record_sets.items():
+            others = set.union(*(s for l, s in record_sets.items() if l != label))
+            only_this = rset - others
+            print(f"\n  仅 {label} 判定有抓挠、其余{len(models)-1}个模型都没有的record: {len(only_this)} 条")
+            for r in sorted(only_this):
+                print(f"    {r}")
 
     pairs = []
     for p in args.pairs:
