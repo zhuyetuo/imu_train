@@ -26,6 +26,7 @@ INTERRUPT_SLEEP_MIN_MINUTES = 5
 INTERRUPT_EVENT_MIN_SEC = 3
 INTERRUPT_MERGE_GAP_MINUTES = 5  # 相邻中断事件合并间隔
 LONG_SCRATCH_RED_FLAG_SEC = 60   # 连续/高聚集抓挠达到1分钟 -> 红旗
+BASELINE_DENOM_FLOOR = 1         # 变化幅度比值分母下限，只为避免除以0，不是用来压低低基线狗信号的
 
 # 基线未建立期间的绝对阈值兜底（来自 Whistle FIT，已用 Pruritus VAS 验证，见 docs/skin_health.md §6）
 BOOTSTRAP_ELEVATED_SEC_PER_DAY = 120   # 对应 Whistle "Elevated" 档下限
@@ -178,7 +179,7 @@ _DELTA_TIERS = [
 
 
 def _delta_score_one(current, baseline, abs_min_idx, ratio_min_idx):
-    denom = max(baseline, 3)
+    denom = max(baseline, BASELINE_DENOM_FLOOR)
     ratio = current / denom
     abs_increase = current - baseline
     for score, abs_min_count, abs_min_dur, ratio_min in _DELTA_TIERS:
