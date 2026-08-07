@@ -321,6 +321,25 @@ python src/ml/train.py --hz 16 --model rf \
 > - 补充新数据后只需换 JSON 文件名重跑，旧版本数据完整保留
 > - 抓挠数据足够多后可去掉 `--synthetic`，直接用标注数据训练（方案 A 即为此情况）
 
+### TF 版 IMU（无蓝牙）离线数据转换
+
+TF 版项圈没有蓝牙，只能离线导出 TXT 日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`），用 `src/data/tf_offline_to_custom.py` 转成训练/标注用的 CSV：
+
+```bash
+# 单文件转换（文件名按 YYMMDDHH 猜日期，比如 26080712_tf2.TXT）
+python src/data/tf_offline_to_custom.py convert data/raw_tf/26080712_tf2.TXT
+
+# 整目录批量转换
+python src/data/tf_offline_to_custom.py convert data/raw_tf/ -o data/raw_tf_csv/
+
+# 从已转换的 CSV 按起止时间截取一段（核实可疑数据、单独标注某段时用）
+python src/data/tf_offline_to_custom.py slice data/raw_tf/26080712_tf2.csv \
+  --start "2026-08-07 12:36:20.000" --end "2026-08-07 12:36:30.000" \
+  -o data/raw_tf/26080712_tf2_clip.csv
+```
+
+> 转换逻辑复用 `hicc_offline_to_labelstudio.py` 已验证过的处理方式：区分"真正跨午夜"（时间戳倒退接近一整天，日期+1）和"设备记录异常的小幅倒退"（丢弃该行保证 timestamp 严格递增），转换完会提示真实数据缺口。
+
 ### 标签映射（15类 → 3类）
 
 Label Studio 中支持全部标签正常标注，训练时通过 `configs/remap_custom_3class.yaml` 自动合并：
