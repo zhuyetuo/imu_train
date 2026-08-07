@@ -236,3 +236,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+data/synthetic_skin_health_sbs_report.csv
