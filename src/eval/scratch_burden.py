@@ -5,6 +5,11 @@ Scratch Burden Score 计算引擎，按 docs/skin_health.md / Wardyn V0.4 算法
 也可以是 infer_csv_scratch.py 产出的 *_infer.json（用 load_events_from_infer_json 加载）。
 
 核心流程：事件 → 按天聚合特征 → 个人基线（跳过最近7天）→ 四个子项打分 + 红旗信号 → 总分 → C0/C1/C2。
+
+个人基线建立前（设备刚绑定，还不满21天历史）不强行用不完整数据凑基线，"变化幅度"分项
+改用 Whistle FIT 已用 Pruritus VAS 验证过的绝对分级兜底（见 BOOTSTRAP_* 常量），
+"聚集程度"和"长时间抓挠红旗"本身不依赖基线，从第一天就正常生效；只有"持续程度"
+（概念上依赖基线偏离的连续性）在引导期内不计分。基线一旦建立就切回正常的相对基线评分。
 """
 import json
 from datetime import timedelta
@@ -21,6 +26,12 @@ INTERRUPT_SLEEP_MIN_MINUTES = 5
 INTERRUPT_EVENT_MIN_SEC = 3
 INTERRUPT_MERGE_GAP_MINUTES = 5  # 相邻中断事件合并间隔
 LONG_SCRATCH_RED_FLAG_SEC = 60   # 连续/高聚集抓挠达到1分钟 -> 红旗
+
+# 基线未建立期间的绝对阈值兜底（来自 Whistle FIT，已用 Pruritus VAS 验证，见 docs/skin_health.md §6）
+BOOTSTRAP_ELEVATED_SEC_PER_DAY = 120   # 对应 Whistle "Elevated" 档下限
+BOOTSTRAP_SEVERE_SEC_PER_DAY = 300     # 对应 Whistle "Severe" 档下限
+BOOTSTRAP_ELEVATED_SCORE = 10
+BOOTSTRAP_SEVERE_SCORE = 30
 
 
 # ── 事件加载 ──────────────────────────────────────────────────────────
@@ -190,6 +201,16 @@ def score_delta(day_row, baseline):
     return dur_score, {"by": "duration", "ratio": dur_ratio}
 
 
+def score_delta_bootstrap(day_row):
+    """基线未建立期间的兜底：不看相对变化，直接用 Whistle 验证过的绝对分级。"""
+    dur = day_row.total_duration_sec
+    if dur >= BOOTSTRAP_SEVERE_SEC_PER_DAY:
+        return BOOTSTRAP_SEVERE_SCORE, {"by": "bootstrap_absolute", "level": "severe"}
+    if dur >= BOOTSTRAP_ELEVATED_SEC_PER_DAY:
+        return BOOTSTRAP_ELEVATED_SCORE, {"by": "bootstrap_absolute", "level": "elevated"}
+    return 0, {"by": "bootstrap_absolute", "level": "infrequent_or_occasional"}
+
+
 # ── §2.1 聚集程度 ──────────────────────────────────────────────────────
 
 def score_cluster(day_row):
@@ -249,21 +270,25 @@ def score_interruption(day_row):
 # ── 汇总：单日 SBS ─────────────────────────────────────────────────────
 
 def score_day(day_row, baseline, delta_scores_last_7_days):
-    delta_score, delta_detail = score_delta(day_row, baseline)
-    if delta_score is None:
-        return {
-            "date": day_row.date, "pet_id": day_row.pet_id,
-            "insufficient_baseline": True, "total": None, "tier": "insufficient_data",
-        }
+    bootstrap_mode = baseline is None
+    if bootstrap_mode:
+        # 基线还没建立（<21天历史）：变化幅度换成绝对阈值兜底，持续程度在这期间不计分
+        # （"连续偏离基线"这个概念本身依赖基线，引导期内没有意义）。
+        delta_score, delta_detail = score_delta_bootstrap(day_row)
+        persistence_score = 0
+    else:
+        delta_score, delta_detail = score_delta(day_row, baseline)
+        persistence_score = score_persistence(delta_scores_last_7_days)
 
     cluster_score = score_cluster(day_row)
-    persistence_score = score_persistence(delta_scores_last_7_days)
     interrupt_score, interrupt_red_flag = score_interruption(day_row)
 
     red_flags = []
-    if delta_detail.get("ratio", 0) > 3:
+    if not bootstrap_mode and delta_detail.get("ratio", 0) > 3:
         red_flags.append("baseline>3x")
         delta_score = 30
+    if bootstrap_mode and delta_detail.get("level") == "severe":
+        red_flags.append("bootstrap_absolute_severe")
     if day_row.cluster_count >= 3:
         red_flags.append("cluster>=3")
         cluster_score = 20
@@ -287,6 +312,7 @@ def score_day(day_row, baseline, delta_scores_last_7_days):
         "persistence_score": persistence_score, "interrupt_score": interrupt_score,
         "total": total, "tier": tier, "red_flags": red_flags,
         "delta_detail": delta_detail, "insufficient_baseline": False,
+        "bootstrap_mode": bootstrap_mode,
     }
 
 
@@ -298,10 +324,18 @@ def run_pipeline(events, wear_hours):
         pet_daily = daily[daily.pet_id == pet_id].sort_values("date").reset_index(drop=True)
         delta_history = []  # 按日期顺序保存每天的 delta_score（None=基线不足/数据不足）
         for _, row in pet_daily.iterrows():
+            if row.data_quality_flag != "good":
+                # 当天佩戴不足，不是"基线未建立"，两种"没有分数"的原因要分开标记，
+                # 不能用0代替无数据（PM文档 §15）。
+                results.append({
+                    "date": row.date, "pet_id": row.pet_id, "total": None,
+                    "tier": "insufficient_data", "insufficient_baseline": False,
+                    "bootstrap_mode": False,
+                })
+                delta_history.append(None)
+                continue
             baseline = compute_baseline(daily, pet_id, row.date)
             delta_score, _ = score_delta(row, baseline) if baseline else (None, {})
-            if row.data_quality_flag != "good":
-                delta_score = None
             last_7 = delta_history[-7:]
             res = score_day(row, baseline, last_7)
             results.append(res)

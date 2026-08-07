@@ -139,11 +139,24 @@ def scenario_missing_wear_days():
 
 
 def scenario_cold_start():
-    """场景9：设备刚绑定，历史不足21天，测试冷启动时不打分。"""
+    """场景9：设备刚绑定，历史不足21天，日常轻度抓挠，测试冷启动期用绝对阈值兜底、不强行凑基线。"""
     pet = "dog_cold_start"
     events = gen_baseline_events(pet, 10, events_per_day=2, dur_range=(1.5, 4))
     wear = gen_wear_hours(pet, 10)
-    return pet, events, wear, "前21天内任何一天都应 insufficient_baseline=True，不产出分数"
+    return pet, events, wear, "前21天历史不足，bootstrap_mode=True；轻度抓挠远低于120秒/天，应保持 C0，不强行凑基线打分"
+
+
+def scenario_severe_from_day1():
+    """场景10：设备刚绑定（历史<21天）就是重度抓挠，测试基线未建立期间的绝对阈值兜底是否第一时间生效。"""
+    pet = "dog_severe_bootstrap"
+    events = []
+    for d in range(15):  # 只有15天历史，远不够21天基线
+        day = DAY0 + timedelta(days=d)
+        # 每天多次长时间抓挠，当日总时长轻松突破 Whistle Severe 档(300秒/天)
+        for i in range(4):
+            events.append({"pet_id": pet, **_mk_event(day, 8 + i * 3, 0, 90)})
+    wear = gen_wear_hours(pet, 15)
+    return pet, events, wear, "基线还没建立（bootstrap_mode=True），但当日总时长远超300秒/天，应从第1天起就靠绝对阈值兜底触发高分/C2，而不是等21天基线建立后才发现"
 
 
 SCENARIOS = [
@@ -156,6 +169,7 @@ SCENARIOS = [
     scenario_long_continuous_scratch,
     scenario_missing_wear_days,
     scenario_cold_start,
+    scenario_severe_from_day1,
 ]
 
 
@@ -177,7 +191,7 @@ def main():
         print(f"预期: {expect}")
         sub = result[result.pet_id == pet].reset_index(drop=True)
         cols = ["date", "total", "tier", "delta_score", "cluster_score",
-                "persistence_score", "interrupt_score", "red_flags", "insufficient_baseline"]
+                "persistence_score", "interrupt_score", "red_flags", "bootstrap_mode"]
         print(sub[cols].to_string(index=False))
 
     out_path = "data/synthetic_skin_health_sbs_report.csv"
