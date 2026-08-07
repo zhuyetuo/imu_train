@@ -333,9 +333,9 @@ python src/data/tf_offline_to_custom.py convert data/raw_tf/26080712_tf2.TXT
 python src/data/tf_offline_to_custom.py convert data/raw_tf/ -o data/raw_tf_csv/
 
 # 从已转换的 CSV 按起止时间截取一段（核实可疑数据、单独标注某段时用）
-python src/data/tf_offline_to_custom.py slice data/raw_tf/26080712_tf2.csv \
+python src/data/tf_offline_to_custom.py slice data/raw_tf_csv/26080712_tf2.csv \
   --start "2026-08-07 12:36:20.000" --end "2026-08-07 12:36:30.000" \
-  -o data/raw_tf/26080712_tf2_clip.csv
+  -o data/raw_tf_csv/26080712_tf2_clip.csv
 ```
 
 > 转换逻辑复用 `hicc_offline_to_labelstudio.py` 已验证过的处理方式：区分"真正跨午夜"（时间戳倒退接近一整天，日期+1）和"设备记录异常的小幅倒退"（丢弃该行保证 timestamp 严格递增），转换完会提示真实数据缺口。
