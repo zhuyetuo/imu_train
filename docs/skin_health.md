@@ -207,6 +207,7 @@ PM 文档里大量参数标注了"建议初始值""产品算法配置值，不�
 
 - `src/eval/scratch_burden.py`：SBS 打分引擎。输入统一的事件表（`pet_id, start, end, duration_sec`）+ 每日有效佩戴时长表，输出每只狗每天的四项子分、红旗、总分、C0/C1/C2。包含 `load_events_from_infer_json()`，可以直接读 `infer_csv_scratch.py` 产出的 `*_infer.json`（`scratch_segments` 字段），衔接真实数据不需要再写一遍格式转换
 - `src/eval/gen_synthetic_scratch_scenarios.py`：生成9种场景的合成事件数据，跑一遍引擎，打印/保存每只"狗"每天的完整打分明细，用于验证机制本身有没有按预期工作（不是验证抓挠识别准确率，那部分依赖真实标注数据，见 §4）
+- `src/eval/daily_skin_report.py`：**接真实数据每天出报告用这个**——衔接 `run_infer_tf.sh`（或任何走 `infer_csv_scratch.py` 的推理流程）产出的 `_infer.json` 和对应原始CSV，自动估算每日有效佩戴时长（按当天实际记录到的行数/设备采样率算，天然排除设备缺口/未佩戴时段），跑一遍 `scratch_burden.run_pipeline()`，打印/保存每天的次数、总时长、四项子分、总分、档位。一只狗一组 `--csv_dir`/`--infer_json_dir`，多只狗分别跑
 
 运行方式：
 ```bash
