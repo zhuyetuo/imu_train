@@ -9,12 +9,14 @@
 #      去小米监控里对时间点找。等以后CSV和视频的对应关系理清楚了，可以在这个脚本基础上
 #      加一步类似 extract_clips.py 的视频裁剪（需要先解决"怎么根据csv文件名/时间戳找到
 #      对应的小米监控文件"这个问题，跟 extract_clips.py 现在"视频和CSV在同一个目录"的
-#      假设不一样，得单独写匹配逻辑）。
+#      假设不一样，得单独写匹配逻辑）。加上以后会有裁剪好的视频，输出目录从一开始就把
+#      "推理/CSV相关的东西"和"以后的视频"分开放（$RESULT_ROOT/csv/ vs 以后的
+#      $RESULT_ROOT/clips/），重跑推理时 rm -rf $RESULT_ROOT/csv 不会连带删掉已经裁好的视频。
 #
 # 环境变量:
 #   CSV_DIR       TF CSV 所在目录（必填），例: data/raw_tf_csv
 #   MODEL         ML 模型路径（必填）
-#   RESULT_ROOT   推理结果输出目录（默认 infer_result_tf）
+#   RESULT_ROOT   推理结果输出目录（默认 infer_result_tf），实际内容在 $RESULT_ROOT/csv/ 下
 #   WORKERS       并行进程数（默认 8）
 #   DEVICE_HZ     设备采样率（默认 50，TF存储卡版本实测时间戳步长20ms=50Hz；如果你这批数据
 #                 不是50Hz，一定要传对，传错了下采样比例会算错）
@@ -25,6 +27,9 @@
 #   KEEP_ISOLATED 是否保留孤立单窗口片段（默认 1=保留）
 #
 # 用法:
+#   # 重跑前先清理（只删 csv/ 这层，不会动以后加的 clips/）：
+#   rm -rf infer_result_tf/csv
+#
 #   CSV_DIR=data/raw_tf_csv \
 #     MODEL=results/processed_xxx/16hz_remap_custom_3class/ml_rf.pkl \
 #     WORKERS=16 RESULT_ROOT=infer_result_tf \
@@ -43,15 +48,19 @@ MERGE_GAP="${MERGE_GAP:-1}"
 MIN_WINDOWS="${MIN_WINDOWS:-1}"
 KEEP_ISOLATED="${KEEP_ISOLATED:-1}"
 
+# 推理/CSV相关的东西都收在这层，跟以后的 $RESULT_ROOT/clips/（视频）分开，
+# 方便重跑推理时只清这一层：rm -rf $RESULT_ROOT/csv
+CSV_OUT_DIR="$RESULT_ROOT/csv"
+
 echo "=============================================="
 echo "  TF 数据批量推理（仅推理，不裁视频）"
 echo "  CSV 目录: $CSV_DIR"
 echo "  模型: $MODEL"
 echo "  设备采样率: ${DEVICE_HZ}Hz"
-echo "  结果目录: $RESULT_ROOT"
+echo "  结果目录: $CSV_OUT_DIR"
 echo "=============================================="
 
-infer_json_dir="$RESULT_ROOT/_infer"
+infer_json_dir="$CSV_OUT_DIR/_infer"
 mkdir -p "$infer_json_dir"
 
 hz_args="--device_hz $DEVICE_HZ"
@@ -70,7 +79,7 @@ python src/infer_csv_scratch.py \
     --min_windows "$MIN_WINDOWS" \
     $( [[ "$KEEP_ISOLATED" == "0" ]] && echo "--no_keep_isolated" ) \
     $hz_args \
-    2>&1 | tee "$RESULT_ROOT/infer.log"
+    2>&1 | tee "$CSV_OUT_DIR/infer.log"
 
 echo ""
 echo "=============================================="
