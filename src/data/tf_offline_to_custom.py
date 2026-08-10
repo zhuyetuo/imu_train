@@ -28,6 +28,10 @@ TF版IMU设备（无蓝牙，离线导出TXT日志）→ 训练/标注用CSV。
   # 显式指定日期（文件名猜不出来，或者猜错了的时候用）
   python src/data/tf_offline_to_custom.py convert data/26080712_tf2.TXT --date 2026-08-07
 
+  # 单位跟训练数据对不上时换算（先用 src/eval/diagnose_device_signal.py 确认过再用，不要猜）
+  python src/data/tf_offline_to_custom.py convert data/raw_tf/ -o data/raw_tf_csv/ \\
+    --unit_preset ms2_rads_to_g_dps
+
   # 按起止时间从CSV里截取一段
   python src/data/tf_offline_to_custom.py slice data/26080712_tf2.csv \\
     --start "2026-08-07 12:36:20.000" --end "2026-08-07 12:36:30.000" \\
@@ -44,6 +48,20 @@ from datetime import date, datetime, timedelta
 CSV_HEADER = ["timestamp", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
 
 _FNAME_DATE_RE = re.compile(r"(\d{2})(\d{2})(\d{2})(\d{2})")
+
+# ── 单位换算 ──────────────────────────────────────────────────────────────
+# TF设备固件导出的原始数值单位，跟现有witmotion训练数据的单位约定不一定一样
+# （用 src/eval/diagnose_device_signal.py 对比过：TF加速度静止时≈9.6~9.8，符合
+# m/s²；训练数据(自采witmotion)静止时≈1.0，符合g）。convert 默认不做任何换算
+# （--acc_scale/--gyro_scale 默认1.0，保持原始行为），怀疑单位不一致时用
+# --unit_preset ms2_rads_to_g_dps 一键换算成跟训练数据一致的 g / deg/s。
+G_TO_MS2 = 9.80665
+RAD_TO_DEG = 57.29577951308232
+
+UNIT_PRESETS = {
+    # 从 (加速度m/s², 角速度rad/s) 换算成 (加速度g, 角速度deg/s)
+    "ms2_rads_to_g_dps": {"acc_scale": 1.0 / G_TO_MS2, "gyro_scale": RAD_TO_DEG},
+}
 
 
 # ── 第一件事：TXT → CSV ──────────────────────────────────────────────────────
@@ -86,8 +104,8 @@ def parse_tf_offline_txt(path: str):
 _MIDNIGHT_WRAP_THRESHOLD = timedelta(hours=12)
 
 
-def build_csv_rows(rows, base_date: date):
-    """把 HH:MM:SS.MS + 日期 拼成完整 timestamp。
+def build_csv_rows(rows, base_date: date, acc_scale: float = 1.0, gyro_scale: float = 1.0):
+    """把 HH:MM:SS.MS + 日期 拼成完整 timestamp，可选按 acc_scale/gyro_scale 换算单位。
 
     时间戳倒退时区分两种情况：
       1. 真正跨午夜（倒退幅度接近一整天，比如 23:59 -> 00:00）：日期 +1。
@@ -115,7 +133,9 @@ def build_csv_rows(rows, base_date: date):
 
         prev_dt = t
         ts_str = t.strftime("%Y-%m-%d %H:%M:%S.") + f"{t.microsecond // 1000:03d}"
-        out.append([ts_str, r["acc_x"], r["acc_y"], r["acc_z"], r["gyro_x"], r["gyro_y"], r["gyro_z"]])
+        acc = [f"{float(r[k]) * acc_scale:.6f}" for k in ("acc_x", "acc_y", "acc_z")]
+        gyro = [f"{float(r[k]) * gyro_scale:.6f}" for k in ("gyro_x", "gyro_y", "gyro_z")]
+        out.append([ts_str, *acc, *gyro])
 
     if dropped:
         print(f"警告: 发现 {dropped} 行时间戳小幅倒退（设备日志自身的记录异常，不是跨午夜），"
@@ -151,7 +171,8 @@ def report_time_gaps(out_rows, gap_ratio: float = 5.0):
             print(f"  ...（其余 {len(gaps) - 20} 处从略）")
 
 
-def convert_one(input_path: str, output_path: str = None, date_override: str = None) -> bool:
+def convert_one(input_path: str, output_path: str = None, date_override: str = None,
+                 acc_scale: float = 1.0, gyro_scale: float = 1.0) -> bool:
     """转换单个文件，成功返回 True。"""
     rows = parse_tf_offline_txt(input_path)
     if not rows:
@@ -175,7 +196,7 @@ def convert_one(input_path: str, output_path: str = None, date_override: str = N
         else:
             print(f"从文件名识别日期: {base_date}")
 
-    csv_rows = build_csv_rows(rows, base_date)
+    csv_rows = build_csv_rows(rows, base_date, acc_scale=acc_scale, gyro_scale=gyro_scale)
 
     out_path = output_path or (os.path.splitext(input_path)[0] + ".csv")
     with open(out_path, "w", encoding="utf-8", newline="") as f:
@@ -191,6 +212,13 @@ def cmd_convert(args):
     if not os.path.exists(args.input):
         print(f"路径不存在: {args.input}")
         sys.exit(1)
+
+    acc_scale, gyro_scale = args.acc_scale, args.gyro_scale
+    if args.unit_preset:
+        preset = UNIT_PRESETS[args.unit_preset]
+        acc_scale, gyro_scale = preset["acc_scale"], preset["gyro_scale"]
+    if acc_scale != 1.0 or gyro_scale != 1.0:
+        print(f"单位换算: acc_scale={acc_scale:.6f}  gyro_scale={gyro_scale:.6f}")
 
     if os.path.isdir(args.input):
         txt_files = sorted(f for f in os.listdir(args.input) if f.lower().endswith(".txt"))
@@ -208,13 +236,15 @@ def cmd_convert(args):
             in_path = os.path.join(args.input, fname)
             out_path = os.path.join(out_dir, os.path.splitext(fname)[0] + ".csv") if out_dir else None
             print(f"\n── {fname} ──")
-            if convert_one(in_path, output_path=out_path, date_override=args.date):
+            if convert_one(in_path, output_path=out_path, date_override=args.date,
+                            acc_scale=acc_scale, gyro_scale=gyro_scale):
                 ok_count += 1
 
         print(f"\n批量转换完成: 成功 {ok_count}/{len(txt_files)} 个文件")
         return
 
-    if not convert_one(args.input, output_path=args.output, date_override=args.date):
+    if not convert_one(args.input, output_path=args.output, date_override=args.date,
+                        acc_scale=acc_scale, gyro_scale=gyro_scale):
         sys.exit(1)
 
 
@@ -290,6 +320,16 @@ def main():
                                  "批量模式：输出目录（默认跟输入目录相同）")
     p_convert.add_argument("--date", default=None,
                             help="显式指定日期 YYYY-MM-DD，覆盖文件名自动识别")
+    p_convert.add_argument("--acc_scale", type=float, default=1.0,
+                            help="加速度换算系数，输出值=原始值×acc_scale（默认1.0=不换算）")
+    p_convert.add_argument("--gyro_scale", type=float, default=1.0,
+                            help="角速度换算系数，输出值=原始值×gyro_scale（默认1.0=不换算）")
+    p_convert.add_argument("--unit_preset", default=None, choices=list(UNIT_PRESETS.keys()),
+                            help="常用单位换算预设，会覆盖 --acc_scale/--gyro_scale。"
+                                 "ms2_rads_to_g_dps：TF设备若原始输出是(加速度m/s², 角速度rad/s)，"
+                                 "换算成跟自采witmotion训练数据一致的(加速度g, 角速度deg/s)。"
+                                 "用 src/eval/diagnose_device_signal.py 对比过静止时的|acc|数值"
+                                 "才能确认是否需要这个换算，不要凭空猜")
     p_convert.set_defaults(func=cmd_convert)
 
     p_slice = sub.add_parser("slice", help="按起止时间从CSV截取一段")

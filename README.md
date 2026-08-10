@@ -342,6 +342,15 @@ python src/data/tf_offline_to_custom.py slice data/raw_tf_csv/26080712_tf2.csv \
 
 > 转换逻辑复用 `hicc_offline_to_labelstudio.py` 已验证过的处理方式：区分"真正跨午夜"（时间戳倒退接近一整天，日期+1）和"设备记录异常的小幅倒退"（丢弃该行保证 timestamp 严格递增），转换完会提示真实数据缺口。
 
+**单位跟训练数据对不上时**：不同设备固件的原始输出单位约定不一定一样（比如 TF 设备可能是加速度m/s²/角速度rad/s，而自采witmotion训练数据是加速度g/角速度deg/s），直接拿新设备数据推理可能出现"某个类别识别率异常低甚至完全识别不出来"的情况。先用 `src/eval/diagnose_device_signal.py` 对比新设备CSV和已知正常CSV的 `|acc|`（静止时应该接近同一个常数）确认是不是单位问题，确认后再用 `--unit_preset ms2_rads_to_g_dps` 转换：
+
+```bash
+python src/data/tf_offline_to_custom.py convert data/raw_tf/ -o data/raw_tf_csv/ \
+  --unit_preset ms2_rads_to_g_dps
+```
+
+也可以用 `--acc_scale`/`--gyro_scale` 单独指定换算系数，不用预设。
+
 ### 标签映射（15类 → 3类）
 
 Label Studio 中支持全部标签正常标注，训练时通过 `configs/remap_custom_3class.yaml` 自动合并：
