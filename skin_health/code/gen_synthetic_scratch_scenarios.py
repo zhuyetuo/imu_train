@@ -6,8 +6,9 @@
 后者依赖真实标注数据，见 docs/skin_health.md §4 待验证参数清单。
 
 用法：
-    python src/eval/gen_synthetic_scratch_scenarios.py
+    python skin_health/code/gen_synthetic_scratch_scenarios.py
 """
+import os
 import random
 from datetime import datetime, timedelta
 
@@ -194,7 +195,7 @@ def main():
                 "persistence_score", "interrupt_score", "red_flags", "bootstrap_mode"]
         print(sub[cols].to_string(index=False))
 
-    out_path = "data/synthetic_skin_health_sbs_report.csv"
+    out_path = os.path.join(os.path.dirname(__file__), "..", "data", "synthetic_skin_health_sbs_report.csv")
     result.to_csv(out_path, index=False)
     print(f"\n完整结果已保存到 {out_path}")
 

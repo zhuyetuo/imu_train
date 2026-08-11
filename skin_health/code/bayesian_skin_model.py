@@ -15,7 +15,7 @@ beta 是特征对严重程度的影响力，对应PM文档手写的那些权重�
 估计出来的（哪怕数据少时基本等于先验，不是凭空编的）。
 
 用法（先跑合成数据验证机制本身）：
-    python src/eval/bayesian_skin_model.py
+    python skin_health/code/bayesian_skin_model.py
 """
 import numpy as np
 import pandas as pd

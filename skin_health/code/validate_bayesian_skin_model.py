@@ -8,7 +8,7 @@
 是验证"这套贝叶斯机制本身有没有表现出该有的统计行为"。
 
 用法：
-    python src/eval/validate_bayesian_skin_model.py
+    python skin_health/code/validate_bayesian_skin_model.py
 """
 import numpy as np
 import pandas as pd

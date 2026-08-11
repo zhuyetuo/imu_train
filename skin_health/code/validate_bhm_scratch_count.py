@@ -13,7 +13,7 @@
   3. 冷启动：一只全新狗，不确定性怎么随佩戴天数从"品种先验"收窄
 
 用法：
-    python src/eval/validate_bhm_scratch_count.py
+    python skin_health/code/validate_bhm_scratch_count.py
 """
 import numpy as np
 import pandas as pd

@@ -150,13 +150,13 @@ PM 文档里大量参数标注了"建议初始值""产品算法配置值，不�
 
 ### 4.1 合成数据已经发现的一个公式级问题（不是参数调优，是逻辑缺口）
 
-用 `src/eval/gen_synthetic_scratch_scenarios.py` 跑合成数据时发现：**§2.3 双门槛公式里"分母最低按3计算"这条规则，会让低基线狗的适度绝对增加永远算不出分**。
+用 `skin_health/code/gen_synthetic_scratch_scenarios.py` 跑合成数据时发现：**§2.3 双门槛公式里"分母最低按3计算"这条规则，会让低基线狗的适度绝对增加永远算不出分**。
 
 具体机制：基线≈0的狗，分母被下限保护成3；要让 `ratio = current / 3 ≥ 1.3`（最低档"轻微变化"的倍数门槛），当天事件数必须 ≥4。也就是说，一只原本几乎不抓挠的狗，哪怕稳定维持在**每天3次**的新水平（`3/3=1.0倍`，达不到1.3倍门槛），无论持续多少天，变化幅度分永远是0——这正是我们最早讨论"前14天0、后14天3"那个例子的翻版，只是这次是在PM的正式公式里复现出来的，不是我们自己假设的。
 
 这不是"参数取值需要调"的问题（调阈值治标不治本），而是双门槛公式本身对"极低基线+适度绝对增加"这类组合结构性不敏感。
 
-**已采纳方案：分母保护值从3改成1**（`src/eval/scratch_burden.py` 里的 `BASELINE_DENOM_FLOOR`）。改动前后用9个既有场景+1个新增场景跑过完整回归，并单独做过边界值扫描（`baseline∈[0,10]步长0.5 × current∈[0,40]`覆盖次数维度、`baseline∈[0,10]秒 × current∈[0,1200]秒`覆盖时长维度）验证过：
+**已采纳方案：分母保护值从3改成1**（`skin_health/code/scratch_burden.py` 里的 `BASELINE_DENOM_FLOOR`）。改动前后用9个既有场景+1个新增场景跑过完整回归，并单独做过边界值扫描（`baseline∈[0,10]步长0.5 × current∈[0,40]`覆盖次数维度、`baseline∈[0,10]秒 × current∈[0,1200]秒`覆盖时长维度）验证过：
 
 - **改动只在一个极窄边界生效**：次数维度里，唯一被改变最终档位的组合是"基线中位数精确为0、当天事件数精确等于3"（0→3分从0分变成5分，即最初发现问题的那个案例本身）；时长维度里没有任何组合被改变（abs_min门槛是分钟级，2秒的floor差异在这个量级上完全可忽略）
 - **PM文档7个worked examples（基线分别是2、2、2、5、5、30、30）全部不受影响**——这些基线都是≥2的整数，改动只在基线精确为0时才会让最终档位不同，跟PM验收过的例子没有重叠
@@ -205,14 +205,14 @@ PM 文档里大量参数标注了"建议初始值""产品算法配置值，不�
 
 ### 7.1 代码
 
-- `src/eval/scratch_burden.py`：SBS 打分引擎。输入统一的事件表（`pet_id, start, end, duration_sec`）+ 每日有效佩戴时长表，输出每只狗每天的四项子分、红旗、总分、C0/C1/C2。包含 `load_events_from_infer_json()`，可以直接读 `infer_csv_scratch.py` 产出的 `*_infer.json`（`scratch_segments` 字段），衔接真实数据不需要再写一遍格式转换
-- `src/eval/gen_synthetic_scratch_scenarios.py`：生成9种场景的合成事件数据，跑一遍引擎，打印/保存每只"狗"每天的完整打分明细，用于验证机制本身有没有按预期工作（不是验证抓挠识别准确率，那部分依赖真实标注数据，见 §4）
-- `src/eval/daily_skin_report.py`：**接真实数据每天出报告用这个**——衔接 `run_infer_tf.sh`（或任何走 `infer_csv_scratch.py` 的推理流程）产出的 `_infer.json` 和对应原始CSV，自动估算每日有效佩戴时长（按当天实际记录到的行数/设备采样率算，天然排除设备缺口/未佩戴时段），跑一遍 `scratch_burden.run_pipeline()`，打印/保存每天的次数、总时长、四项子分、总分、档位。一只狗一组 `--csv_dir`/`--infer_json_dir`，多只狗分别跑
+- `skin_health/code/scratch_burden.py`：SBS 打分引擎。输入统一的事件表（`pet_id, start, end, duration_sec`）+ 每日有效佩戴时长表，输出每只狗每天的四项子分、红旗、总分、C0/C1/C2。包含 `load_events_from_infer_json()`，可以直接读 `infer_csv_scratch.py` 产出的 `*_infer.json`（`scratch_segments` 字段），衔接真实数据不需要再写一遍格式转换
+- `skin_health/code/gen_synthetic_scratch_scenarios.py`：生成9种场景的合成事件数据，跑一遍引擎，打印/保存每只"狗"每天的完整打分明细，用于验证机制本身有没有按预期工作（不是验证抓挠识别准确率，那部分依赖真实标注数据，见 §4）
+- `skin_health/code/daily_skin_report.py`：**接真实数据每天出报告用这个**——衔接 `run_infer_tf.sh`（或任何走 `infer_csv_scratch.py` 的推理流程）产出的 `_infer.json` 和对应原始CSV，自动估算每日有效佩戴时长（按当天实际记录到的行数/设备采样率算，天然排除设备缺口/未佩戴时段），跑一遍 `scratch_burden.run_pipeline()`，打印/保存每天的次数、总时长、四项子分、总分、档位。一只狗一组 `--csv_dir`/`--infer_json_dir`，多只狗分别跑
 
 运行方式：
 ```bash
-python src/eval/gen_synthetic_scratch_scenarios.py
-# 输出打印到终端 + 保存到 data/synthetic_skin_health_sbs_report.csv
+python skin_health/code/gen_synthetic_scratch_scenarios.py
+# 输出打印到终端 + 保存到 skin_health/data/synthetic_skin_health_sbs_report.csv
 ```
 
 ### 7.2 合成数据覆盖的场景
@@ -282,12 +282,12 @@ python src/eval/gen_synthetic_scratch_scenarios.py
 
 ### 9.2 代码
 
-- `src/eval/bayesian_skin_model.py`：模型定义（`fit_hierarchical_model`）+ 新狗预测（`predict_new_dog`，只用群体层面后验，不掺入个体信息）+ 结果汇总（`summarize`）。用 `PyMC` 实现（新增依赖：`pymc`、`arviz`，`requirements.txt` 还没加，先手动 `pip install pymc arviz`）
-- `src/eval/validate_bayesian_skin_model.py`：合成数据验证脚本，4只"数据深度"不同的合成狗（60/20/5/30天历史），验证机制本身该有的统计行为，不是验证真实预测准不准
+- `skin_health/code/bayesian_skin_model.py`：模型定义（`fit_hierarchical_model`）+ 新狗预测（`predict_new_dog`，只用群体层面后验，不掺入个体信息）+ 结果汇总（`summarize`）。用 `PyMC` 实现（新增依赖：`pymc`、`arviz`，`requirements.txt` 还没加，先手动 `pip install pymc arviz`）
+- `skin_health/code/validate_bayesian_skin_model.py`：合成数据验证脚本，4只"数据深度"不同的合成狗（60/20/5/30天历史），验证机制本身该有的统计行为，不是验证真实预测准不准
 
 运行方式：
 ```bash
-python src/eval/validate_bayesian_skin_model.py
+python skin_health/code/validate_bayesian_skin_model.py
 ```
 
 ### 9.3 合成数据验证结果
@@ -339,12 +339,12 @@ dog_effect   ~ Normal(breed_effect[该狗品种], sigma_dog)
 
 ### 10.3 代码
 
-- `src/eval/bhm_scratch_count.py`：模型定义（`fit_model`）+ 异常检测（`posterior_predictive_check`，用只基于基线期数据估出的个体后验，模拟"正常情况下应该是多少次"的预测分布，看新观测值落在第几百分位，超过97.5%或低于2.5%判定异常——是有统计意义的检验，不是"倍数超过3"这种手调阈值）+ 冷启动近似（`sequential_cold_start`，用Gamma-Poisson共轭近似做在线更新，不需要每天重跑完整MCMC）
-- `src/eval/validate_bhm_scratch_count.py`：合成数据验证，用我们实际的4个品种，每个品种额外配了9只"合成陪跑"狗凑够验证用的样本规模（现实里每个品种现在只有1只真实狗，组内方差没法估，合成陪跑狗只是为了在统计上说得过去的规模下验证机制本身，不代表我们真的有这么多狗）
+- `skin_health/code/bhm_scratch_count.py`：模型定义（`fit_model`）+ 异常检测（`posterior_predictive_check`，用只基于基线期数据估出的个体后验，模拟"正常情况下应该是多少次"的预测分布，看新观测值落在第几百分位，超过97.5%或低于2.5%判定异常——是有统计意义的检验，不是"倍数超过3"这种手调阈值）+ 冷启动近似（`sequential_cold_start`，用Gamma-Poisson共轭近似做在线更新，不需要每天重跑完整MCMC）
+- `skin_health/code/validate_bhm_scratch_count.py`：合成数据验证，用我们实际的4个品种，每个品种额外配了9只"合成陪跑"狗凑够验证用的样本规模（现实里每个品种现在只有1只真实狗，组内方差没法估，合成陪跑狗只是为了在统计上说得过去的规模下验证机制本身，不代表我们真的有这么多狗）
 
 运行方式：
 ```bash
-python src/eval/validate_bhm_scratch_count.py
+python skin_health/code/validate_bhm_scratch_count.py
 ```
 
 ### 10.4 合成数据验证结果
