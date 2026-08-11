@@ -2,7 +2,7 @@
 
 ## 1. 背景与目标
 
-项圈松动或被摘下时，IMU 数据要么已经不能反映狗的真实行为（松动导致额外晃动混进信号），要么根本不是狗产生的（设备静置/充电时的信号）。这两种情况都不该喂进主行为分类模型，也不该计入抓挠/睡眠/活动等下游统计——这正是 PM 文档（Wardyn V0.4）§6 `LOOSE_COLLAR` 和 `wear_state` 字段（`worn/off-body/charging/uncertain`）要覆盖的范围，也是 `docs/skin_health.md` §3.2 里 `wear_state`/`data_quality_flag` 字段依赖的上游判断。
+项圈松动或被摘下时，IMU 数据要么已经不能反映狗的真实行为（松动导致额外晃动混进信号），要么根本不是狗产生的（设备静置/充电时的信号）。这两种情况都不该喂进主行为分类模型，也不该计入抓挠/睡眠/活动等下游统计——这正是 PM 文档（Wardyn V0.4）§6 `LOOSE_COLLAR` 和 `wear_state` 字段（`worn/off-body/charging/uncertain`）要覆盖的范围，也是 `skin_health/docs/skin_health.md` §3.2 里 `wear_state`/`data_quality_flag` 字段依赖的上游判断。
 
 两个检测是独立的判断，不是同一个模型的两个输出：
 
@@ -29,7 +29,7 @@ PM 文档原话："在适合判断的运动状态下（如仅在持续稳定行�
 
 ### 2.2 聚合成事件
 
-按 PM 文档规则：10分钟滑窗内松动信号累计超过3分钟，记1次松动事件（`aggregate_loose_events`）。松动事件期间的抓挠/活动/睡眠数据不采信——这个逻辑直接对接 `docs/skin_health.md` 里的 `data_quality_flag`/`wear_state`，不需要另起一套。
+按 PM 文档规则：10分钟滑窗内松动信号累计超过3分钟，记1次松动事件（`aggregate_loose_events`）。松动事件期间的抓挠/活动/睡眠数据不采信——这个逻辑直接对接 `skin_health/docs/skin_health.md` 里的 `data_quality_flag`/`wear_state`，不需要另起一套。
 
 ### 2.3 判断"是否处于稳定步态"这个前置条件谁来给
 

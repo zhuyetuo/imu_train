@@ -10,12 +10,12 @@ scratch_burden.py 的打分引擎，供每天例行跑、跟兽医当天的目�
 额外的佩戴检测逻辑（松动/未佩戴检测那部分工作先不接，见对话里"先不做"的决定）。
 
 用法（每天跑一次，会用当前 CSV_DIR/infer_json_dir 下能看到的全部历史数据重算）：
-    python src/eval/daily_skin_report.py \
+    python skin_health/code/daily_skin_report.py \
         --pet_id dog1 \
         --csv_dir data/raw_tf_csv \
         --infer_json_dir infer_result_tf_majority/csv/_infer \
         --device_hz 50 \
-        --out_csv results/skin_health/dog1_daily.csv
+        --out_csv skin_health/data/dog1_daily.csv
 """
 import argparse
 import glob
@@ -25,8 +25,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # for infer_csv_scratch (src/)
-sys.path.insert(0, os.path.dirname(__file__))  # for scratch_burden (src/eval/)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))  # for infer_csv_scratch
+sys.path.insert(0, os.path.dirname(__file__))  # for scratch_burden (同目录)
 
 from infer_csv_scratch import load_csv  # noqa: E402
 from scratch_burden import load_events_from_infer_json, run_pipeline  # noqa: E402
@@ -57,7 +58,7 @@ _TIER_LABEL = {"C0": "C0 正常", "C1": "C1 需要关注", "C2": "C2 建议兽�
 
 
 def write_vet_markdown(merged, pet_id, out_path):
-    """跟 docs/skin_health_daily_template.md 同样的表格格式，
+    """跟 skin_health/docs/skin_health_daily_template.md 同样的表格格式，
     '兽医目测评估'/'备注' 两列留空给人工填，算法这边只填自己算出来的那几列。"""
     lines = [
         f"# {pet_id} 皮肤评级日报（算法计算 vs 兽医目测，对照用）",
@@ -92,7 +93,7 @@ def main():
     ap.add_argument("--device_hz", type=int, required=True)
     ap.add_argument("--out_csv", default=None, help="把每日明细追加保存成CSV，方便跟兽医评分对照")
     ap.add_argument("--out_md", default=None,
-                    help="导出成给兽医看的markdown表格（跟 docs/skin_health_daily_template.md "
+                    help="导出成给兽医看的markdown表格（跟 skin_health/docs/skin_health_daily_template.md "
                          "同样的格式），'兽医目测评估'/'备注' 两列"
                          "留空，每次重跑会覆盖整份文件，兽医已经填的内容记得先另存")
     args = ap.parse_args()
@@ -157,7 +158,7 @@ def main():
 
     print("\n把上面这张表的 date/event_count/total_duration_min/tier 这几列，跟兽医当天的目测评分按日期对齐，"
           "看趋势是否一致。bootstrap_mode=True 的行，是靠绝对阈值兜底算的分（还没有个人基线），"
-          "不是靠这只狗自己的历史对比算的，见 docs/skin_health.md §2.3.1。")
+          "不是靠这只狗自己的历史对比算的，见 skin_health/docs/skin_health.md §2.3.1。")
 
 
 if __name__ == "__main__":

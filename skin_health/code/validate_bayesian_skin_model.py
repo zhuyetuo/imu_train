@@ -8,7 +8,7 @@
 是验证"这套贝叶斯机制本身有没有表现出该有的统计行为"。
 
 用法：
-    python src/eval/validate_bayesian_skin_model.py
+    python skin_health/code/validate_bayesian_skin_model.py
 """
 import numpy as np
 import pandas as pd
@@ -19,21 +19,47 @@ rng = np.random.default_rng(42)
 
 TRUE_POP_MEAN = 0.0
 TRUE_POP_SD = 1.2
-TRUE_BETA = 0.8  # 特征（抓挠强度）对严重程度的真实影响力
+
+# 之前的版本只用了一个"抓挠强度"特征，容易讲清楚"收缩"这个概念，但会让人误以为
+# 模型只支持单一特征——实际 fit_hierarchical_model() 的 feature_cols 本来就是
+# 一个列表，这里改成真正的多维特征，对应之前讨论过的特征表设计：次数、时长、
+# 夜间占比、聚集程度（用事件间隔的离散程度代替人为设的"1小时5次"阈值）、
+# 有没有中断睡眠。
+FEATURE_NAMES = ["event_count_z", "duration_min_z", "night_ratio_z",
+                  "interval_std_z", "sleep_interrupt"]
+TRUE_BETAS = {
+    "event_count_z": 0.5,
+    "duration_min_z": 0.6,
+    "night_ratio_z": 0.4,
+    "interval_std_z": -0.5,   # 间隔离散度越低=事件越聚集=越严重，所以系数是负的
+    "sleep_interrupt": 0.7,
+}
 
 
 def simulate_dog(true_alpha, n_days, label_noise=0.1):
-    """给一只狗模拟 n_days 天的数据：每天一个"抓挠强度"特征 + 一个兽医打的
-    有序标签（可能有噪声，label_noise概率随机打错一档，模拟兽医主观误差）。"""
-    x = rng.normal(0, 1, n_days)  # 标准化后的当天抓挠强度特征
-    eta = true_alpha + TRUE_BETA * x
-    # 用固定切点把连续的eta离散成3类，模拟"真实"标签生成过程
+    """给一只狗模拟 n_days 天的多维特征 + 兽医打的有序标签（可能有噪声）。
+
+    5个特征不是互相独立生成的，而是都跟一个共同的"今天状态有多差"潜变量相关
+    （现实里次数多的日子往往时长也长、也更容易聚集），这样更接近真实数据里
+    特征之间有相关性的情况，不是刻意制造的独立干净数据。
+    """
+    day_severity = rng.normal(0, 1, n_days)  # 共同的潜在"今天有多糟"因子
+    event_count_z = day_severity + rng.normal(0, 0.5, n_days)
+    duration_min_z = 0.7 * day_severity + rng.normal(0, 0.5, n_days)
+    night_ratio_z = 0.3 * day_severity + rng.normal(0, 0.8, n_days)
+    interval_std_z = -0.6 * day_severity + rng.normal(0, 0.6, n_days)
+    sleep_interrupt = (rng.random(n_days) < (0.15 + 0.2 * np.clip(day_severity, 0, None))).astype(float)
+
+    X = np.stack([event_count_z, duration_min_z, night_ratio_z, interval_std_z, sleep_interrupt], axis=1)
+    beta_vec = np.array([TRUE_BETAS[f] for f in FEATURE_NAMES])
+    eta = true_alpha + X @ beta_vec
+
     cutpoints = [-0.5, 0.5]
     true_label = np.digitize(eta + rng.normal(0, 0.3, n_days), cutpoints)
     label = true_label.copy()
     flip_mask = rng.random(n_days) < label_noise
     label[flip_mask] = rng.integers(0, 3, flip_mask.sum())
-    return x, label
+    return X, label
 
 
 def main():
@@ -47,17 +73,20 @@ def main():
 
     rows = []
     for dog_id, cfg in dogs.items():
-        x, label = simulate_dog(cfg["true_alpha"], cfg["n_days"])
-        for xi, li in zip(x, label):
-            rows.append({"pet_id": dog_id, "scratch_intensity": xi, "vet_label": li})
+        X, label = simulate_dog(cfg["true_alpha"], cfg["n_days"])
+        for xi, li in zip(X, label):
+            row = {"pet_id": dog_id, "vet_label": li}
+            row.update(dict(zip(FEATURE_NAMES, xi)))
+            rows.append(row)
     df = pd.DataFrame(rows)
 
-    print(f"合成数据: {len(df)} 行, {df.pet_id.nunique()} 只狗")
+    print(f"合成数据: {len(df)} 行, {df.pet_id.nunique()} 只狗, "
+          f"{len(FEATURE_NAMES)} 个特征: {FEATURE_NAMES}")
     print(df.groupby("pet_id").size().rename("天数"))
 
     print("\n拟合分层贝叶斯模型...")
     model, trace, dog_ids = fit_hierarchical_model(
-        df, feature_cols=["scratch_intensity"], label_col="vet_label", dog_col="pet_id")
+        df, feature_cols=FEATURE_NAMES, label_col="vet_label", dog_col="pet_id")
 
     summary, alpha_rows = summarize(trace, dog_ids)
 
@@ -102,9 +131,16 @@ def main():
     print(f"  均值应该接近0（群体平均水平），标准差应该明显大于任何一只有数据的狗"
           f"（因为完全没有个体信息，全靠群体先验猜）")
 
-    beta_mean = summary.loc[summary.param == "beta[0]", "mean"].values[0]
-    print(f"\n特征影响力(beta)估计: {beta_mean:.2f} (真实值={TRUE_BETA}，"
-          "cutpoints跟beta也有一定程度的尺度关联，不要求完全精确匹配，看数量级和方向对不对)")
+    print("\n" + "=" * 90)
+    print("各特征的影响力(beta)估计 vs 真实值——这里重点看方向(正/负)和相对大小排序对不对，")
+    print("不要求绝对数值精确匹配（原因同前面alpha的偏差说明：合成标签用正态噪声生成，")
+    print("跟OrderedLogistic内部假设的逻辑分布噪声形式不完全一致，会有系统性尺度偏差）")
+    print("=" * 90)
+    for i, fname in enumerate(FEATURE_NAMES):
+        beta_mean = summary.loc[summary.param == f"beta[{i}]", "mean"].values[0]
+        true_beta = TRUE_BETAS[fname]
+        direction_ok = "✓方向对" if (beta_mean > 0) == (true_beta > 0) else "✗方向不对"
+        print(f"  {fname:18s}: 估计值={beta_mean:+.2f}  真实值={true_beta:+.2f}  {direction_ok}")
 
 
 if __name__ == "__main__":
