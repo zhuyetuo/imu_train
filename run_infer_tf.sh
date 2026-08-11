@@ -21,6 +21,11 @@
 #   DEVICE_HZ     设备采样率（默认 50，TF存储卡版本实测时间戳步长20ms=50Hz；如果你这批数据
 #                 不是50Hz，一定要传对，传错了下采样比例会算错）
 #   MODEL_HZ      模型采样率（默认 0=从模型元数据读取，一般是16）
+#   RESAMPLE_METHOD  device_hz != model_hz 时用哪种降采样算法（默认 poly=scipy
+#                 resample_poly）。训练数据是用 witmotion_imu 里的滑动平均低通+线性插值
+#                 生成的，跟 poly 不是同一套算法，实测有约6~8%输出差异（见
+#                 src/eval/compare_resample_methods.py）。不确定哪个更准时，两种都跑一遍
+#                 对比"抓挠"检出情况，改成 RESAMPLE_METHOD=training_match 复刻训练时的算法
 #   CONFIDENCE_THRESHOLD  置信度过滤（默认 0.65，减少人工核实量）
 #   MERGE_GAP     合并相邻抓挠片段的最大间隔秒数（默认 1s）
 #   MIN_WINDOWS   片段最少窗口数（默认 1=不过滤）
@@ -43,6 +48,8 @@ RESULT_ROOT="${RESULT_ROOT:-infer_result_tf}"
 WORKERS="${WORKERS:-8}"
 DEVICE_HZ="${DEVICE_HZ:-50}"
 MODEL_HZ="${MODEL_HZ:-0}"
+RESAMPLE_METHOD="${RESAMPLE_METHOD:-poly}"  # poly（默认）或 training_match，
+                                             # 见 src/eval/compare_resample_methods.py
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-0.65}"
 MERGE_GAP="${MERGE_GAP:-1}"
 MIN_WINDOWS="${MIN_WINDOWS:-1}"
@@ -77,6 +84,7 @@ python src/infer_csv_scratch.py \
     --scratch_only \
     --merge_gap "$MERGE_GAP" \
     --min_windows "$MIN_WINDOWS" \
+    --resample_method "$RESAMPLE_METHOD" \
     $( [[ "$KEEP_ISOLATED" == "0" ]] && echo "--no_keep_isolated" ) \
     $hz_args \
     2>&1 | tee "$CSV_OUT_DIR/infer.log"

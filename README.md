@@ -14,6 +14,7 @@
 | [vision.md](docs/vision.md) | 视觉行为识别（CLIP / 豆包 / YOLO26） |
 | [features.md](docs/features.md) | 特征工程说明（每个特征对应的物理/行为意义）、行为分类体系（当前3分类 + 规划中的瘙痒细分类） |
 | [skin_health.md](docs/skin_health.md) | 基于抓挠行为的皮肤健康评估方案（草案）：趋势报告 + 异常检测 |
+| [skin_health_daily_template.md](docs/skin_health_daily_template.md) | 算法评级 vs 兽医目测的每日对照表格模板，`daily_skin_report.py --out_md` 可以直接生成同样格式 |
 | [wear_state_detection.md](docs/wear_state_detection.md) | 佩戴状态检测：项圈松动检测 + 未佩戴/静置检测（心跳呼吸微振动） |
 
 ---
@@ -350,6 +351,8 @@ python src/data/tf_offline_to_custom.py convert data/raw_tf/ -o data/raw_tf_csv/
 ```
 
 也可以用 `--acc_scale`/`--gyro_scale` 单独指定换算系数，不用预设。
+
+**采样率跟训练数据不一致时**：不需要手动把CSV预先降采样，`infer_csv_scratch.py`/`run_infer_tf.sh` 会在推理时自动按 `--device_hz`/`--model_hz`（或 `DEVICE_HZ`/`MODEL_HZ` 环境变量）现场降采样。但要注意：默认用的 `scipy.signal.resample_poly`，跟当年用 `witmotion_imu` 生成16Hz训练数据时实际用的算法（滑动平均低通+线性插值）不是同一套，实测两者输出有约6~8%的差异（`src/eval/compare_resample_methods.py`）。过去这个不一致基本不影响任何东西，因为训练/评估几乎都是直接读预先降采样好的16Hz文件（源采样率=模型采样率时不会触发任何重采样）；新设备原生采样率不是16Hz时，第一次会真正用到这条路径。想跟训练时保持一致，加 `--resample_method training_match`（或 `RESAMPLE_METHOD=training_match`）；不确定哪个更好就两种都跑一遍，对比"抓挠"检出效果。
 
 ### 标签映射（15类 → 3类）
 
