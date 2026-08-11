@@ -52,6 +52,38 @@ def compute_wear_hours(csv_dir, pet_id, device_hz):
     return wear_hours
 
 
+_TIER_LABEL = {"C0": "C0 正常", "C1": "C1 需要关注", "C2": "C2 建议兽医检查",
+               "insufficient_data": "数据不足"}
+
+
+def write_vet_markdown(merged, pet_id, out_path):
+    """跟 docs/skin_health_daily_template.md 同样的表格格式，
+    '兽医目测评估'/'备注' 两列留空给人工填，算法这边只填自己算出来的那几列。"""
+    lines = [
+        f"# {pet_id} 皮肤评级日报（算法计算 vs 兽医目测，对照用）",
+        "",
+        "> 皮肤评级：C0 正常 / C1 需要关注 / C2 建议兽医检查。"
+        "`是否引导期`=是 的行，评级是靠绝对秒数阈值兜底算的（还没有这只狗自己的21天历史基线可比），"
+        "不影响兽医正常打分，两边独立判断即可。",
+        "",
+        "| 日期 | 算法-抓挠次数 | 算法-抓挠总时长(分钟) | 算法-皮肤评级 | 算法-触发红旗 | "
+        "是否引导期(bootstrap_mode) | 兽医目测评估 | 备注 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for _, row in merged.iterrows():
+        tier = _TIER_LABEL.get(row.get("tier"), row.get("tier", ""))
+        red_flags = row.get("red_flags")
+        red_flags_str = ", ".join(red_flags) if isinstance(red_flags, list) and red_flags else "-"
+        bootstrap = "是" if row.get("bootstrap_mode") else "否"
+        lines.append(
+            f"| {row['date']} | {row.get('event_count', 0)} | {row.get('total_duration_min', 0):.2f} | "
+            f"{tier} | {red_flags_str} | {bootstrap} | | |"
+        )
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pet_id", required=True)
@@ -59,6 +91,10 @@ def main():
     ap.add_argument("--infer_json_dir", required=True, help="run_infer_tf.sh 产出的 _infer JSON 目录")
     ap.add_argument("--device_hz", type=int, required=True)
     ap.add_argument("--out_csv", default=None, help="把每日明细追加保存成CSV，方便跟兽医评分对照")
+    ap.add_argument("--out_md", default=None,
+                    help="导出成给兽医看的markdown表格（跟 docs/skin_health_daily_template.md "
+                         "同样的格式），'兽医目测评估'/'备注' 两列"
+                         "留空，每次重跑会覆盖整份文件，兽医已经填的内容记得先另存")
     args = ap.parse_args()
 
     json_paths = sorted(glob.glob(os.path.join(args.infer_json_dir, "*_infer.json")))
@@ -113,6 +149,11 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(args.out_csv)) or ".", exist_ok=True)
         merged.to_csv(args.out_csv, index=False)
         print(f"\n已保存到 {args.out_csv}（每天重跑会用最新全部历史覆盖，不是追加）")
+
+    if args.out_md:
+        write_vet_markdown(merged, args.pet_id, args.out_md)
+        print(f"已生成兽医对照表: {args.out_md}（每次重跑会整份覆盖，兽医已经填的'兽医目测评估'/'备注'"
+              "记得先另存，这个脚本不会帮你保留）")
 
     print("\n把上面这张表的 date/event_count/total_duration_min/tier 这几列，跟兽医当天的目测评分按日期对齐，"
           "看趋势是否一致。bootstrap_mode=True 的行，是靠绝对阈值兜底算的分（还没有个人基线），"

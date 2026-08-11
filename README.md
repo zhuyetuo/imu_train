@@ -14,6 +14,7 @@
 | [vision.md](docs/vision.md) | 视觉行为识别（CLIP / 豆包 / YOLO26） |
 | [features.md](docs/features.md) | 特征工程说明（每个特征对应的物理/行为意义）、行为分类体系（当前3分类 + 规划中的瘙痒细分类） |
 | [skin_health.md](docs/skin_health.md) | 基于抓挠行为的皮肤健康评估方案（草案）：趋势报告 + 异常检测 |
+| [skin_health_daily_template.md](docs/skin_health_daily_template.md) | 算法评级 vs 兽医目测的每日对照表格模板，`daily_skin_report.py --out_md` 可以直接生成同样格式 |
 | [wear_state_detection.md](docs/wear_state_detection.md) | 佩戴状态检测：项圈松动检测 + 未佩戴/静置检测（心跳呼吸微振动） |
 
 ---
