@@ -85,9 +85,17 @@ def load_csv(path):
     return acc, gyro, ts, valid_mask, null_ratio
 
 
-def downsample(data, device_hz, model_hz):
+def downsample(data, device_hz, model_hz, method="poly"):
+    """method="poly"（默认，向后兼容）：scipy resample_poly，多相FIR滤波。
+    method="training_match"：复刻 witmotion_imu 生成训练数据时用的算法（滑动平均低通+
+    线性插值），device_hz != model_hz 且要求跟训练数据用同一套重采样算法时用这个——
+    见 src/data/resample_training_match.py 顶部注释，两种方法实测有约6~8%的输出差异。
+    """
     if device_hz == model_hz:
         return data
+    if method == "training_match":
+        from resample_training_match import resample_training_match
+        return resample_training_match(data, device_hz, model_hz)
     g = gcd(device_hz, model_hz)
     up, down = model_hz // g, device_hz // g
     if up == 1:
@@ -106,7 +114,8 @@ def sliding_windows(data, window_size, stride):
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
-               output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority", **kwargs):
+               output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
+               resample_method="poly", **kwargs):
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -117,10 +126,10 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             print(f"  [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
 
     # 降采样
-    acc_ds       = downsample(acc,        device_hz, model_hz)
-    gyro_ds      = downsample(gyro,       device_hz, model_hz)
+    acc_ds       = downsample(acc,        device_hz, model_hz, method=resample_method)
+    gyro_ds      = downsample(gyro,       device_hz, model_hz, method=resample_method)
     valid_mask_ds = downsample(valid_mask.astype(np.float32).reshape(-1, 1),
-                               device_hz, model_hz).reshape(-1) > 0.5
+                               device_hz, model_hz, method=resample_method).reshape(-1) > 0.5
 
     # 时间戳对应（降采样后的索引 → 原始时间戳）
     ratio = device_hz / model_hz
@@ -350,6 +359,12 @@ def main():
     parser.add_argument("--output_dir", default="",
                         help="保存每个文件推理结果 JSON 的目录（留空不保存）")
     parser.add_argument("--no_gravity_align", action="store_true")
+    parser.add_argument("--resample_method", default="poly", choices=["poly", "training_match"],
+                        help="device_hz != model_hz 时用哪种降采样算法（默认poly=scipy "
+                             "resample_poly）。training_match 复刻 witmotion_imu 生成训练数据"
+                             "时用的算法（滑动平均低通+线性插值），两种方法实测有约6~8%的输出"
+                             "差异（src/eval/compare_resample_methods.py），源数据不是已经"
+                             "预先降采样好的16Hz witmotion文件时（比如TF设备）值得两种都试试")
     args = parser.parse_args()
 
     # 加载模型 + 元数据
@@ -415,7 +430,8 @@ def main():
                               min_windows=args.min_windows,
                               keep_isolated=not args.no_keep_isolated,
                               label_mode=label_mode,
-                              output_dir=out_dir)
+                              output_dir=out_dir,
+                              resample_method=args.resample_method)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None
