@@ -31,6 +31,8 @@ skin_health/
 
 要给贝叶斯模型选特征时看 [`docs/feature_catalog.md`](docs/feature_catalog.md)——所有讨论过的候选特征（频率/时长/时间分布/聚集/睡眠/相对基线六大类），标了现在实际用没用上、数据类型（计数/连续/比例/二值，选似然分布用得上），以及选特征时的几条实用建议。
 
+贝叶斯模型具体部署时的几个业务问题（几天能开始评估、阈值临床/群体动态怎么选、多少只狗群体阈值才可信、现在4只狗能不能直接开展）配图表讲解，看 [`docs/bayesian_model_business_guide.md`](docs/bayesian_model_business_guide.md)。
+
 ## 快速上手
 
 ```bash
