@@ -82,30 +82,50 @@ def csv_start_sec(csv_path: str) -> float:
         return 0.0
 
 
-def session_prefix(stem: str) -> str:
-    """去掉末尾的 _camN_imuM_resampled16hz，得到这次录制场次的公共前缀
+# 支持的文件名后缀，按顺序尝试匹配——加新的命名规则时往这个元组里加一个就行，
+# 不用改下面三个函数的逻辑。_resampled16hz 是witmotion_imu多机位采集脚本的默认
+# 产出，_raw 是不经过重采样、直接用原始采样率的命名（比如以后想跳过降采样这步）。
+KNOWN_STEM_SUFFIXES = ("_resampled16hz", "_raw")
+
+
+def session_prefix(stem: str) -> tuple:
+    """去掉末尾的 _camN_imuM{后缀}，得到这次录制场次的公共前缀 + 匹配到的后缀
     （比如 multicam_20260731_024344249_cam1_imu3_resampled16hz
-     → multicam_20260731_024344249）。
+     → ("multicam_20260731_024344249", "_resampled16hz")）。
 
     房间固定只有2个机位(cam1/cam2)，拍的是整个房间；狗身上戴的IMU编号
     (imu1/imu2/imu3/imu4...)是每条狗自己的编号，跟机位编号没有对应关系——
     "cam1_imu1"/"cam2_imu2"只是这两个固定机位视频文件名本身固定的后缀
     （大概率是摄像头设备自己的编号，凑巧2条狗时刚好跟imu1/imu2对上），
-    3条狗以后，imu3/imu4没有自己的专属视频，得用这两个固定机位的视频。"""
-    return re.sub(r"_cam\d+_imu\d+_resampled16hz$", "", stem)
+    3条狗以后，imu3/imu4没有自己的专属视频，得用这两个固定机位的视频。
+
+    返回的后缀要传给 camera_video_stem()，保证同一次调用里前后用的是同一套
+    命名规则（万一以后两种后缀真的混用在同一批文件里，至少行为是可预测的：
+    跟着触发检测的这个CSV自己的后缀走，不是瞎猜）。匹配不到任何已知后缀时，
+    stem 原样返回、后缀给第一个默认值——效果等同于以前"匹配不上就不处理"
+    的行为，不会比改造前更差。"""
+    for suf in KNOWN_STEM_SUFFIXES:
+        new_stem, n = re.subn(rf"_cam\d+_imu\d+{re.escape(suf)}$", "", stem)
+        if n:
+            return new_stem, suf
+    return stem, KNOWN_STEM_SUFFIXES[0]
 
 
-def camera_video_stem(session: str, cam_num: int) -> str:
+def camera_video_stem(session: str, cam_num: int, suffix: str = KNOWN_STEM_SUFFIXES[0]) -> str:
     """两个机位视频的文件名后缀固定是 cam1_imu1 / cam2_imu2，
-    不管这个场次实际挂了几条狗的IMU。"""
-    return f"{session}_cam{cam_num}_imu{cam_num}_resampled16hz"
+    不管这个场次实际挂了几条狗的IMU。suffix 从 session_prefix() 的返回值传进来，
+    保证跟触发检测的这个CSV用的是同一套命名规则。"""
+    return f"{session}_cam{cam_num}_imu{cam_num}{suffix}"
 
 
 def extract_imu_label(stem: str) -> str:
     """从stem里提取真正触发检测的IMU编号，比如
     ..._cam1_imu3_resampled16hz → 'IMU3'。取不到就返回'IMU'。"""
-    m = re.search(r"_imu(\d+)_resampled16hz$", stem)
-    return f"IMU{m.group(1)}" if m else "IMU"
+    for suf in KNOWN_STEM_SUFFIXES:
+        m = re.search(rf"_imu(\d+){re.escape(suf)}$", stem)
+        if m:
+            return f"IMU{m.group(1)}"
+    return "IMU"
 
 
 _WINDOWS_CACHE = {}
@@ -454,9 +474,9 @@ def main():
         # 固定文件(cam1_imu1/cam2_imu2)，不能再按"imu编号=机位编号"做字符串替换
         # (3条狗以后，imu3/imu4没有自己的专属视频，那样替换会找到不存在的文件)。
         detected_stem = os.path.splitext(csv_basename)[0]
-        session = session_prefix(detected_stem)
-        stem1 = camera_video_stem(session, 1)  # cam1固定视频
-        stem2 = camera_video_stem(session, 2)  # cam2固定视频
+        session, suffix = session_prefix(detected_stem)
+        stem1 = camera_video_stem(session, 1, suffix)  # cam1固定视频
+        stem2 = camera_video_stem(session, 2, suffix)  # cam2固定视频
         imu_label = extract_imu_label(detected_stem)  # 真正触发检测的狗，比如"IMU3"
 
         src_csv1 = os.path.join(args.video_dir, csv_basename)
