@@ -45,7 +45,11 @@ import json
 
 ACC_CANDIDATES  = [["acc_x","acc_y","acc_z"],["AccX","AccY","AccZ"],["AX","AY","AZ"],["ax","ay","az"]]
 GYRO_CANDIDATES = [["gyro_x","gyro_y","gyro_z"],["gyr_x","gyr_y","gyr_z"],["GyroX","GyroY","GyroZ"],["GX","GY","GZ"]]
-TS_KEYWORDS     = ["time", "timestamp", "datetime", "chip_time"]
+TS_KEYWORDS     = ["time", "timestamp", "datetime", "chip_time", "pc_ms"]
+# pc_ms 是 witmotion_imu 采集端存原始未降采样数据（"_raw.csv"）时用的时间戳列名，
+# 存的是毫秒级epoch时间戳（数字），跟 timestamp 列（字符串日期）的解析方式不一样，
+# 用 pd.to_datetime 时必须显式指定 unit="ms"，否则数值会被当成纳秒解析，全部错乱。
+EPOCH_MS_TS_COLS = ["pc_ms"]
 
 
 def find_cols(cols, candidates):
@@ -81,7 +85,12 @@ def load_csv(path):
     acc  = df[acc_cols].ffill().bfill().values.astype(np.float32)
     gyro = df[gyro_cols].ffill().bfill().values.astype(np.float32) if gyro_cols \
            else np.zeros((len(df), 3), dtype=np.float32)
-    ts   = pd.to_datetime(df[ts_col], errors="coerce") if ts_col else None
+    if ts_col and ts_col.strip().lower() in EPOCH_MS_TS_COLS:
+        ts = pd.to_datetime(df[ts_col], unit="ms", errors="coerce")
+    elif ts_col:
+        ts = pd.to_datetime(df[ts_col], errors="coerce")
+    else:
+        ts = None
     return acc, gyro, ts, valid_mask, null_ratio
 
 
