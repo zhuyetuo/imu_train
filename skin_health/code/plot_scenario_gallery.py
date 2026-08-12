@@ -98,6 +98,8 @@ def plot_one(idx, pet_id, daily_df, result_df, expect):
                markersize=10, label="空心方块=处于引导期（历史不足21天，靠绝对阈值兜底评分，不是跟自己比）"),
     ]
     ax2.legend(handles=legend_handles, loc="upper left", fontsize=7.5, framealpha=0.9)
+    ax2.set_xlabel(f"日期（横轴每一格=1天，共{len(d)}天：前21天是基线观察窗口，"
+                   "后14天是评估期，同一天上下两张图对齐）")
     fig.suptitle(f"场景{idx}/{len(SCENARIOS)}：{pet_id}\n预期：{expect}",
                  fontsize=11, x=0.01, ha="left", y=0.995)
     fig.autofmt_xdate(rotation=30)
@@ -142,6 +144,10 @@ def main():
         "- **引导期（bootstrap_mode）**：这只狗历史数据还不满21天，没法算出\"跟自己比\"的"
         "个人基线，这期间改用文献（Whistle FIT）给的固定秒数阈值兜底评分，图上标空心方块，"
         "跟基线建立后的正常评分是两套逻辑，不能直接比较分数高低。",
+        "",
+        "- **横轴（日期）**：每一格代表**一整天**（不是一天内的时间段），从合成数据第1天"
+        "（2026-06-01）到第35天，前21天是给算法建立个人基线用的观察窗口，后14天是真正"
+        "评估/触发问题的观察期，具体每个场景的\"异常\"通常安排在后14天里发生。",
         "",
         "每张图分两部分：**上图**是当天实际发生的抓挠情况（原始数据，蓝柱=次数，红线=总时长），"
         "**下图**是算法根据上图数据算出来的SBS评分结果（total/tier），两张图上下对齐、"
