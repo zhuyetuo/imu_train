@@ -8,8 +8,11 @@
 #   EXCLUDE_DAYS  空格分隔的跳过日期列表（默认空）
 #   WORKERS       并行进程数（默认 8）
 #   PATTERN       CSV 文件名通配符（默认 *.csv）
-#   DEVICE_HZ     设备采样率（默认 0=从模型元数据读取）
+#   DEVICE_HZ     设备采样率（默认 0=从模型元数据读取，等同于跟MODEL_HZ一样，也就是"不降采样"，
+#                 喂raw等非16Hz原生数据时必须显式传对，不传的话不会报错但结果完全是错的）
 #   MODEL_HZ      模型采样率（默认 0=与DEVICE_HZ相同）
+#   RESAMPLE_METHOD  DEVICE_HZ != MODEL_HZ 时用哪种降采样算法（默认poly=scipy resample_poly，
+#                 可选training_match=复刻witmotion_imu采集端当年生成训练数据用的算法）
 #   LS_URL_PREFIX Label Studio CSV 的 URL 前缀（默认 http://localhost:8080/data/local-files/?d=raw_wit）
 #   LS_MODE       Label Studio 任务模式: scratch_only/uncertain/all（默认 scratch_only）
 #
@@ -30,6 +33,11 @@ WORKERS="${WORKERS:-8}"
 PATTERN="${PATTERN:-*.csv}"
 DEVICE_HZ="${DEVICE_HZ:-0}"
 MODEL_HZ="${MODEL_HZ:-0}"
+RESAMPLE_METHOD="${RESAMPLE_METHOD:-poly}"  # poly（默认，scipy resample_poly）或 training_match
+                                             # （复刻witmotion_imu采集端当年生成训练数据用的滑动平均+
+                                             # 线性插值算法）。DEVICE_HZ==MODEL_HZ时这个参数不生效
+                                             # （不会做任何重采样），只有喂raw等非16Hz原生数据时才有意义。
+                                             # 见 src/eval/compare_resample_methods.py
 LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
 LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
@@ -116,6 +124,7 @@ for day in "${days[@]}"; do
         --scratch_only \
         --merge_gap "$MERGE_GAP" \
         --min_windows "$MIN_WINDOWS" \
+        --resample_method "$RESAMPLE_METHOD" \
         $( [[ "$KEEP_ISOLATED" == "0" ]] && echo "--no_keep_isolated" ) \
         $hz_args \
         2>&1 | tee "$out_dir/infer.log"
