@@ -339,18 +339,25 @@ def slice_csv(src_csv: str, dst_csv: str,
         header = lines[0]
         cols = [c.strip().strip('"') for c in header.split(",")]
         ts_idx, ts_col_name = find_ts_col_idx(cols)
-        kept = [header]
+        # 输出CSV统一用"timestamp"列名+标准字符串格式，不管源CSV是timestamp还是
+        # pc_ms——下游（Label Studio等）不用关心源头格式。pc_ms是纯数字列，直接
+        # 原样透传会让Label Studio的时间轴解析失败（它按列名找timestamp）。
+        out_cols = list(cols)
+        out_cols[ts_idx] = "timestamp"
+        kept = [",".join(out_cols) + "\n"]
         for line in lines[1:]:
-            parts = line.split(",")
+            parts = line.rstrip("\n").split(",")
             if len(parts) <= ts_idx:
                 continue
             try:
                 raw = parts[ts_idx].strip().strip('"')
-                sec = ts_to_sec(normalize_ts_cell(raw, ts_col_name))
+                ts_str = normalize_ts_cell(raw, ts_col_name)
+                sec = ts_to_sec(ts_str)
             except Exception:
                 continue
             if pad_start <= sec <= pad_end:
-                kept.append(line)
+                parts[ts_idx] = ts_str
+                kept.append(",".join(parts) + "\n")
         if len(kept) <= 1:
             return False
         with open(dst_csv, "w", encoding="utf-8") as f:
