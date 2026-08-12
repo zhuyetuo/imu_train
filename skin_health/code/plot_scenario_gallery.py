@@ -48,7 +48,9 @@ _TIER_COLOR = {"C0": "#4c9a5c", "C1": "#e0a326", "C2": "#c0392b", "insufficient_
 def plot_one(idx, pet_id, daily_df, result_df, expect):
     """上图：每日抓挠次数（柱状）+ 总时长（次坐标折线）；下图：SBS总分随天变化，
     C0/C1/C2三档背景色区分，红旗天用星号标出。每张图自带完整图例，不用对照文字说明才能看懂。"""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7.5), sharex=True,
+    # 不用 sharex=True——它会自动隐藏上图的日期刻度标签，两张图分开各自显示一份日期，
+    # 后面手动把xlim对齐，效果上还是"两张图上下对得上"，但上图的日期不会被隐藏
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7.5),
                                     gridspec_kw={"height_ratios": [1, 1.3]})
 
     d = daily_df.sort_values("date")
@@ -102,7 +104,11 @@ def plot_one(idx, pet_id, daily_df, result_df, expect):
                    "后14天是评估期，同一天上下两张图对齐）")
     fig.suptitle(f"场景{idx}/{len(SCENARIOS)}：{pet_id}\n预期：{expect}",
                  fontsize=11, x=0.01, ha="left", y=0.995)
-    fig.autofmt_xdate(rotation=30)
+    ax1.set_xlim(ax2.get_xlim())
+    for ax in (ax1, ax2):
+        ax.tick_params(axis="x", labelbottom=True, labelrotation=30)
+        for lbl in ax.get_xticklabels():
+            lbl.set_ha("right")
     fig.tight_layout(rect=(0, 0, 1, 0.90))
 
     out_path = os.path.join(ASSET_DIR, f"scenario_{pet_id}.png")
