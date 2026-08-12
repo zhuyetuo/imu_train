@@ -86,7 +86,8 @@ def load_csv(path):
     gyro = df[gyro_cols].ffill().bfill().values.astype(np.float32) if gyro_cols \
            else np.zeros((len(df), 3), dtype=np.float32)
     if ts_col and ts_col.strip().lower() in EPOCH_MS_TS_COLS:
-        ts = pd.to_datetime(df[ts_col], unit="ms", errors="coerce")
+        from timestamp_utils import pc_ms_to_local_datetime
+        ts = pc_ms_to_local_datetime(df[ts_col])
     elif ts_col:
         ts = pd.to_datetime(df[ts_col], errors="coerce")
     else:
