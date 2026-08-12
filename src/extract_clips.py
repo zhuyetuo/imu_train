@@ -25,7 +25,34 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+from timestamp_utils import pc_ms_value_to_ts_string  # noqa: E402
+
 BINS = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
+
+# 跟 infer_csv_scratch.py 保持一致（那边是 TS_KEYWORDS），pc_ms 是 witmotion_imu
+# 存原始未降采样数据（"_raw.csv"）时用的时间戳列名，是epoch毫秒数字，不是字符串
+# 日期，解析方式不一样，见 find_ts_col_idx()/normalize_ts_cell()。
+TS_COL_KEYWORDS = ["timestamp", "time", "datetime", "chip_time", "pc_ms"]
+
+
+def find_ts_col_idx(cols: list) -> tuple:
+    """返回 (列下标, 列名小写)。找不到已知关键词时退化成"第0列"（保持以前的兜底行为）。"""
+    low = [c.lower() for c in cols]
+    for kw in TS_COL_KEYWORDS:
+        for i, cl in enumerate(low):
+            if kw in cl:
+                return i, low[i]
+    return 0, (low[0] if low else "")
+
+
+def normalize_ts_cell(raw_value: str, ts_col_name: str) -> str:
+    """pc_ms列存的是epoch毫秒数字，转成跟timestamp列一样的
+    "%Y-%m-%d %H:%M:%S.%f"[:-3] 字符串格式，这样下面 ts_to_sec() 不用改，
+    两种列都能喂进同一套解析逻辑。"""
+    if "pc_ms" in ts_col_name:
+        return pc_ms_value_to_ts_string(raw_value)
+    return raw_value
 
 
 def get_bin(conf: float) -> str:
@@ -72,11 +99,9 @@ def csv_start_sec(csv_path: str) -> float:
             header = f.readline()
             first  = f.readline()
         cols = [c.strip().strip('"') for c in header.split(",")]
-        try:
-            ts_idx = next(i for i, c in enumerate(cols) if "timestamp" in c.lower())
-        except StopIteration:
-            ts_idx = 0
-        ts_str = first.split(",")[ts_idx].strip().strip('"')
+        ts_idx, ts_col_name = find_ts_col_idx(cols)
+        raw = first.split(",")[ts_idx].strip().strip('"')
+        ts_str = normalize_ts_cell(raw, ts_col_name)
         return ts_to_sec(ts_str)
     except Exception:
         return 0.0
@@ -313,17 +338,15 @@ def slice_csv(src_csv: str, dst_csv: str,
             return False
         header = lines[0]
         cols = [c.strip().strip('"') for c in header.split(",")]
-        try:
-            ts_idx = next(i for i, c in enumerate(cols) if "timestamp" in c.lower())
-        except StopIteration:
-            ts_idx = 0
+        ts_idx, ts_col_name = find_ts_col_idx(cols)
         kept = [header]
         for line in lines[1:]:
             parts = line.split(",")
             if len(parts) <= ts_idx:
                 continue
             try:
-                sec = ts_to_sec(parts[ts_idx].strip().strip('"'))
+                raw = parts[ts_idx].strip().strip('"')
+                sec = ts_to_sec(normalize_ts_cell(raw, ts_col_name))
             except Exception:
                 continue
             if pad_start <= sec <= pad_end:
