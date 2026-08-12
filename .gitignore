@@ -238,3 +238,5 @@ __marimo__/
 .streamlit/secrets.toml
 skin_health/data/*
 !skin_health/data/README.md
+# 合成场景数据是代码生成的示例/验证数据，不是真实狗的隐私数据，保留在仓库里方便直接查看
+!skin_health/data/synthetic_scenarios/
