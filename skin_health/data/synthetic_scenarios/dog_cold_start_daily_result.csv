@@ -1,0 +1,11 @@
+date,pet_id,delta_score,cluster_score,persistence_score,interrupt_score,total,tier,red_flags,delta_detail,insufficient_baseline,bootstrap_mode
+2026-06-01,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-02,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-03,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-04,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-05,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-06,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-07,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-08,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-09,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
+2026-06-10,dog_cold_start,0,0,0,0,0,C0,[],"{'by': 'bootstrap_absolute', 'level': 'infrequent_or_occasional'}",False,True
