@@ -260,7 +260,7 @@ def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_d
 
 def cut_clip(video_path: str, start_abs: float, end_abs: float,
              out_path: str, context_s: float, video_t0: float = 0.0,
-             windows: list = None, label_text: str = "") -> bool:
+             windows: list = None, label_text: str = "", encoder: str = "cpu") -> bool:
     """
     start_abs / end_abs: 午夜起始的绝对秒数
     video_t0: 视频第一帧对应的绝对秒数（从 CSV 第一行读取）
@@ -277,7 +277,10 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         return False
 
     # 浏览器兼容优先：libx264 baseline，faststart，yuv420p，无音频
-    # nvenc 输出某些浏览器不支持，统一用软编码保证兼容性
+    # nvenc 输出某些浏览器不支持，默认用软编码保证兼容性；--encoder cuda 可以切换
+    # 成GPU硬编码（h264_nvenc）验证这个兼容性问题现在还在不在——用完先在Label
+    # Studio里实际播放确认没问题，再决定要不要长期切过去，有问题随时切回
+    # --encoder cpu（默认值），互不影响。
     #
     # 提速两点（复查用的片段，不是最终交付质量，preset变快、体积略增没关系）：
     #   1. preset从fast改成veryfast——libx264速度阶梯里veryfast比fast快不少，
@@ -287,7 +290,8 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
     #      抢满所有核心，会严重过度订阅（16个进程 x 各自想用24核），互相
     #      抢核反而更慢。显式限制每个进程用少量线程，让"并行进程数"而不是
     #      "单进程内部线程数"来吃满CPU，这是many-parallel-encodes场景的
-    #      标准优化方式。
+    #      标准优化方式。nvenc走GPU编码，不占这部分CPU线程预算，-threads
+    #      对它不生效（GPU编码本身不是靠CPU多线程堆出来的）。
     vf_chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     ass_path = None
     if windows:
@@ -302,17 +306,19 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
         else:
             ass_path = None  # 没有落在这段时间范围内的窗口，没必要烧字幕
 
+    if encoder == "cuda":
+        codec_args = ["-c:v", "h264_nvenc", "-profile:v", "baseline", "-level", "3.1",
+                      "-preset", "p4", "-cq", "23"]
+    else:
+        codec_args = ["-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+                      "-crf", "23", "-preset", "veryfast", "-threads", "2"]
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{rel_start:.3f}",
         "-i", video_path,
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264",
-        "-profile:v", "baseline",
-        "-level", "3.1",
-        "-crf", "23",
-        "-preset", "veryfast",
-        "-threads", "2",
+        *codec_args,
         "-pix_fmt", "yuv420p",
         "-an",                       # 原始视频无音频，明确丢弃避免 aac 编码报错
         "-movflags", "+faststart",   # moov atom 放文件头，浏览器流式播放必需
@@ -422,9 +428,11 @@ def _process_one(task: dict) -> dict:
 
     windows_detected = task.get("windows_detected")  # 触发检测的那条狗自己的逐窗口置信度
     ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label) if (cam1_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label,
+                       encoder=args.encoder) if (cam1_mp4 and has_ffmpeg) else False
     ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label) if (cam2_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label,
+                       encoder=args.encoder) if (cam2_mp4 and has_ffmpeg) else False
     ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
     if secondary_dir:
@@ -457,6 +465,13 @@ def main():
                         help="不烧录右上角实时置信度字幕（默认会烧，读取每路IMU自己的"
                              "{stem}_infer.json里的逐窗口置信度）。传这个可以跳过读取/"
                              "烧字幕的开销，适合只是想快速看效果、不需要置信度曲线的场景")
+    parser.add_argument("--encoder", default="cpu", choices=["cpu", "cuda"],
+                        help="裁剪片段用的编码器：cpu（默认）=libx264软编码，兼容性最好；"
+                             "cuda=h264_nvenc GPU硬编码，速度快很多但历史上在部分浏览器/"
+                             "Label Studio播放有兼容性问题（可能是很久以前的情况，不一定"
+                             "现在还有）。想试试能不能提速就传 --encoder cuda，裁完先在"
+                             "Label Studio里实际播放确认没问题；有问题随时改回不传这个"
+                             "参数（默认cpu），互不影响、不用改代码")
     parser.add_argument("--run_tag", default="",
                         help="拼进裁剪出的mp4/csv文件名末尾的标识（建议传这次运行用的"
                              "RESULT_ROOT名字，比如'infer_result_majority_syn'）。"
@@ -478,13 +493,17 @@ def main():
     if not has_ffmpeg:
         print("[警告] 找不到 ffmpeg，只裁剪 CSV")
 
-    # 注意：即使检测到有 CUDA(h264_nvenc)，cut_clip() 里实际固定用的是
-    # CPU软编码 libx264（nvenc 输出在部分浏览器兼容性有问题，见 cut_clip() 里
-    # 的注释），之前这里打印"编码器: CUDA"是误导性的——GPU利用率显示0%不是
-    # 没生效，是压根没用GPU，这是纯CPU瓶颈的活，加并行线程数才有用，加GPU没用。
-    print(f"编码器: CPU (libx264，固定软编码，即使有CUDA也不用——nvenc输出兼容性有问题)"
-          f"  并行线程: {args.workers}"
-          f"{'（检测到有CUDA硬件加速但没用上，纯CPU编码，是有意为之）' if HAS_CUDA else ''}")
+    if args.encoder == "cuda":
+        if not HAS_CUDA:
+            print("[警告] --encoder cuda 但没检测到CUDA硬件加速，ffmpeg可能会报错退回失败，"
+                  "建议不传 --encoder（默认cpu）")
+        print(f"编码器: GPU (h264_nvenc，--encoder cuda 显式指定，历史上部分浏览器/Label "
+              f"Studio有兼容性问题，用完记得实际播放验证；有问题改回不传这个参数)"
+              f"  并行线程: {args.workers}")
+    else:
+        print(f"编码器: CPU (libx264，默认软编码，兼容性最好；传 --encoder cuda 可以试试GPU提速)"
+              f"  并行线程: {args.workers}"
+              f"{'（检测到有CUDA硬件加速，可以试试 --encoder cuda）' if HAS_CUDA else ''}")
 
     # ── 收集所有 clip 任务 ────────────────────────────────────────────────────
     bin_dirs  = {}

@@ -15,6 +15,10 @@
 #                 可选training_match=复刻witmotion_imu采集端当年生成训练数据用的算法）
 #   LS_URL_PREFIX Label Studio CSV 的 URL 前缀（默认 http://localhost:8080/data/local-files/?d=raw_wit）
 #   LS_MODE       Label Studio 任务模式: scratch_only/uncertain/all（默认 scratch_only）
+#   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
+#                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
+#                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
+#                 Label Studio里实际播放确认没问题，有问题下次不传这个变量就自动改回cpu）
 #
 # 用法:
 #   DATA_ROOT=data/multicam_multiimu EXCLUDE_DAYS="test" \
@@ -151,6 +155,7 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
             --context_s  "$CONTEXT_S" \
             --workers    "${CLIP_WORKERS:-4}" \
             --bin_by     "$BIN_BY" \
+            --encoder    "${ENCODER:-cpu}" \
             --run_tag    "$(basename "$RESULT_ROOT")"
     done
 fi
