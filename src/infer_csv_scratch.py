@@ -81,7 +81,10 @@ def load_csv(path):
     if acc_cols is None:
         raise ValueError(f"找不到加速度列: {list(df.columns)}")
     valid_mask = df[acc_cols].notnull().all(axis=1).values  # True = 有效行
-    null_ratio = 1 - valid_mask.mean()
+    # 空文件（0行）时 valid_mask.mean() 对空数组求均值会触发 RuntimeWarning 且结果是nan，
+    # nan跟>0.1比较恒为False，会把"这个文件根本没有数据"的情况悄悄当成缺失率正常放过去；
+    # 显式判断成缺失率100%，既消掉警告又能让下游"数据缺失率过高"的告警正确触发
+    null_ratio = (1 - valid_mask.mean()) if len(valid_mask) > 0 else 1.0
     acc  = df[acc_cols].ffill().bfill().values.astype(np.float32)
     gyro = df[gyro_cols].ffill().bfill().values.astype(np.float32) if gyro_cols \
            else np.zeros((len(df), 3), dtype=np.float32)
