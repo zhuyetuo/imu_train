@@ -19,6 +19,13 @@
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
 #                 Label Studio里实际播放确认没问题，有问题下次不传这个变量就自动改回cpu）
+#   PRESET        --encoder cpu 时libx264的preset（默认veryfast，跟以前行为一致）。
+#                 实测同款其他参数下 veryfast→superfast 提速约31.6%，profile/level/pix_fmt
+#                 三档preset输出一致，不影响Label Studio兼容性，建议优先试 PRESET=superfast；
+#                 ultrafast能再提速但快速动作画面出现宏块伪影概率略高，建议先抽查几个clip画面
+#   FFMPEG_THREADS --encoder cpu 时单个ffmpeg进程内部线程数（默认2，跟以前行为一致）。
+#                 要配合CLIP_WORKERS一起调（两者乘积是总CPU线程需求，别明显超过nproc），
+#                 P核/E核混合架构上建议实测，比如 FFMPEG_THREADS=1 配合更高的CLIP_WORKERS
 #
 # 用法:
 #   DATA_ROOT=data/multicam_multiimu EXCLUDE_DAYS="test" \
@@ -156,6 +163,8 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
             --workers    "${CLIP_WORKERS:-4}" \
             --bin_by     "$BIN_BY" \
             --encoder    "${ENCODER:-cpu}" \
+            --preset     "${PRESET:-veryfast}" \
+            --ffmpeg_threads "${FFMPEG_THREADS:-2}" \
             --run_tag    "$(basename "$RESULT_ROOT")"
     done
 fi

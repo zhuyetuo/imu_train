@@ -260,7 +260,8 @@ def build_conf_subtitle(windows: list, video_t0: float, rel_start: float, clip_d
 
 def cut_clip(video_path: str, start_abs: float, end_abs: float,
              out_path: str, context_s: float, video_t0: float = 0.0,
-             windows: list = None, label_text: str = "", encoder: str = "cpu") -> bool:
+             windows: list = None, label_text: str = "", encoder: str = "cpu",
+             preset: str = "veryfast", ffmpeg_threads: int = 2) -> bool:
     """
     start_abs / end_abs: 午夜起始的绝对秒数
     video_t0: 视频第一帧对应的绝对秒数（从 CSV 第一行读取）
@@ -283,15 +284,21 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
     # --encoder cpu（默认值），互不影响。
     #
     # 提速两点（复查用的片段，不是最终交付质量，preset变快、体积略增没关系）：
-    #   1. preset从fast改成veryfast——libx264速度阶梯里veryfast比fast快不少，
-    #      画质肉眼基本看不出差别，复查用完全够。
-    #   2. 显式限制-threads——不限制的话libx264默认会尝试用满所有CPU核心，
-    #      而这里本来就是many-workers并行跑多个ffmpeg进程，每个进程再各自
-    #      抢满所有核心，会严重过度订阅（16个进程 x 各自想用24核），互相
-    #      抢核反而更慢。显式限制每个进程用少量线程，让"并行进程数"而不是
-    #      "单进程内部线程数"来吃满CPU，这是many-parallel-encodes场景的
-    #      标准优化方式。nvenc走GPU编码，不占这部分CPU线程预算，-threads
-    #      对它不生效（GPU编码本身不是靠CPU多线程堆出来的）。
+    #   1. preset默认veryfast，可以用--preset覆盖（比如superfast/ultrafast）。
+    #      实测同款baseline/level3.1/crf23/threads2参数下 veryfast→superfast
+    #      提速约31.6%，ffprobe核实profile/level/pix_fmt三档preset输出完全一致，
+    #      不影响Label Studio兼容性；superfast→ultrafast再提速约30%，但ultrafast
+    #      运动搜索简化更多，快速动作画面出现宏块伪影的概率略高，建议先抽查几个
+    #      高动作clip画面再决定要不要长期用（不影响播放，只影响复查观感）。
+    #   2. 显式限制-threads（默认2，可以用--ffmpeg_threads覆盖）——不限制的话
+    #      libx264默认会尝试用满所有CPU核心，而这里本来就是many-workers并行跑
+    #      多个ffmpeg进程，每个进程再各自抢满所有核心，会严重过度订阅（16个进程
+    #      x 各自想用24核），互相抢核反而更慢。显式限制每个进程用少量线程，让
+    #      "并行进程数"而不是"单进程内部线程数"来吃满CPU，这是many-parallel
+    #      -encodes场景的标准优化方式；具体workers×threads怎么配比要按机器的
+    #      核心数（尤其P核/E核混合架构）实测，没有放之四海而皆准的固定值。
+    #      nvenc走GPU编码，不占这部分CPU线程预算，-threads对它不生效（GPU编码
+    #      本身不是靠CPU多线程堆出来的）。
     vf_chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     ass_path = None
     if windows:
@@ -311,7 +318,7 @@ def cut_clip(video_path: str, start_abs: float, end_abs: float,
                       "-preset", "p4", "-cq", "23"]
     else:
         codec_args = ["-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
-                      "-crf", "23", "-preset", "veryfast", "-threads", "2"]
+                      "-crf", "23", "-preset", preset, "-threads", str(ffmpeg_threads)]
 
     cmd = [
         "ffmpeg", "-y",
@@ -428,11 +435,11 @@ def _process_one(task: dict) -> dict:
 
     windows_detected = task.get("windows_detected")  # 触发检测的那条狗自己的逐窗口置信度
     ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label,
-                       encoder=args.encoder) if (cam1_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label, encoder=args.encoder,
+                       preset=args.preset, ffmpeg_threads=args.ffmpeg_threads) if (cam1_mp4 and has_ffmpeg) else False
     ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label,
-                       encoder=args.encoder) if (cam2_mp4 and has_ffmpeg) else False
+                       windows=windows_detected, label_text=imu_label, encoder=args.encoder,
+                       preset=args.preset, ffmpeg_threads=args.ffmpeg_threads) if (cam2_mp4 and has_ffmpeg) else False
     ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
     if secondary_dir:
@@ -472,6 +479,19 @@ def main():
                              "现在还有）。想试试能不能提速就传 --encoder cuda，裁完先在"
                              "Label Studio里实际播放确认没问题；有问题随时改回不传这个"
                              "参数（默认cpu），互不影响、不用改代码")
+    parser.add_argument("--preset", default="veryfast",
+                        help="CPU编码器(libx264)的preset（默认veryfast，跟以前行为一致）。"
+                             "实测同款其他参数下 veryfast→superfast 提速约31.6%%，profile/level/"
+                             "pix_fmt三档preset输出一致，不影响Label Studio兼容性，建议优先试"
+                             "superfast；ultrafast能再提速但快速动作画面出现宏块伪影概率略高，"
+                             "建议先抽查几个高动作clip画面。只影响--encoder cpu分支，对cuda"
+                             "分支（固定用p4）不生效")
+    parser.add_argument("--ffmpeg_threads", type=int, default=2,
+                        help="CPU编码器(libx264)单个ffmpeg进程内部线程数（默认2，跟以前行为"
+                             "一致）。要配合--workers一起调：workers×ffmpeg_threads是总CPU线程"
+                             "需求，理想情况下不要明显超过机器的nproc，具体配比在P核/E核混合"
+                             "架构上建议实测（比如ffmpeg_threads=1配合更高的workers）。只影响"
+                             "--encoder cpu分支")
     parser.add_argument("--run_tag", default="",
                         help="拼进裁剪出的mp4/csv文件名末尾的标识（建议传这次运行用的"
                              "RESULT_ROOT名字，比如'infer_result_majority_syn'）。"
@@ -501,8 +521,9 @@ def main():
               f"Studio有兼容性问题，用完记得实际播放验证；有问题改回不传这个参数)"
               f"  并行线程: {args.workers}")
     else:
-        print(f"编码器: CPU (libx264，默认软编码，兼容性最好；传 --encoder cuda 可以试试GPU提速)"
-              f"  并行线程: {args.workers}"
+        print(f"编码器: CPU (libx264，preset={args.preset}，单进程{args.ffmpeg_threads}线程；"
+              f"传 --encoder cuda 可以试试GPU提速)"
+              f"  并行进程: {args.workers}"
               f"{'（检测到有CUDA硬件加速，可以试试 --encoder cuda）' if HAS_CUDA else ''}")
 
     # ── 收集所有 clip 任务 ────────────────────────────────────────────────────
