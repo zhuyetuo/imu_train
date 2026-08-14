@@ -32,24 +32,35 @@
 连续/比例类型），这份是给RF挑特征、标注"哪些第一天就能算、哪些要等数据积累"、
 以及RF specific的工程注意事项。
 
+> **2026-08更新**：加了"佩戴有效性"这一层，排在所有特征最前面——之前默认
+> `valid_wear_hours`是可信的分母，但现在意识到"设备记录到数据"不等于"狗
+> 真的稳定戴着"：项圈松动、被摘下放置一边，都会记录到数据，却不是真实
+> 有效佩戴，如果不排除这两种情况，`event_rate_per_wear_hour`这类比率特征
+> 的分母会系统性偏大，把"其实没怎么监测到"的天误算成"监测到了但确实没怎么
+> 抓"，两者对模型来说是完全不同的信号，混在一起会污染训练数据。
+
 | 类别 | 特征 | 何时可用 | RF专用备注 |
 |---|---|---|---|
-| **频率** | `event_count` | 第1天 | |
-| | `event_rate_per_wear_hour` | 第1天 | **必须算这个**，RF不像GLM能用offset/exposure处理佩戴时长，佩戴时长不同的两天次数不可比，必须显式换算成"每小时次数"这种比率特征喂进去 |
-| **时长** | `total_duration_min`、`duration_rate_per_wear_hour` | 第1天 | 时长同样要换算成比率版本，原因同上 |
+| **佩戴有效性（最优先，决定其他特征能不能信）** | `raw_record_hours` | 第1天 | 设备记录到数据的总小时数，即现在`compute_wear_hours()`实际算的东西——只代表"有采样数据"，不代表"狗稳定戴着"，命名和含义要分清楚，不能直接当"有效佩戴"用 |
+| | `valid_wear_hours`（重新定义） | 需要接入松动/离体检测 | 应该是`raw_record_hours`减去判定为"松动"和"未佩戴/离体"的时长——这需要`src/data/wear_state.py`（松动检测+离体检测，代码已经写好但一直没接进日常pipeline，`docs/wear_state_detection.md`里"松动检测也先不做"是之前作为独立产品功能的优先级判断，现在发现它是特征工程正确性的前置依赖，不是可选的加分项，需要重新评估优先级——至少先把这两路检测接进特征计算流程，不需要做到能对外输出"松动报警"这种产品功能的完整度） |
+| | `wear_completeness_ratio` = `valid_wear_hours` / 目标佩戴时长 | 同上 | 当天佩戴覆盖率，覆盖率低的天其它特征的可信度天然打折，这个本身也建议当一个特征喂给模型（让模型自己学会"覆盖率低的天，别的特征值不能太当真"），而不是只用来做训练集过滤 |
+| | `loose_hours`、`off_body_hours` | 同上 | 当天松动/未佩戴各自多长时间，主要用于人工排查数据质量问题，不一定要直接喂给模型（如果喂，注意跟`wear_completeness_ratio`高度相关，二选一即可） |
+| **频率** | `event_count` | 第1天（但换算比率时分母要用上面重新定义的`valid_wear_hours`） | |
+| | `event_rate_per_wear_hour` | 需要`valid_wear_hours`准确 | **必须算这个**，RF不像GLM能用offset/exposure处理佩戴时长，佩戴时长不同的两天次数不可比，必须显式换算成"每小时次数"这种比率特征喂进去——分母不准，这个特征就是错的，这也是为什么佩戴有效性要排在最前面 |
+| **时长** | `total_duration_min`、`duration_rate_per_wear_hour` | 同上 | 时长同样要换算成比率版本，原因同上 |
 | | `duration_mean`/`duration_median`/`duration_max`/`duration_std` | 第1天 | |
 | **时间分布** | `night_ratio` | 第1天 | |
 | | `hour_histogram`(24维) | 数据量大之后 | RF不像线性模型那样怕高维共线性，但小样本下24维还是会稀释重要特征的分裂机会，先不加，等标签数到几百再考虑 |
 | **聚集/模式** | `interval_mean`、`interval_std` | 第1天 | 直接喂原始统计量，**不要**只喂`cluster_count`这种人为阈值二值化后的版本——把"1小时≥5次算聚集"这种规则交给RF自己从`interval_std`里学分裂点，比预先手工二值化保留更多信息，这是用ML思维替代SBS手调阈值的具体体现 |
 | **睡眠/行为影响** | `sleep_interrupt_count` | 第1天 | 用计数版本，不要同时加二值版本（`sleep_interrupt`），两者高度冗余，RF没有获得额外信息，纯粹多一个没用的分裂候选 |
 | | `activity_duration`/`sleep_duration` | 第1天 | 同一个3分类模型的背景类别输出，作为环境背景特征 |
-| **基线/趋势** | `rolling_mean_3d`/`7d`/`14d` | 需要3/7/14天历史，不足时留空 | **必须做缺失值处理**（见下面第4节），`RandomForestClassifier`不像`HistGradientBoostingClassifier`能原生吃NaN |
+| **基线/趋势（多窗口）** | `rolling_mean_3d`/`7d`/`14d`/`30d` | 需要对应天数历史，不足时留空 | 全部一起喂，不要只选一个窗口——短窗口vs长窗口的差值/比值本身就是"急性发作 vs 渐进恶化"的信号，让模型自己学这个组合关系；**必须做缺失值处理**（见第4节），`RandomForestClassifier`不像`HistGradientBoostingClassifier`能原生吃NaN |
+| | `rolling_std_3d`/`7d`/`14d`/`30d` | 同上 | 波动程度，跟均值同等重要——"稳定在5"和"在2到10之间跳"均值一样但健康含义不同，不加会丢信息 |
 | | `baseline_ratio`、`baseline_delta_abs`、`z_score_vs_self` | 需要基线建立(≥7天) | 同上，缺失值要显式处理 |
 | **数据积累程度** | `history_days_available`（新增） | 第1天（值本身就是"到今天为止攒了几天数据"） | **这是替代SBS现在`bootstrap_mode`硬编码分支的关键特征**——不再手工写"不满21天走另一套逻辑"的if/else，直接把"到今天有多少天历史"当一个连续特征喂给RF，让模型自己学习"数据越少，这些基于历史的特征越不可信、应该更依赖绝对值特征"这个关系，这才是真正的机器学习思维，不是又发明一套新的硬编码规则 |
 | **品种/群体** | `breed_or_size_class`（类别特征） | 第1天（品种信息本来就有） | sklearn的`RandomForestClassifier`处理类别特征需要one-hot或者target encoding，品种数不多时one-hot没问题 |
 | | `breed_baseline_rate`（品种层期望值） | 需要BHM或至少品种内统计有意义（中期起） | 中期BHM先验算出来之后可以直接当一个特征喂给RF，呼应`algorithm_engineering_plan.md`里"后期GBM吸收多信号源"的思路，RF/GBM都适用 |
-| **元信息（非预测特征）** | `valid_wear_hours` | 第1天 | 只用来算比率特征的分母，不直接当预测特征喂（佩戴时长本身跟皮肤健康没有因果关系） |
-| | `data_quality_flag` | 第1天 | 数据不够好的天（`insufficient`）直接从训练集剔除，不是当特征喂 |
+| **元信息（非预测特征）** | `data_quality_flag` | 第1天 | 数据不够好的天（`insufficient`，比如`wear_completeness_ratio`过低）直接从训练集剔除，不是当特征喂——具体阈值多低算insufficient，建议直接用`wear_completeness_ratio`的连续值判断，不用再维护一套单独的分档规则 |
 
 ## 3. 训练/评估框架（现在就要定型的部分）
 
