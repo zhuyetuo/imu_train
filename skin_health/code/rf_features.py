@@ -10,7 +10,8 @@
 import numpy as np
 import pandas as pd
 
-from scratch_burden import daily_features
+from scratch_burden import (BASELINE_DENOM_FLOOR, BASELINE_LOOKBACK_END,
+                            BASELINE_LOOKBACK_START, MIN_BASELINE_DAYS, daily_features)
 
 ROLLING_WINDOWS = (3, 7, 14, 30)
 
@@ -90,8 +91,52 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
                 window=w, min_periods=max(2, w // 2)).mean()
             grp[f"rolling_std_{w}d"] = grp["event_rate_per_wear_hour"].rolling(
                 window=w, min_periods=max(2, w // 2)).std()
+
+        # 个人基线特征——跟scratch_burden.compute_baseline()用完全一样的窗口
+        # (d-21~d-8，跳过最近7天)和分母保护(BASELINE_DENOM_FLOOR)，因为SBS的
+        # 标签本身就是从这个基线偏离算出来的，这几个特征此前在rf_feature_spec.md
+        # 里标了"待实现"但实际代码一直没加，是模型A/B宏F1上不去的一个主要原因：
+        # 之前只给了多窗口"滚动均值"这种平滑趋势特征，没给"跟SBS同一套定义的
+        # 基线偏离量"，模型只能自己近似重建SBS的判断依据，现在直接把这个信息
+        # 显式喂进去。
+        n = len(grp)
+        baseline_event = np.full(n, np.nan)
+        baseline_dur = np.full(n, np.nan)
+        for i in range(n):
+            lo, hi = i - BASELINE_LOOKBACK_END, i - BASELINE_LOOKBACK_START
+            if lo < 0:
+                continue
+            window = grp.iloc[lo:hi + 1]
+            window = window[window["data_quality_flag"] == "good"]
+            if len(window) < MIN_BASELINE_DAYS:
+                continue
+            baseline_event[i] = window["event_count"].median()
+            baseline_dur[i] = window["total_duration_sec"].median()
+        grp["baseline_event_count"] = baseline_event
+        grp["baseline_duration_sec"] = baseline_dur
+        denom_event = np.maximum(baseline_event, BASELINE_DENOM_FLOOR)
+        denom_dur = np.maximum(baseline_dur, BASELINE_DENOM_FLOOR)
+        grp["baseline_ratio_count"] = grp["event_count"] / denom_event
+        grp["baseline_ratio_duration"] = grp["total_duration_sec"] / denom_dur
+        grp["baseline_delta_count"] = grp["event_count"] - baseline_event
+        grp["baseline_delta_duration"] = grp["total_duration_sec"] - baseline_dur
+        grp["has_baseline"] = (~np.isnan(baseline_event)).astype(int)
+
+        # z_score_vs_self：用30天滚动均值/标准差近似个人历史分布（比14天基线窗口
+        # 覆盖面更广，标准差用来标准化偏离程度）
+        eps = 1e-6
+        grp["z_score_vs_self"] = (
+            (grp["event_rate_per_wear_hour"] - grp["rolling_mean_30d"])
+            / (grp["rolling_std_30d"] + eps)
+        )
         out_frames.append(grp)
     df = pd.concat(out_frames, ignore_index=True)
+
+    # 基线/z-score类特征在历史不足(<21天)时天然是NaN，不插补——本项目选用
+    # HistGradientBoostingClassifier，原生支持NaN，让模型自己学习"缺失"这个
+    # 状态该怎么处理，比人工插补(均值/哨兵值)更准，见rf_feature_engineering_
+    # plan.md第4节的方案选型。has_baseline这个0/1伴随特征则是显式告诉模型
+    # "基线是不是真的建立了"，跟NaN共同存在不冲突。
 
     return df
 
@@ -106,4 +151,7 @@ FEATURE_COLUMNS = [
     "wear_completeness_ratio",
     "history_days_available",
     "breed_or_size_class",
+    "baseline_ratio_count", "baseline_ratio_duration",
+    "baseline_delta_count", "baseline_delta_duration",
+    "has_baseline", "z_score_vs_self",
 ] + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]
