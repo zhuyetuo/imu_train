@@ -10,10 +10,29 @@
 import numpy as np
 import pandas as pd
 
-from scratch_burden import (BASELINE_DENOM_FLOOR, BASELINE_LOOKBACK_END,
-                            BASELINE_LOOKBACK_START, MIN_BASELINE_DAYS, daily_features)
+from scratch_burden import daily_features
 
 ROLLING_WINDOWS = (3, 7, 14, 30)
+
+# 抓挠基线候选窗口——不直接照抄scratch_burden.py里SBS用的那一组具体参数
+# (21天窗口/跳过最近7天/分母保护=1)，那是PM当初拍脑袋定的一组特定超参数，
+# 不是业务上唯一正确的定义。这里给出好几组不同"跳过最近几天/看多长历史"
+# 的候选基线定义，都当独立特征喂给模型，让训练自己挑出哪个时间尺度真的
+# 有区分力——skip=0(不跳过，包含最近几天)代表"响应快的短期基线"，
+# skip=7(参考SBS的跳过思路，但不是唯一选择)代表"排除掉可能已经开始异常
+# 的最近一段时间，看更早、更可能代表真实正常水平的历史"这个业务直觉，
+# 两种直觉都值得让模型自己验证谁更有用，不是predetermine哪个对。
+BASELINE_CONFIGS = [
+    {"name": "recent7", "skip": 0, "window": 7},
+    {"name": "recent14", "skip": 0, "window": 14},
+    {"name": "recent30", "skip": 0, "window": 30},
+    {"name": "excl_recent14", "skip": 7, "window": 14},
+    {"name": "excl_recent30", "skip": 7, "window": 30},
+]
+BASELINE_MIN_VALID_DAYS = 5  # 窗口内至少要有几天good数据才算基线建立，比SBS的
+# MIN_BASELINE_DAYS=7独立设定，不是照抄——数值上凑巧接近是因为业务直觉相通
+# (至少要有接近一周的数据才谈得上"典型水平")，不是刻意对齐SBS的选择
+BASELINE_DENOM_MIN = 1.0  # 分母下限，纯粹是防止除0/被极小基线值放大，不是业务参数
 
 
 def _duration_stats(events, pet_id, date):
@@ -92,38 +111,38 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
             grp[f"rolling_std_{w}d"] = grp["event_rate_per_wear_hour"].rolling(
                 window=w, min_periods=max(2, w // 2)).std()
 
-        # 个人基线特征——跟scratch_burden.compute_baseline()用完全一样的窗口
-        # (d-21~d-8，跳过最近7天)和分母保护(BASELINE_DENOM_FLOOR)，因为SBS的
-        # 标签本身就是从这个基线偏离算出来的，这几个特征此前在rf_feature_spec.md
-        # 里标了"待实现"但实际代码一直没加，是模型A/B宏F1上不去的一个主要原因：
-        # 之前只给了多窗口"滚动均值"这种平滑趋势特征，没给"跟SBS同一套定义的
-        # 基线偏离量"，模型只能自己近似重建SBS的判断依据，现在直接把这个信息
-        # 显式喂进去。
+        # 抓挠基线特征——多组候选窗口(见BASELINE_CONFIGS)分别算一遍，不是
+        # 只信SBS那一组参数。每组都用"用当天事件数/时长 对比 窗口内(排除
+        # 当天)历史中位数"这个共同逻辑，窗口定义(跳过几天/看多长)不同。
         n = len(grp)
-        baseline_event = np.full(n, np.nan)
-        baseline_dur = np.full(n, np.nan)
-        for i in range(n):
-            lo, hi = i - BASELINE_LOOKBACK_END, i - BASELINE_LOOKBACK_START
-            if lo < 0:
-                continue
-            window = grp.iloc[lo:hi + 1]
-            window = window[window["data_quality_flag"] == "good"]
-            if len(window) < MIN_BASELINE_DAYS:
-                continue
-            baseline_event[i] = window["event_count"].median()
-            baseline_dur[i] = window["total_duration_sec"].median()
-        grp["baseline_event_count"] = baseline_event
-        grp["baseline_duration_sec"] = baseline_dur
-        denom_event = np.maximum(baseline_event, BASELINE_DENOM_FLOOR)
-        denom_dur = np.maximum(baseline_dur, BASELINE_DENOM_FLOOR)
-        grp["baseline_ratio_count"] = grp["event_count"] / denom_event
-        grp["baseline_ratio_duration"] = grp["total_duration_sec"] / denom_dur
-        grp["baseline_delta_count"] = grp["event_count"] - baseline_event
-        grp["baseline_delta_duration"] = grp["total_duration_sec"] - baseline_dur
-        grp["has_baseline"] = (~np.isnan(baseline_event)).astype(int)
+        event_arr = grp["event_count"].values
+        dur_arr = grp["total_duration_sec"].values
+        good_mask = (grp["data_quality_flag"] == "good").values
+        any_baseline_valid = np.zeros(n, dtype=bool)
+        for cfg in BASELINE_CONFIGS:
+            name, skip, window = cfg["name"], cfg["skip"], cfg["window"]
+            base_event = np.full(n, np.nan)
+            base_dur = np.full(n, np.nan)
+            for i in range(n):
+                hi = i - skip  # 不含当天(i)本身，也不含skip天之内的最近历史
+                lo = hi - window
+                if lo < 0:
+                    continue
+                idx = np.arange(max(0, lo), hi)
+                idx = idx[good_mask[idx]]
+                if len(idx) < BASELINE_MIN_VALID_DAYS:
+                    continue
+                base_event[i] = np.median(event_arr[idx])
+                base_dur[i] = np.median(dur_arr[idx])
+            denom_event = np.maximum(base_event, BASELINE_DENOM_MIN)
+            denom_dur = np.maximum(base_dur, BASELINE_DENOM_MIN)
+            grp[f"baseline_ratio_count_{name}"] = event_arr / denom_event
+            grp[f"baseline_ratio_duration_{name}"] = dur_arr / denom_dur
+            any_baseline_valid |= ~np.isnan(base_event)
+        grp["has_any_baseline"] = any_baseline_valid.astype(int)
 
-        # z_score_vs_self：用30天滚动均值/标准差近似个人历史分布（比14天基线窗口
-        # 覆盖面更广，标准差用来标准化偏离程度）
+        # z_score_vs_self：用30天滚动均值/标准差近似这只狗自己的历史抓挠分布
+        # （标准差用来标准化偏离程度，不依赖上面任何一组固定窗口的基线定义）
         eps = 1e-6
         grp["z_score_vs_self"] = (
             (grp["event_rate_per_wear_hour"] - grp["rolling_mean_30d"])
@@ -132,14 +151,20 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
         out_frames.append(grp)
     df = pd.concat(out_frames, ignore_index=True)
 
-    # 基线/z-score类特征在历史不足(<21天)时天然是NaN，不插补——本项目选用
+    # 基线/z-score类特征在历史不足时天然是NaN，不插补——本项目选用
     # HistGradientBoostingClassifier，原生支持NaN，让模型自己学习"缺失"这个
     # 状态该怎么处理，比人工插补(均值/哨兵值)更准，见rf_feature_engineering_
-    # plan.md第4节的方案选型。has_baseline这个0/1伴随特征则是显式告诉模型
-    # "基线是不是真的建立了"，跟NaN共同存在不冲突。
+    # plan.md第4节的方案选型。has_any_baseline这个0/1伴随特征显式告诉模型
+    # "有没有任何一组候选基线窗口建立起来了"，跟NaN共同存在不冲突。
 
     return df
 
+
+BASELINE_FEATURE_COLUMNS = [
+    f"baseline_ratio_count_{cfg['name']}" for cfg in BASELINE_CONFIGS
+] + [
+    f"baseline_ratio_duration_{cfg['name']}" for cfg in BASELINE_CONFIGS
+]
 
 FEATURE_COLUMNS = [
     "event_count", "event_rate_per_wear_hour",
@@ -151,7 +176,6 @@ FEATURE_COLUMNS = [
     "wear_completeness_ratio",
     "history_days_available",
     "breed_or_size_class",
-    "baseline_ratio_count", "baseline_ratio_duration",
-    "baseline_delta_count", "baseline_delta_duration",
-    "has_baseline", "z_score_vs_self",
-] + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]
+    "has_any_baseline", "z_score_vs_self",
+] + BASELINE_FEATURE_COLUMNS \
+  + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]
