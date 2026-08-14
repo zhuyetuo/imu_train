@@ -1,0 +1,204 @@
+# RF合成数据验证结果——模型A（行为严重度）+ 模型B（综合严重度）
+
+> 用86个合成场景（workflow多agent设计，覆盖急性发作/渐进恶化/波动复发/
+> 数据质量冷启动/噪声基线多样性/问答相关六大主题，含大量卡在真实业务阈值
+> 边界的场景）训练模型A，验证`rf_feature_spec.md`的特征集。**标签来自
+> `scratch_burden.py`当前的SBS规则**（没有真实兽医标签），所以这次结果
+> 验证的是"特征管道本身能不能学出SBS想表达的规律"，不是真实临床准确率——
+> 等真实标签攒够后要重新训练评估，但这次结果已经能指出特征集哪里需要调整。
+
+## 复现方式
+
+```bash
+python3 skin_health/code/gen_rf_synthetic_scenarios.py \
+    --scenarios skin_health/data/rf_synthetic/scenarios.json \
+    --out_dir skin_health/data/rf_synthetic
+python3 skin_health/code/train_rf_model_a.py \
+    --data_dir skin_health/data/rf_synthetic --n_folds 8
+```
+
+场景定义（`scenarios.json`）、生成的事件/佩戴CSV（`all_events.csv`/
+`all_wear.csv`，以及每个场景单独一份）、场景元信息（`scenario_meta.csv`）
+全部保存在`skin_health/data/rf_synthetic/`，跟代码一起提交，同一份
+scenarios.json重跑会得到完全一样的结果（每个场景用`scenario_id`哈希出
+固定随机种子）。
+
+## 整体结果
+
+- 86个场景，2857行(狗,天)训练样本，标签分布 C0:1819 / C1:709 / C2:329
+- 8折`GroupKFold`（按场景狗分组）交叉验证：**宏F1均值0.886，标准差0.030**
+- 混淆矩阵显示C1/C2之间有一定混淆（51+53=104行C1被误判到C0或C2，这是
+  三分类里最难区分的中间档，符合预期，不是代码问题）
+
+完整报告见`model_a_report.md`，特征重要性明细见`model_a_feature_importance.csv`。
+
+## 特征重要性发现与调整建议
+
+### 1. `sleep_disruption_count`重要性异常高——已验证是合成数据生成器的耦合artifact，不代表真实价值
+
+首次训练permutation importance显示`sleep_disruption_count`（0.295）远超
+第二名`rolling_mean_30d`（0.173）。做了消融实验验证：**去掉这个特征重新
+训练，宏F1只从0.886掉到0.880**，几乎没有影响——说明这个特征携带的信息
+在其他特征（主要是`rolling_mean_30d`/`total_duration_min`）里已经有
+冗余覆盖，permutation importance显示的"重要性"只是这次模型训练时**恰好
+依赖了这一个特征作为主要判别路径**，不代表这是唯一或不可替代的信息源。
+
+根因：合成数据生成器里，异常期的`night_bias`参数（很多场景设在0.3-0.6）
+让异常期新增事件也更容易落在夜间，`sleep_disruption_count`因此变成了
+"是否处于异常期"的一个近似代理——这是生成器设计的副作用，不是真实业务
+规律的必然结果（真实狗夜间抓挠增多不一定总是这么强的伴随关系）。
+
+**调整建议**：不删除这个特征（真实数据里它仍然是有意义的信号，
+`rf_feature_spec.md`里已经论证过它是瘙痒强度的强代理指标），但训练时
+要注意监控这类"单特征依赖过重"的情况，等真实数据后重新检查这个特征的
+重要性是否还是这么突出——如果突出，需要确认是真实规律还是数据本身的
+某种偏差。
+
+### 2. 时长统计量（`duration_mean`/`duration_median`/`max_event_duration_sec`/`duration_rate_per_wear_hour`）重要性持续为0
+
+这几个在这次合成数据上完全没有边际贡献。分析原因：`total_duration_min`
+已经是"次数×平均时长"的汇总量，`rolling_mean_30d`（基于`event_rate_
+per_wear_hour`的滚动均值）进一步吸收了趋势信息，这几个更细粒度的时长
+统计量在SBS标签定义下没有提供增量信息——**这跟`rf_feature_spec.md`
+之前的猜测吻合**（`duration_mean`/`duration_median`当时就标注了"跟中位数
+可能存在部分冗余"），但`max_event_duration_sec`归零比较意外，因为它
+理论上应该是"长时间抓挠红旗"的直接依据。
+
+**调整建议**：保留这几个特征（清零可能是这批合成数据里`long_scratch_
+injection`触发的场景太少、真实数据里也可能因为标签细分不同而恢复重要性），
+但降低优先级——如果后续要精简特征集，这几个是候选清单里的第一梯队。
+
+### 3. `wear_completeness_ratio`重要性为0——符合预期，不是问题
+
+SBS当前的标签定义（`data_quality_flag`只做二值过滤，`insufficient`的天
+直接被排除出训练集）本身不依赖"佩戴覆盖率是多少"这个连续量，只要过了
+`good`/`partial`的门槛，覆盖率具体多少不影响SBS怎么打分——所以这个特征
+对"预测SBS标签"这个任务边际贡献为0是完全符合预期的，**不代表这个特征
+本身没用**，等换成真实兽医标签（可能确实会因为佩戴覆盖率不同而影响
+诊断可信度）时需要重新评估。
+
+### 4. `breed_or_size_class`重要性为0——符合预期，不是问题
+
+SBS的评分公式本身完全不看品种（只用个体自己的历史基线），所以拿SBS
+标签当训练目标时，品种特征天然不会有预测力——这是"训练目标本身不依赖
+品种"导致的，不是"品种信息没用"。等模型B或者未来真实标签里品种确实
+带来差异时，这个特征才有机会体现价值（呼应`two_stage_rf_architecture.md`
+里品种特征主要服务于跟BHM品种先验对接的设计意图）。
+
+## 结论：这次合成数据验证证明了什么、没证明什么
+
+**证明了**：
+- 特征计算管道（`rf_features.py`）+ 训练管道（`train_rf_model_a.py`）
+  代码没有明显bug，能在合理的场景多样性下达到还不错的分类效果
+- 多窗口滚动特征（尤其`rolling_mean_30d`）是目前最重要的单一特征类别，
+  验证了`rf_feature_spec.md`里"多窗口滚动特征值得优先实现"的判断
+- 一部分候选冗余特征（时长细粒度统计量）在这次验证里确实边际贡献很低
+
+**没有证明、也不该拿这次结果当结论的**：
+- 真实业务准确率（标签来自SBS规则本身，不是真实兽医诊断）
+- 品种/佩戴覆盖率这两个特征"没用"——只是在这个特定的合成标签定义下
+  没有边际贡献，换成真实标签后需要重新评估
+- `sleep_disruption_count`的真实重要性——消融实验证明它在这批合成数据上
+  可替代，但这是数据设计的副作用，不是真实世界的结论
+
+---
+
+# 模型B（综合严重度分类器）合成数据验证结果
+
+## 数据来源与复现方式
+
+不重新设计新场景——复用模型A的86个合成场景（`scenarios.json`里本来就带
+`questionnaire_behavior`标注：consistent/conflicting_worse/conflicting_better/
+no_answer/not_triggered）。只有两类天进模型B训练集：(1) 当天SBS真值tier
+是C1或C2（C0不触发问答）；(2) 场景标注是`answered_*`三种之一（`no_answer`/
+`not_triggered`不产出问答，S按`two_stage_rf_architecture.md`的兜底规则
+直接出，不是模型B学出来的）。
+
+复现：
+
+```bash
+python3 skin_health/code/gen_model_b_training_data.py --data_dir skin_health/data/rf_synthetic
+python3 skin_health/code/train_rf_model_b.py --data_dir skin_health/data/rf_synthetic --n_folds 5
+```
+
+标签（S0/S1/S2）来源：`questionnaire_features.py`里的`true_s_tier()`，
+一个**仅供合成数据训练用**的组合规则（皮肤外观权重0.65 > 行为权重0.35，
+标准四舍五入），不是PM文档公式的复刻，理由见`two_stage_rf_architecture.md`
+最后一段——训练目标是让模型学会"给定行为+问答，综合判断严重度"这件事
+本身，不是去拟合某个人为定的加权公式，真实标签攒够后要整个替换掉。
+
+## 踩过的坑：两次返工才拿到有意义的结果
+
+**第一次**：`true_s_tier()`用`round((c_ordinal+skin_capped)/2)`，
+Python内置`round()`是banker's rounding（0.5舍去、1.5进位，不对称）+
+潜变量额外叠加了红旗信号的加成，两个问题一起导致S标签**84.5%都是S2**，
+根本没法训练出有区分力的模型。改成：去掉红旗加成（红旗已经通过SBS
+真值的`c_ordinal`体现过一次，不该重复计入）、权重改成皮肤0.65/行为0.35、
+用标准四舍五入（`floor(x+0.5)`）——标签分布变成S0:157/S1:168/S2:277，
+合理了。
+
+**第二次**：修完标签分布后训练，`skin_redness_level`一个特征重要性
+高达0.63、宏F1飙到0.957——排查发现是**循环论证**：这个特征的生成代码
+`min(2, latent)`跟标签生成代码里的`skin_capped = min(2, latent)`是
+完全一样的表达式，这个特征本质上就是标签本身的另一种写法，模型不是
+"学会了"什么，是直接读到了答案。改成每个问答特征在latent基础上独立
+加30%概率的±1抖动，不再有任何单一特征能精确还原标签，重要性排序才
+开始有参考价值。
+
+这两次返工本身也是这次"自己发现问题、自己调整"的一部分，记录下来是
+提醒以后设计合成数据ground truth时要注意的两类典型坑：**四舍五入函数
+选错**（Python的`round()`不是你以为的四舍五入）、**特征生成逻辑跟标签
+生成逻辑共享了同一段代码/同一个表达式**（哪怕看起来只是"用潜变量算个
+特征"这么自然的操作，也可能不小心把标签泄漏进特征里）。
+
+## 最终结果
+
+602行训练样本，45个场景狗，5折`GroupKFold`交叉验证：**宏F1均值=0.902，
+标准差=0.030**。混淆矩阵显示S0/S1相邻档之间有少量混淆（15+16=31行），
+S2基本能完全区分开，合理。
+
+## 特征重要性（修正循环论证之后）
+
+排名前几位：`skin_lesion_severity`(0.036) > `odor_level`(0.023) >
+`model_a_proba_C2`(0.016) > `skin_redness_level`(0.015) >
+`hair_loss_spot_count_level`(0.014) > `hair_loss_max_diameter_level`
+(0.009) > `coat_quality_level`(0.006) > `rolling_mean_30d`(0.004)。
+
+**几个值得记录的发现**：
+
+1. **问答特征（皮肤外观相关）主导了模型B的判断**，这符合`true_s_tier()`
+   的权重设计（皮肤外观0.65 > 行为0.35），也符合业务直觉——S本来就是
+   为了在行为信号之外补充"皮肤到底长什么样"这个更直接的信息，问答特征
+   占主导是设计意图的体现，不是意外。
+2. **`model_a_proba_C2`（模型A输出的stacking特征）确实有贡献**（0.016，
+   排第3），验证了`two_stage_rf_architecture.md`里"模型B吸收模型A的
+   输出"这个stacking设计是有效的，不是摆设——但`model_a_proba_C1`几乎
+   没贡献（0.0005），可能是因为这批数据里C1天本来就带着更多样的问答
+   信号，模型更依赖问答本身；C2天的问答信号相对更一致（详见前面模型A
+   报告的讨论），所以C2概率对最终判断的边际帮助更明显。
+3. **`owner_reported_scratch_count_bucket`/`owner_reported_scratch_
+   duration_bucket`（主人自报的抓挠次数/时长桶）重要性为0**——这两个
+   跟IMU精确测量的`event_count`/`total_duration_min`是同一件事的两个
+   信息源，一旦模型已经有精确的IMU数值，粗粒度的自报分桶版本就没有
+   边际信息了。这跟`questionnaire_feature_spec.md`里"两者都要保留、
+   互相印证"的建议不冲突——那份文档说的价值主要在于"两者产生分歧时,
+   分歧本身是信号"，这次的86场景里没有专门设计"IMU和主人自报的次数/
+   时长本身就对不上"这种场景（现有的conflicting_worse/better场景冲突
+   点都在"皮肤外观 vs 行为严重度"，不在"主人数的次数 vs 设备测的次数"），
+   这是这批场景覆盖的一个缺口，值得以后补充。
+4. **绝大部分原始IMU特征（`event_count`/`interval_mean`/`duration_*`
+   等）重要性为0**——这是合理的，因为这些信息已经被`model_a_proba_*`
+   这两个stacking特征浓缩过一遍了，模型不需要重新看一遍原始特征来
+   猜"这天C是多少"，直接用模型A算好的概率更直接。不代表这些特征在
+   模型A里没用（模型A的报告里已经展示了它们在预测C这件事上的价值），
+   只是在"给定C的预测结果之后，还能不能从原始特征里再抠出增量信息"
+   这个更窄的问题上，答案基本是没有。
+
+## 结论
+
+跟模型A一样，这次结果**验证了两阶段架构（stacking）本身可行、代码
+管道没有明显bug**，不代表真实业务准确率（问答特征是合成的，S标签是
+人为定义的组合规则，不是真实兽医诊断）。两个值得后续补充的缺口：
+(1) 场景库里补充"主人自报 vs IMU实测"本身就有分歧的场景，看这种分歧
+能不能提供额外信号；(2) 等真实兽医S标签攒够后，`true_s_tier()`这个
+合成规则要整个替换掉，重新训练评估。
