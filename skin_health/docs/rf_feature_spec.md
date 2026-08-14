@@ -138,6 +138,18 @@
   （`rolling_mean_Nd`）和`z_score_vs_self`表达的信息覆盖，需要实测相关
   系数矩阵后再决定要不要精简
 
+> **2026-08更新（实测结果）**：用86个合成场景训练模型A后
+> （`rf_synthetic_validation_findings.md`），permutation importance显示
+> `duration_mean`/`duration_median`/`max_event_duration_sec`/
+> `duration_rate_per_wear_hour`这几个时长细粒度统计量边际贡献持续为0，
+> 印证了上面对`duration_mean`/`duration_median`的冗余猜测，`max_event_
+> duration_sec`归零比较意外（理论上是长时间抓挠红旗的直接依据），怀疑
+> 是这批合成数据里触发红旗的场景太少，需要更多数据验证，不建议现在就
+> 删除。另外发现`sleep_disruption_count`重要性异常高，但消融实验证明
+> 是合成数据生成器"异常期夜间偏向"参数耦合导致的artifact，去掉后宏F1
+> 几乎不变（0.886→0.880），不代表真实世界里这个特征不重要，详见
+> `rf_synthetic_validation_findings.md`第2/3节。
+
 ## 8. 明确缺口（这次新增/强调）
 
 1. **睡眠细分特征**：`sleep_bout_count`、`sleep_onset_hour`——现在只有
