@@ -23,7 +23,7 @@ import cv2
 import gradio as gr
 from ultralytics import YOLO
 
-from ssl_utils import ensure_self_signed_cert
+from ssl_utils import ensure_self_signed_cert, get_lan_ip
 
 MODEL = None
 RESULT_DIR = None
@@ -241,8 +241,9 @@ def main():
         launch_kwargs["ssl_verify"] = False  # 自签名证书，跳过Gradio自己的校验
         scheme = "https"
 
+    lan_ip = get_lan_ip()
     print(f"模型: {weights_path}")
-    print(f"局域网访问地址: {scheme}://<这台机器的局域网IP>:{args.port}")
+    print(f"局域网访问地址（可以直接发给同局域网的其他人）: {scheme}://{lan_ip}:{args.port}")
     if scheme == "https":
         print("（首次访问浏览器会提示证书不受信任，点\"高级->继续前往\"即可，"
               "这是自签名证书的正常现象）")
