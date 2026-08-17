@@ -29,6 +29,20 @@ MODEL = None
 RESULT_DIR = None
 CONF = 0.5
 IMGSZ = 960
+EXAMPLES_DIR = Path("tooth_health/data/examples")
+
+
+def _find_examples(subdir: str, exts: tuple) -> list:
+    """在 tooth_health/data/examples/<subdir>/ 下找文件名以normal/abnormal
+    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)，
+    没放文件时返回空列表——Gradio的Examples组件传空列表不会报错，只是
+    不显示示例区，不影响正常上传检测功能。"""
+    d = EXAMPLES_DIR / subdir
+    if not d.exists():
+        return []
+    files = [p for p in sorted(d.iterdir())
+            if p.suffix.lower() in exts and p.name.lower().startswith(("normal", "abnormal"))]
+    return [str(p) for p in files]
 
 
 def detect_image(image_path):
@@ -103,6 +117,12 @@ def detect_video(video_path):
     return str(out_path), detail
 
 
+LIVE_IMGSZ = 640  # 摄像头实时流用更小尺寸（图片/视频检测的IMGSZ默认960更看重精度，
+# 这里更看重速度）——GPU推理本身已经是零点几毫秒级别不是瓶颈，但imgsz越大，
+# 浏览器端JPEG编码、网络传输、服务端解码这几步跟着都会变慢，尺寸小一圈能
+# 直接压缩这几步的耗时，对"看着流畅"的帮助比压榨GPU推理时间更明显
+
+
 def detect_frame(frame):
     """摄像头流式检测用——frame是Gradio webcam传过来的RGB numpy数组，
     跟detect_image/detect_video统一走BGR给ultralytics（cv2生态默认BGR），
@@ -110,7 +130,7 @@ def detect_frame(frame):
     if frame is None:
         return None
     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=IMGSZ, verbose=False)
+    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
     annotated_bgr = results[0].plot()
     return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
 
@@ -129,6 +149,10 @@ def build_app():
             img_detail = gr.Textbox(label="检测详情", lines=3)
             img_btn = gr.Button("开始检测", variant="primary")
             img_btn.click(detect_image, inputs=img_in, outputs=[img_out, img_detail])
+            img_examples = _find_examples("images", (".jpg", ".jpeg", ".png"))
+            if img_examples:
+                gr.Examples(examples=img_examples, inputs=img_in,
+                           label="示例图片（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
         with gr.Tab("视频检测"):
             with gr.Row():
                 vid_in = gr.Video(label="上传口腔视频", sources=["upload"])
@@ -136,10 +160,15 @@ def build_app():
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
             vid_btn.click(detect_video, inputs=vid_in, outputs=[vid_out, vid_detail])
+            vid_examples = _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv"))
+            if vid_examples:
+                gr.Examples(examples=vid_examples, inputs=vid_in,
+                           label="示例视频（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
         with gr.Tab("摄像头实时检测"):
             gr.Markdown(
                 "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
-                "右侧（有一点延迟，取决于网络和这台机器的算力，不是零延迟）。\n\n"
+                "右侧（已经调过刷新频率/丢帧策略，正常局域网下应该是接近实时的"
+                "体验，不是逐帧毫秒级但肉眼看不出明显延迟）。\n\n"
                 "**局域网内其他设备（手机/笔记本）要用这个功能，访问地址必须是"
                 "`https://`开头，不能是`http://`**——这是浏览器自己的摄像头权限"
                 "安全策略，不是这个服务的限制。第一次用HTTPS访问会提示\"证书不"
@@ -149,7 +178,17 @@ def build_app():
             with gr.Row():
                 cam_in = gr.Image(sources=["webcam"], streaming=True, label="摄像头画面")
                 cam_out = gr.Image(label="实时检测结果")
-            cam_in.stream(detect_frame, inputs=cam_in, outputs=cam_out)
+            cam_in.stream(
+                detect_frame, inputs=cam_in, outputs=cam_out,
+                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这才是延迟感
+                # 明显的真正原因(不是算力/网络)，调到0.05(~20FPS)。concurrency_limit=1
+                # 保证同一时刻只处理一帧，不会因为上一帧还没处理完、下一帧又来了导致
+                # 排队积压(积压是"延迟感随时间越来越大"的典型成因)。trigger_mode=
+                # "always_last"配合并发限制：处理忙不过来时，只保留最新一帧等着处理，
+                # 中间来不及处理的旧帧直接丢弃，保证画面永远是"当前能处理的最新帧"，
+                # 而不是"排在队列里的旧帧"，这是实时流场景该有的丢帧策略，不是bug
+                stream_every=0.05, concurrency_limit=1, trigger_mode="always_last",
+            )
     return demo
 
 
