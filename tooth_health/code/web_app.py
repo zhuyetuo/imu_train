@@ -83,7 +83,14 @@ def serve_result(filename):
 def predict_image(src_path: Path, dst_path: Path, conf: float, imgsz: int):
     results = MODEL.predict(str(src_path), conf=conf, imgsz=imgsz, verbose=False)
     annotated = results[0].plot()
-    cv2.imwrite(str(dst_path), annotated)
+    ok = cv2.imwrite(str(dst_path), annotated)
+    if not ok:
+        # cv2.imwrite失败时不抛异常、只返回False，之前没检查这个返回值，导致
+        # 页面显示"检测完成"但图片文件其实没写出来，/results/xxx.jpg后续访问
+        # 404——现在显式检查，写失败就直接报错，报错信息里带完整路径方便诊断
+        # （常见原因：目标目录权限不对、磁盘满、文件名带特殊字符）
+        raise RuntimeError(f"结果图片写入失败: {dst_path.resolve()}（检查目录写权限/磁盘空间）")
+    print(f"  [已保存] {dst_path.resolve()}")
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
         return "没有检测到口腔区域（可能是构图问题，或者置信度阈值0.5下没有把握判断）"
@@ -105,6 +112,11 @@ def predict_video(src_path: Path, dst_path: Path, conf: float, imgsz: int, frame
     if not writer.isOpened():
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(dst_path), fourcc, fps / max(1, frame_skip), (w, h))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(
+            f"视频写入器打不开(avc1和mp4v都试过了): {dst_path.resolve()}，"
+            "本机ffmpeg/opencv编码器支持可能有问题，检查目录写权限/磁盘空间")
 
     class_counts = {}
     frame_idx, written = 0, 0
@@ -125,6 +137,7 @@ def predict_video(src_path: Path, dst_path: Path, conf: float, imgsz: int, frame
         frame_idx += 1
     cap.release()
     writer.release()
+    print(f"  [已保存] {dst_path.resolve()}")
 
     if written == 0:
         return "视频没有读到任何帧，确认文件没有损坏"
@@ -152,19 +165,28 @@ def predict():
     imgsz = int(request.form.get("imgsz", 960))
 
     t0 = time.time()
-    if ext in IMAGE_EXTS:
-        dst_name = f"{uid}_result.jpg"
-        dst_path = RESULT_DIR / dst_name
-        detail = predict_image(src_path, dst_path, conf, imgsz)
-        media_html = f'<img class="result-img" src="/results/{dst_name}">'
-    elif ext in VIDEO_EXTS:
-        dst_name = f"{uid}_result.mp4"
-        dst_path = RESULT_DIR / dst_name
-        detail = predict_video(src_path, dst_path, conf, imgsz, frame_skip=2)
-        media_html = (f'<video class="result-video" src="/results/{dst_name}" controls>'
-                      f'浏览器不支持播放，<a href="/results/{dst_name}">点这里下载</a></video>')
-    else:
-        return render_page(f'<div class="box warn">不支持的文件类型: {ext}</div>')
+    try:
+        if ext in IMAGE_EXTS:
+            dst_name = f"{uid}_result.jpg"
+            dst_path = RESULT_DIR / dst_name
+            detail = predict_image(src_path, dst_path, conf, imgsz)
+            media_html = f'<img class="result-img" src="/results/{dst_name}">'
+        elif ext in VIDEO_EXTS:
+            dst_name = f"{uid}_result.mp4"
+            dst_path = RESULT_DIR / dst_name
+            detail = predict_video(src_path, dst_path, conf, imgsz, frame_skip=2)
+            media_html = (f'<video class="result-video" src="/results/{dst_name}" controls>'
+                          f'浏览器不支持播放，<a href="/results/{dst_name}">点这里下载</a></video>')
+        else:
+            return render_page(f'<div class="box warn">不支持的文件类型: {ext}</div>')
+    except Exception as e:
+        # 之前这里没有try/except，检测过程中任何报错(比如结果文件写失败)都会让
+        # Flask直接返回500，而且完整错误信息只在服务器终端能看到、网页上一片空白
+        # 不知道发生了什么。现在把错误直接摊在页面上，同时终端也照常打印完整
+        # traceback（用print_exc，方便你本地调试时对照）
+        import traceback
+        traceback.print_exc()
+        return render_page(f'<div class="box warn">处理失败: {e}</div>')
 
     elapsed = time.time() - t0
     result_html = f"""
