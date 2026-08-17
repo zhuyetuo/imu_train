@@ -117,6 +117,12 @@ def detect_video(video_path):
     return str(out_path), detail
 
 
+LIVE_IMGSZ = 640  # 摄像头实时流用更小尺寸（图片/视频检测的IMGSZ默认960更看重精度，
+# 这里更看重速度）——GPU推理本身已经是零点几毫秒级别不是瓶颈，但imgsz越大，
+# 浏览器端JPEG编码、网络传输、服务端解码这几步跟着都会变慢，尺寸小一圈能
+# 直接压缩这几步的耗时，对"看着流畅"的帮助比压榨GPU推理时间更明显
+
+
 def detect_frame(frame):
     """摄像头流式检测用——frame是Gradio webcam传过来的RGB numpy数组，
     跟detect_image/detect_video统一走BGR给ultralytics（cv2生态默认BGR），
@@ -124,7 +130,7 @@ def detect_frame(frame):
     if frame is None:
         return None
     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=IMGSZ, verbose=False)
+    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
     annotated_bgr = results[0].plot()
     return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
 
@@ -161,7 +167,8 @@ def build_app():
         with gr.Tab("摄像头实时检测"):
             gr.Markdown(
                 "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
-                "右侧（有一点延迟，取决于网络和这台机器的算力，不是零延迟）。\n\n"
+                "右侧（已经调过刷新频率/丢帧策略，正常局域网下应该是接近实时的"
+                "体验，不是逐帧毫秒级但肉眼看不出明显延迟）。\n\n"
                 "**局域网内其他设备（手机/笔记本）要用这个功能，访问地址必须是"
                 "`https://`开头，不能是`http://`**——这是浏览器自己的摄像头权限"
                 "安全策略，不是这个服务的限制。第一次用HTTPS访问会提示\"证书不"
@@ -171,7 +178,17 @@ def build_app():
             with gr.Row():
                 cam_in = gr.Image(sources=["webcam"], streaming=True, label="摄像头画面")
                 cam_out = gr.Image(label="实时检测结果")
-            cam_in.stream(detect_frame, inputs=cam_in, outputs=cam_out)
+            cam_in.stream(
+                detect_frame, inputs=cam_in, outputs=cam_out,
+                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这才是延迟感
+                # 明显的真正原因(不是算力/网络)，调到0.05(~20FPS)。concurrency_limit=1
+                # 保证同一时刻只处理一帧，不会因为上一帧还没处理完、下一帧又来了导致
+                # 排队积压(积压是"延迟感随时间越来越大"的典型成因)。trigger_mode=
+                # "always_last"配合并发限制：处理忙不过来时，只保留最新一帧等着处理，
+                # 中间来不及处理的旧帧直接丢弃，保证画面永远是"当前能处理的最新帧"，
+                # 而不是"排在队列里的旧帧"，这是实时流场景该有的丢帧策略，不是bug
+                stream_every=0.05, concurrency_limit=1, trigger_mode="always_last",
+            )
     return demo
 
 
