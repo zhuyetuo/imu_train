@@ -48,3 +48,20 @@ python3 tooth_health/code/train_yolo26.py --data tooth_health/data/yolo_dataset/
 project的`classes.txt`顺序可能不一致（会导致同一个class_id在不同
 project里代表不同类别，且没有任何报错提示）、需要按project分层切
 train/val（避免某个类别在验证集里缺失）。
+
+## 实时预测（网络摄像头）
+
+训练出模型之后，可以接局域网摄像头（比如手机装IP Webcam这类app推流）
+实时看检测效果：
+
+```bash
+python3 tooth_health/code/live_predict.py \
+    --source http://192.168.33.190:8080/video \
+    --weights tooth_health/data/runs/tooth_detect/weights/best.pt
+```
+
+弹出的窗口里实时显示检测框，按`q`退出，按`s`保存当前帧到
+`tooth_health/data/live_snapshots/`。没有显示器/远程SSH跑的话加
+`--headless`，改成终端打印检测结果，配合`--save_video 路径.mp4`
+存成视频文件之后再看。
+
