@@ -72,18 +72,19 @@ def detect_video(video_path):
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     out_path = RESULT_DIR / f"{uuid.uuid4().hex[:10]}_result.mp4"
-    # avc1(H.264)是浏览器能直接播的编码，某些机器上ffmpeg/opencv编译没带这个
-    # 编码器会打开失败，退回mp4v（不一定所有浏览器都能直接播放，但Gradio自己
-    # 托管这个文件、前端播放器兼容性一般比原生<video>标签好一些）
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    # 直接用mp4v软件编码，不再先试avc1(H.264)硬件编码——avc1走的是V4L2 M2M
+    # 接口，这是给树莓派这类带硬件视频编码芯片的嵌入式设备用的，普通x86服务器
+    # (包括这台带5090的机器)根本没有这个硬件接口，每次都会失败，纯粹刷屏+
+    # 浪费一次失败尝试的时间。而且不管我们这里写出来的是什么编码，Gradio
+    # 自己收到文件后都会再检查一遍、不是浏览器兼容格式就自动转一遍mp4
+    # (日志里"Converting to mp4"那行)，所以在avc1和mp4v之间纠结没有意义，
+    # 直接用软件编码最简单
     frame_skip = 2
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps / max(1, frame_skip), (w, h))
-    if not writer.isOpened():
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, fps / max(1, frame_skip), (w, h))
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps / max(1, frame_skip), (w, h))
     if not writer.isOpened():
         cap.release()
-        return None, f"视频写入器打不开(avc1和mp4v都试过了)，检查本机ffmpeg/opencv编码器支持"
+        return None, f"视频写入器打不开(mp4v)，检查本机ffmpeg/opencv编码器支持"
 
     class_counts = {}
     frame_idx, written = 0, 0
