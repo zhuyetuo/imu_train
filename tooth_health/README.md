@@ -65,14 +65,17 @@ python3 tooth_health/code/live_predict.py \
 `--headless`，改成终端打印检测结果，配合`--save_video 路径.mp4`
 存成视频文件之后再看。
 
-## 局域网Web服务（上传图片/视频看检测结果）
+## 局域网Web服务（Gradio，上传图片/视频看检测结果）
 
 ```bash
 python3 tooth_health/code/web_app.py \
     --weights tooth_health/data/runs/tooth_detect/weights/best.pt
 ```
 
-启动后同局域网内任何设备用浏览器打开`http://<这台机器的局域网IP>:6666`，
-上传图片或视频，网页上直接显示/播放带检测框的结果。图片秒出结果；
+启动后同局域网内任何设备用浏览器打开`http://<这台机器的局域网IP>:6688`
+（**不是6666**——Chrome把6666-6669这几个端口列进了"不安全端口"黑名单，
+直接访问6666会被拒绝，`ERR_UNSAFE_PORT`，跟服务本身没关系；默认改成
+6688避开这个坑，想强行用6666可以`--port 6666`+换Firefox打开）。图片/
+视频两个tab，上传后网页上直接显示/播放带检测框的结果。图片秒出结果；
 视频是整段处理完才返回（不是逐帧实时推流），越长的视频等得越久。
 
