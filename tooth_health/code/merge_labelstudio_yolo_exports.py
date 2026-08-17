@@ -14,7 +14,10 @@
      两个project的样本在train/val里分布不均衡（比如异常样本全被切进
      train，val里一个异常样本都没有，这样看着效果好实际没验证到位）
 
-用法：
+日常使用请走 prepare_dataset.py（把Label Studio导出的zip直接扔进
+tooth_health/data/，自动解压+发现所有project+调这里的merge_exports()）。
+这个文件独立跑的场景是手头已经有解压好的导出目录、想单独调一次：
+
     python3 tooth_health/code/merge_labelstudio_yolo_exports.py \
         --exports data/raw_exports/normal_project data/raw_exports/abnormal_project \
         --out_dir tooth_health/data/yolo_dataset \
@@ -64,16 +67,10 @@ def remap_label_file(src_label: Path, dst_label: Path, old_classes: list, canoni
         f.write("\n".join(lines_out) + ("\n" if lines_out else ""))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--exports", nargs="+", required=True,
-                    help="多个Label Studio 'YOLO with Images'导出目录（各自含images/labels/classes.txt）")
-    ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--val_ratio", type=float, default=0.2)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
-
-    export_dirs = [Path(e) for e in args.exports]
+def merge_exports(export_dirs: list, out_dir: Path, val_ratio: float = 0.2, seed: int = 42):
+    """export_dirs: 多个目录，每个都直接含images/labels/classes.txt
+    （不是包着这三样东西的外层目录，调用方负责传对层级，
+    prepare_dataset.py的_find_data_root()就是干这个的）。"""
     per_export_classes = {}
     for d in export_dirs:
         per_export_classes[d] = load_classes(d)
@@ -86,7 +83,6 @@ def main():
             print(f"  [提示] {d.name}的原始classes.txt顺序是{classes}，"
                   f"跟全局顺序不同，已自动重新映射class_id，不用手动处理")
 
-    out_dir = Path(args.out_dir)
     for split in ("train", "val"):
         (out_dir / "images" / split).mkdir(parents=True, exist_ok=True)
         (out_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
@@ -108,7 +104,7 @@ def main():
 
     print(f"\n共找到 {len(all_items)} 张带标注的图片（{len(export_dirs)}个project合计）")
 
-    rng = random.Random(args.seed)
+    rng = random.Random(seed)
     # 按project分层切分，保证每个project(正常为主/异常为主)在train/val里都有覆盖，
     # 不是整体打乱后随机切（那样小概率会把某个project的样本全切进一边）
     by_project = {}
@@ -118,7 +114,7 @@ def main():
     train_items, val_items = [], []
     for project, items in by_project.items():
         rng.shuffle(items)
-        n_val = max(1, round(len(items) * args.val_ratio)) if len(items) > 1 else 0
+        n_val = max(1, round(len(items) * val_ratio)) if len(items) > 1 else 0
         val_items.extend(items[:n_val])
         train_items.extend(items[n_val:])
         print(f"  {project}: {len(items)}张 -> train {len(items) - n_val} / val {n_val}")
@@ -145,6 +141,19 @@ def main():
 
     print(f"\n合并完成: train {len(train_items)}张, val {len(val_items)}张")
     print(f"数据集配置: {data_yaml}")
+
+
+def main():
+    """独立跑这个脚本时用（手动指定已经解压好的导出目录）。日常更新数据
+    走prepare_dataset.py（扔zip进去自动跑完整流程），不用直接跑这个。"""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--exports", nargs="+", required=True,
+                    help="多个Label Studio 'YOLO with Images'导出目录（各自含images/labels/classes.txt）")
+    ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--val_ratio", type=float, default=0.2)
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+    merge_exports([Path(e) for e in args.exports], Path(args.out_dir), args.val_ratio, args.seed)
 
 
 if __name__ == "__main__":

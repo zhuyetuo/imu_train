@@ -8,24 +8,24 @@
 ```
 data/
 ├── README.md                     这份文件（进git）
-├── raw_exports/                  Label Studio原始导出（不进git）
-│   ├── normal_project/           "YOLO with Images"格式解压后的内容
-│   │   ├── images/
-│   │   ├── labels/
-│   │   ├── classes.txt
-│   │   └── notes.json
-│   └── abnormal_project/         同上，另一个project导出的
-└── yolo_dataset/                 merge_labelstudio_yolo_exports.py合并后的
-    ├── images/train/ ...val/     训练脚本实际读取的位置（不进git）
+├── *.zip                         Label Studio导出的原始zip，直接扔这里，
+│                                  不用解压、不用改名，有几个放几个
+├── raw_exports/                  prepare_dataset.py自动解压的位置（不进git，自动生成）
+│   └── <zip文件名>/               每个zip各自解压成一个子目录
+└── yolo_dataset/                 prepare_dataset.py合并后的最终训练集（不进git，自动生成）
+    ├── images/train/ ...val/     训练脚本实际读取的位置
     ├── labels/train/ ...val/
     └── data.yaml                 ultralytics训练用的数据集描述文件
 ```
 
-## 怎么拿到`raw_exports/`下的内容
+## 怎么补充新数据（以后每次都这样）
 
 1. Label Studio里打开对应project → Export → 格式选**"YOLO with Images"**
    （不是"YOLO"，那个可能不含实际图片文件；不是"YOLOv8 OBB"，那是给
    旋转框用的，我们标的是普通矩形框）
-2. 下载的zip解压到`raw_exports/<project名字>/`下，保留Label Studio给的
-   原始目录结构（`images/`/`labels/`/`classes.txt`），不用手动改文件名
-   或格式
+2. 下载的zip**直接扔进这个`data/`目录**，不用解压、不用改名——不管是
+   新project还是老project重新导出的更新版，文件名不冲突就行（Label
+   Studio默认导出文件名带project编号+时间戳，天然不会重名）
+3. 跑`python3 tooth_health/code/prepare_dataset.py`，自动发现所有zip、
+   解压、合并成`yolo_dataset/`——这一步全自动，不用手动进`raw_exports/`
+   里整理

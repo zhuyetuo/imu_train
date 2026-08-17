@@ -24,26 +24,27 @@ tooth_health/
 
 ## 数据来源
 
-两个Label Studio project分别导出（各自选"YOLO with Images"导出格式）：
-- 一个project以"正常"样本为主
-- 一个project以"异常"样本为主
+Label Studio project各自导出"YOLO with Images"格式的zip——project数量
+不固定，以后每次标完一批新数据（不管是新project还是老project重新导出）
+都直接把zip扔进`data/`，不用解压、不用整理目录，`prepare_dataset.py`
+自动扫描全部zip、解压、合并。
 
-两边导出的zip解压后放进`data/raw_exports/`（见`data/README.md`），用
-`code/merge_labelstudio_yolo_exports.py`合并成统一的YOLO训练集（自动
-处理两边`classes.txt`顺序可能不一致的问题、去重复文件名、切train/val）。
-
-## 快速开始
+## 快速开始（也是以后每次补数据的日常操作）
 
 ```bash
-# 1. 把两个Label Studio导出的zip解压到 data/raw_exports/normal_project/ 和
-#    data/raw_exports/abnormal_project/ 下（各自保留Label Studio导出的
-#    images/labels/classes.txt原始目录结构，不用手动改）
+# 1. Label Studio里导出"YOLO with Images"格式，zip直接拖进 tooth_health/data/
+#    （不用解压，不用改文件名，多少个zip都行）
 
-# 2. 合并成统一数据集
-python3 tooth_health/code/merge_labelstudio_yolo_exports.py \
-    --exports data/raw_exports/normal_project data/raw_exports/abnormal_project \
-    --out_dir tooth_health/data/yolo_dataset
+# 2. 一条命令：自动发现所有zip -> 解压 -> 合并成统一训练集
+python3 tooth_health/code/prepare_dataset.py
 
 # 3. 训练
 python3 tooth_health/code/train_yolo26.py --data tooth_health/data/yolo_dataset/data.yaml
 ```
+
+`prepare_dataset.py`是幂等的——没变化的zip会跳过重新解压，每次都会用
+`data/`下当前所有zip重新生成完整的`yolo_dataset/`（全量重建，不是增量
+追加，数据集这个体量下更简单可靠）。自动处理两个容易踩的坑：不同
+project的`classes.txt`顺序可能不一致（会导致同一个class_id在不同
+project里代表不同类别，且没有任何报错提示）、需要按project分层切
+train/val（避免某个类别在验证集里缺失）。
