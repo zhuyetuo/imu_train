@@ -246,3 +246,14 @@ skin_health/data/*
 # 牙齿检测：真实狗的照片数据，体量可能较大，不进git
 tooth_health/data/*
 !tooth_health/data/README.md
+# examples/目录结构本身要能通过git pull自动创建出来，不需要用户手动建，
+# 但目录里真实放的示例图片/视频还是要保持忽略状态(不能因为解开了目录
+# 就连内容一起变成"未忽略"，那样真实狗照片会被git add时不小心扫进去)——
+# 先解开目录本身，再针对目录内容重新加一层忽略，只留.gitkeep这一个例外
+!tooth_health/data/examples/
+!tooth_health/data/examples/images/
+tooth_health/data/examples/images/*
+!tooth_health/data/examples/images/.gitkeep
+!tooth_health/data/examples/videos/
+tooth_health/data/examples/videos/*
+!tooth_health/data/examples/videos/.gitkeep

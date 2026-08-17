@@ -29,6 +29,20 @@ MODEL = None
 RESULT_DIR = None
 CONF = 0.5
 IMGSZ = 960
+EXAMPLES_DIR = Path("tooth_health/data/examples")
+
+
+def _find_examples(subdir: str, exts: tuple) -> list:
+    """在 tooth_health/data/examples/<subdir>/ 下找文件名以normal/abnormal
+    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)，
+    没放文件时返回空列表——Gradio的Examples组件传空列表不会报错，只是
+    不显示示例区，不影响正常上传检测功能。"""
+    d = EXAMPLES_DIR / subdir
+    if not d.exists():
+        return []
+    files = [p for p in sorted(d.iterdir())
+            if p.suffix.lower() in exts and p.name.lower().startswith(("normal", "abnormal"))]
+    return [str(p) for p in files]
 
 
 def detect_image(image_path):
@@ -129,6 +143,10 @@ def build_app():
             img_detail = gr.Textbox(label="检测详情", lines=3)
             img_btn = gr.Button("开始检测", variant="primary")
             img_btn.click(detect_image, inputs=img_in, outputs=[img_out, img_detail])
+            img_examples = _find_examples("images", (".jpg", ".jpeg", ".png"))
+            if img_examples:
+                gr.Examples(examples=img_examples, inputs=img_in,
+                           label="示例图片（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
         with gr.Tab("视频检测"):
             with gr.Row():
                 vid_in = gr.Video(label="上传口腔视频", sources=["upload"])
@@ -136,6 +154,10 @@ def build_app():
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
             vid_btn.click(detect_video, inputs=vid_in, outputs=[vid_out, vid_detail])
+            vid_examples = _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv"))
+            if vid_examples:
+                gr.Examples(examples=vid_examples, inputs=vid_in,
+                           label="示例视频（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
         with gr.Tab("摄像头实时检测"):
             gr.Markdown(
                 "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
