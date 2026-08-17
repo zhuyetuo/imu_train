@@ -9,6 +9,7 @@
 先跑 merge_labelstudio_yolo_exports.py 生成 data.yaml，再跑这个脚本。
 """
 import argparse
+from pathlib import Path
 
 from ultralytics import YOLO
 
@@ -26,17 +27,26 @@ def main():
     ap.add_argument("--name", default="tooth_detect")
     args = ap.parse_args()
 
+    # project传相对路径时，实测某些ultralytics版本会把它当成"name"的一部分拼在
+    # 默认的runs/detect/下面(变成 <cwd>/runs/detect/tooth_health/data/runs/
+    # tooth_detect这种嵌套错误路径)，不是我们要的tooth_health/data/runs/
+    # tooth_detect。这里显式转成绝对路径，绕开这个歧义，保证结果一定存在
+    # 工作目录里，不会跑到repo根目录下多出来的runs/detect/
+    project_abs = str(Path(args.project).resolve())
+
     model = YOLO(args.model)
-    model.train(
+    results = model.train(
         data=args.data,
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,
-        project=args.project,
+        project=project_abs,
         name=args.name,
         # 数据量小的时候适当加强数据增强，减少过拟合；具体参数先用ultralytics默认值
         # 跑一版看效果，不要一上来就手调一堆增强参数，先有基线结果再说
     )
+    print(f"\n训练结果保存在: {results.save_dir}")
+    print(f"最优权重: {Path(results.save_dir) / 'weights' / 'best.pt'}")
 
 
 if __name__ == "__main__":

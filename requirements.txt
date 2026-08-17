@@ -16,3 +16,4 @@ opencv-python>=4.8.0
 ward-metrics>=0.9.5
 pymc>=5.0
 arviz>=0.20
+flask>=3.0

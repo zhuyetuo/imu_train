@@ -65,3 +65,14 @@ python3 tooth_health/code/live_predict.py \
 `--headless`，改成终端打印检测结果，配合`--save_video 路径.mp4`
 存成视频文件之后再看。
 
+## 局域网Web服务（上传图片/视频看检测结果）
+
+```bash
+python3 tooth_health/code/web_app.py \
+    --weights tooth_health/data/runs/tooth_detect/weights/best.pt
+```
+
+启动后同局域网内任何设备用浏览器打开`http://<这台机器的局域网IP>:6666`，
+上传图片或视频，网页上直接显示/播放带检测框的结果。图片秒出结果；
+视频是整段处理完才返回（不是逐帧实时推流），越长的视频等得越久。
+
