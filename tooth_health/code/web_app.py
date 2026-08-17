@@ -1,15 +1,18 @@
 """
-局域网Web服务（Gradio版）：用户在网页上传图片/视频，服务器跑YOLO检测，
-把带检测框的结果显示/播放给用户看。
+局域网Web服务（Gradio版）：用户上传图片/视频，或者用浏览器摄像头实时流式
+检测，服务器跑YOLO，把带检测框的结果显示给用户看。
 
 用法：
     python3 tooth_health/code/web_app.py \
         --weights tooth_health/data/runs/tooth_detect/weights/best.pt
 
-启动后同一局域网内的设备用浏览器打开 http://<这台机器的局域网IP>:6688
-（不是6666——Chrome把6666-6669这几个端口列进了"不安全端口"黑名单会
-直接拒绝访问，跟这个服务本身没关系，见README里的说明，想用6666可以
-用Firefox打开，或者--port自己指定别的）。
+默认自动生成自签名HTTPS证书并启用HTTPS（局域网内其他设备用浏览器摄像头
+必须走HTTPS，这是浏览器安全策略，不是这个服务的限制），启动后浏览器打开
+https://<这台机器的局域网IP>:6688（不是6666——Chrome把6666-6669这几个
+端口列进了"不安全端口"黑名单会直接拒绝访问，见README里的说明）。首次
+访问浏览器会提示"证书不受信任"，点"高级->继续前往"即可，这是自签名证书
+的正常现象。只用图片/视频上传功能、不需要摄像头的话可以传--no_https
+用回普通http。
 """
 import argparse
 import time
@@ -19,6 +22,8 @@ from pathlib import Path
 import cv2
 import gradio as gr
 from ultralytics import YOLO
+
+from ssl_utils import ensure_self_signed_cert
 
 MODEL = None
 RESULT_DIR = None
@@ -98,6 +103,18 @@ def detect_video(video_path):
     return str(out_path), detail
 
 
+def detect_frame(frame):
+    """摄像头流式检测用——frame是Gradio webcam传过来的RGB numpy数组，
+    跟detect_image/detect_video统一走BGR给ultralytics（cv2生态默认BGR），
+    出来再转回RGB给Gradio显示，两头颜色顺序对齐，不然画面颜色会不对。"""
+    if frame is None:
+        return None
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=IMGSZ, verbose=False)
+    annotated_bgr = results[0].plot()
+    return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+
+
 def build_app():
     with gr.Blocks(title="狗狗牙齿检测") as demo:
         gr.Markdown("# 狗狗牙齿检测（正常/异常）")
@@ -119,6 +136,20 @@ def build_app():
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
             vid_btn.click(detect_video, inputs=vid_in, outputs=[vid_out, vid_detail])
+        with gr.Tab("摄像头实时检测"):
+            gr.Markdown(
+                "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
+                "右侧（有一点延迟，取决于网络和这台机器的算力，不是零延迟）。\n\n"
+                "**局域网内其他设备（手机/笔记本）要用这个功能，访问地址必须是"
+                "`https://`开头，不能是`http://`**——这是浏览器自己的摄像头权限"
+                "安全策略，不是这个服务的限制。第一次用HTTPS访问会提示\"证书不"
+                "受信任\"（因为是自签名证书，不是权威机构签发的），点\"高级->"
+                "继续前往\"就行，只需要点一次。"
+            )
+            with gr.Row():
+                cam_in = gr.Image(sources=["webcam"], streaming=True, label="摄像头画面")
+                cam_out = gr.Image(label="实时检测结果")
+            cam_in.stream(detect_frame, inputs=cam_in, outputs=cam_out)
     return demo
 
 
@@ -133,6 +164,11 @@ def main():
     ap.add_argument("--conf", type=float, default=0.5)
     ap.add_argument("--imgsz", type=int, default=960)
     ap.add_argument("--data_dir", default="tooth_health/data/web_uploads")
+    ap.add_argument("--no_https", action="store_true",
+                    help="默认开HTTPS(自动生成自签名证书)，因为局域网其他设备"
+                         "(手机/笔记本)要用浏览器摄像头必须走HTTPS，这是浏览器"
+                         "安全策略决定的。只有服务器自己用自己摄像头/根本不用"
+                         "摄像头功能时，可以传这个参数关掉HTTPS图省事(用http)")
     args = ap.parse_args()
 
     weights_path = Path(args.weights)
@@ -146,11 +182,23 @@ def main():
     RESULT_DIR = Path(args.data_dir) / "results"
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
+    launch_kwargs = {"server_name": "0.0.0.0", "server_port": args.port}
+    scheme = "http"
+    if not args.no_https:
+        cert_path, key_path = ensure_self_signed_cert(Path(args.data_dir) / "ssl")
+        launch_kwargs["ssl_certfile"] = str(cert_path)
+        launch_kwargs["ssl_keyfile"] = str(key_path)
+        launch_kwargs["ssl_verify"] = False  # 自签名证书，跳过Gradio自己的校验
+        scheme = "https"
+
     print(f"模型: {weights_path}")
-    print(f"局域网访问地址: http://<这台机器的局域网IP>:{args.port}")
+    print(f"局域网访问地址: {scheme}://<这台机器的局域网IP>:{args.port}")
+    if scheme == "https":
+        print("（首次访问浏览器会提示证书不受信任，点\"高级->继续前往\"即可，"
+              "这是自签名证书的正常现象）")
 
     demo = build_app()
-    demo.launch(server_name="0.0.0.0", server_port=args.port)
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
