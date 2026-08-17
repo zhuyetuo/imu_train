@@ -32,17 +32,42 @@ IMGSZ = 960
 EXAMPLES_DIR = Path("tooth_health/data/examples")
 
 
-def _find_examples(subdir: str, exts: tuple) -> list:
+def _find_examples(subdir: str, exts: tuple) -> dict:
     """在 tooth_health/data/examples/<subdir>/ 下找文件名以normal/abnormal
-    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)，
-    没放文件时返回空列表——Gradio的Examples组件传空列表不会报错，只是
-    不显示示例区，不影响正常上传检测功能。"""
+    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)。
+    按"正常"/"异常"分组返回，方便上层各自打标签展示，不是混在一起的
+    一个大列表（混在一起就是之前那版拥挤、看不出哪个是哪个的问题）。
+    没放文件时对应分组是空列表，不影响正常上传检测功能。"""
     d = EXAMPLES_DIR / subdir
     if not d.exists():
-        return []
-    files = [p for p in sorted(d.iterdir())
-            if p.suffix.lower() in exts and p.name.lower().startswith(("normal", "abnormal"))]
-    return [str(p) for p in files]
+        return {"正常样本": [], "异常样本": []}
+    files = sorted(p for p in d.iterdir() if p.suffix.lower() in exts)
+    return {
+        "正常样本": [str(p) for p in files if p.name.lower().startswith("normal")],
+        "异常样本": [str(p) for p in files if p.name.lower().startswith("abnormal")],
+    }
+
+
+def _build_example_picker(component_cls, groups: dict, target_input, height=220):
+    """给每个示例文件单独起一列：标签(正常样本/异常样本) + 预览(实际渲染
+    图片/视频，不是Gradio Examples那种小缩略图画廊，视频缩略图之前那版
+    经常显示不出来，这样直接用真实的Image/Video组件展示，一定能看到内容)
+    + 一个"用这个测试"按钮点了直接把这个文件灌进主输入框。没有任何示例
+    文件时这个函数不渲染任何东西，不留空区块。"""
+    total = sum(len(v) for v in groups.values())
+    if total == 0:
+        return
+    gr.Markdown("**示例（点预览下面的按钮直接加载去检测，不用自己找文件）**")
+    with gr.Row():
+        for label, paths in groups.items():
+            for i, path in enumerate(paths):
+                col_label = label if len(paths) == 1 else f"{label} {i + 1}"
+                with gr.Column(scale=1, min_width=180):
+                    gr.Markdown(f"<div style='text-align:center'>{col_label}</div>")
+                    component_cls(value=path, interactive=False, height=height,
+                                 show_label=False)
+                    btn = gr.Button(f"用这个测试", size="sm")
+                    btn.click(lambda p=path: p, outputs=target_input)
 
 
 def detect_image(image_path):
@@ -160,10 +185,7 @@ def build_app():
             img_detail = gr.Textbox(label="检测详情", lines=3)
             img_btn = gr.Button("开始检测", variant="primary")
             img_btn.click(detect_image, inputs=img_in, outputs=[img_out, img_detail])
-            img_examples = _find_examples("images", (".jpg", ".jpeg", ".png"))
-            if img_examples:
-                gr.Examples(examples=img_examples, inputs=img_in,
-                           label="示例图片（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
+            _build_example_picker(gr.Image, _find_examples("images", (".jpg", ".jpeg", ".png")), img_in)
         with gr.Tab("视频检测"):
             with gr.Row():
                 vid_in = gr.Video(label="上传口腔视频", sources=["upload"])
@@ -171,10 +193,7 @@ def build_app():
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
             vid_btn.click(detect_video, inputs=vid_in, outputs=[vid_out, vid_detail])
-            vid_examples = _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv"))
-            if vid_examples:
-                gr.Examples(examples=vid_examples, inputs=vid_in,
-                           label="示例视频（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
+            _build_example_picker(gr.Video, _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv")), vid_in)
         with gr.Tab("摄像头实时检测"):
             gr.Markdown(
                 "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
