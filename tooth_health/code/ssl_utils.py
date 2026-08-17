@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 
-def _get_lan_ip() -> str:
+def get_lan_ip() -> str:
     """探测这台机器对外的局域网IP（不实际发送数据，只是借这个UDP连接动作
     让操作系统选一个出口网卡地址）。探测不到就退回127.0.0.1，证书里
     localhost/127.0.0.1这两个SAN始终都会加，本机访问不受影响。"""
@@ -38,7 +38,7 @@ def ensure_self_signed_cert(ssl_dir: Path):
     key_path = ssl_dir / "key.pem"
     ip_marker = ssl_dir / ".generated_for_ip"
 
-    current_ip = _get_lan_ip()
+    current_ip = get_lan_ip()
     cached_ip = ip_marker.read_text().strip() if ip_marker.exists() else None
 
     if cert_path.exists() and key_path.exists() and cached_ip == current_ip:

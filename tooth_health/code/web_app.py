@@ -23,7 +23,7 @@ import cv2
 import gradio as gr
 from ultralytics import YOLO
 
-from ssl_utils import ensure_self_signed_cert
+from ssl_utils import ensure_self_signed_cert, get_lan_ip
 
 MODEL = None
 RESULT_DIR = None
@@ -32,17 +32,42 @@ IMGSZ = 960
 EXAMPLES_DIR = Path("tooth_health/data/examples")
 
 
-def _find_examples(subdir: str, exts: tuple) -> list:
+def _find_examples(subdir: str, exts: tuple) -> dict:
     """在 tooth_health/data/examples/<subdir>/ 下找文件名以normal/abnormal
-    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)，
-    没放文件时返回空列表——Gradio的Examples组件传空列表不会报错，只是
-    不显示示例区，不影响正常上传检测功能。"""
+    开头的示例文件，不管具体叫什么(normal_1.jpg/normal_狗名.jpg都行)。
+    按"正常"/"异常"分组返回，方便上层各自打标签展示，不是混在一起的
+    一个大列表（混在一起就是之前那版拥挤、看不出哪个是哪个的问题）。
+    没放文件时对应分组是空列表，不影响正常上传检测功能。"""
     d = EXAMPLES_DIR / subdir
     if not d.exists():
-        return []
-    files = [p for p in sorted(d.iterdir())
-            if p.suffix.lower() in exts and p.name.lower().startswith(("normal", "abnormal"))]
-    return [str(p) for p in files]
+        return {"正常样本": [], "异常样本": []}
+    files = sorted(p for p in d.iterdir() if p.suffix.lower() in exts)
+    return {
+        "正常样本": [str(p) for p in files if p.name.lower().startswith("normal")],
+        "异常样本": [str(p) for p in files if p.name.lower().startswith("abnormal")],
+    }
+
+
+def _build_example_picker(component_cls, groups: dict, target_input, height=220):
+    """给每个示例文件单独起一列：标签(正常样本/异常样本) + 预览(实际渲染
+    图片/视频，不是Gradio Examples那种小缩略图画廊，视频缩略图之前那版
+    经常显示不出来，这样直接用真实的Image/Video组件展示，一定能看到内容)
+    + 一个"用这个测试"按钮点了直接把这个文件灌进主输入框。没有任何示例
+    文件时这个函数不渲染任何东西，不留空区块。"""
+    total = sum(len(v) for v in groups.values())
+    if total == 0:
+        return
+    gr.Markdown("**示例（点预览下面的按钮直接加载去检测，不用自己找文件）**")
+    with gr.Row():
+        for label, paths in groups.items():
+            for i, path in enumerate(paths):
+                col_label = label if len(paths) == 1 else f"{label} {i + 1}"
+                with gr.Column(scale=1, min_width=180):
+                    gr.Markdown(f"<div style='text-align:center'>{col_label}</div>")
+                    component_cls(value=path, interactive=False, height=height,
+                                 show_label=False)
+                    btn = gr.Button(f"用这个测试", size="sm")
+                    btn.click(lambda p=path: p, outputs=target_input)
 
 
 def detect_image(image_path):
@@ -127,13 +152,23 @@ LIVE_IMGSZ = 640  # 摄像头实时流用更小尺寸（图片/视频检测的IM
 def detect_frame(frame):
     """摄像头流式检测用——frame是Gradio webcam传过来的RGB numpy数组，
     跟detect_image/detect_video统一走BGR给ultralytics（cv2生态默认BGR），
-    出来再转回RGB给Gradio显示，两头颜色顺序对齐，不然画面颜色会不对。"""
+    出来再转回RGB给Gradio显示，两头颜色顺序对齐，不然画面颜色会不对。
+
+    这里包了try/except——流式场景下，如果某一帧处理时抛异常且没兜住，
+    Gradio可能会认为这个"事件"卡住没结束，后续帧因为concurrency_limit=1
+    (同一时刻只处理一帧)排在后面永远等不到轮到自己，表现出来就是画面
+    整个卡死不动，不是变慢。异常时直接把原始画面原样返回(不叠加检测框)，
+    保证流不会因为单帧出错就整体卡住，同时把错误打到终端方便排查。"""
     if frame is None:
         return None
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
-    annotated_bgr = results[0].plot()
-    return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    try:
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
+        annotated_bgr = results[0].plot()
+        return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    except Exception as e:
+        print(f"  [摄像头帧处理出错，跳过这一帧] {e}")
+        return frame
 
 
 def build_app():
@@ -150,10 +185,7 @@ def build_app():
             img_detail = gr.Textbox(label="检测详情", lines=3)
             img_btn = gr.Button("开始检测", variant="primary")
             img_btn.click(detect_image, inputs=img_in, outputs=[img_out, img_detail])
-            img_examples = _find_examples("images", (".jpg", ".jpeg", ".png"))
-            if img_examples:
-                gr.Examples(examples=img_examples, inputs=img_in,
-                           label="示例图片（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
+            _build_example_picker(gr.Image, _find_examples("images", (".jpg", ".jpeg", ".png")), img_in)
         with gr.Tab("视频检测"):
             with gr.Row():
                 vid_in = gr.Video(label="上传口腔视频", sources=["upload"])
@@ -161,10 +193,7 @@ def build_app():
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
             vid_btn.click(detect_video, inputs=vid_in, outputs=[vid_out, vid_detail])
-            vid_examples = _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv"))
-            if vid_examples:
-                gr.Examples(examples=vid_examples, inputs=vid_in,
-                           label="示例视频（点击直接试，文件名normal开头=正常样本，abnormal开头=异常样本）")
+            _build_example_picker(gr.Video, _find_examples("videos", (".mp4", ".mov", ".avi", ".mkv")), vid_in)
         with gr.Tab("摄像头实时检测"):
             gr.Markdown(
                 "允许浏览器访问摄像头后，画面持续传到服务器跑检测，结果实时显示在"
@@ -181,14 +210,14 @@ def build_app():
                 cam_out = gr.Image(label="实时检测结果")
             cam_in.stream(
                 detect_frame, inputs=cam_in, outputs=cam_out,
-                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这才是延迟感
-                # 明显的真正原因(不是算力/网络)，调到0.05(~20FPS)。concurrency_limit=1
-                # 保证同一时刻只处理一帧，不会因为上一帧还没处理完、下一帧又来了导致
-                # 排队积压(积压是"延迟感随时间越来越大"的典型成因)。trigger_mode=
-                # "always_last"配合并发限制：处理忙不过来时，只保留最新一帧等着处理，
-                # 中间来不及处理的旧帧直接丢弃，保证画面永远是"当前能处理的最新帧"，
-                # 而不是"排在队列里的旧帧"，这是实时流场景该有的丢帧策略，不是bug
-                stream_every=0.05, concurrency_limit=1, trigger_mode="always_last",
+                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这是延迟感
+                # 明显的主因(不是算力/网络)，调到0.1(~10FPS)。之前还加过
+                # trigger_mode="always_last"，实测在这个Gradio版本的webcam流式
+                # 组件上反而会导致整个画面卡死不动(不是变慢，是完全卡住)，
+                # 怀疑是这个参数跟streaming=True的内部队列机制冲突，已去掉，
+                # 只保留concurrency_limit=1(避免同一时刻处理多帧导致乱序/资源
+                # 争抢)，stream_every调低这一项本身已经能明显改善延迟感
+                stream_every=0.1, concurrency_limit=1,
             )
     return demo
 
@@ -231,8 +260,9 @@ def main():
         launch_kwargs["ssl_verify"] = False  # 自签名证书，跳过Gradio自己的校验
         scheme = "https"
 
+    lan_ip = get_lan_ip()
     print(f"模型: {weights_path}")
-    print(f"局域网访问地址: {scheme}://<这台机器的局域网IP>:{args.port}")
+    print(f"局域网访问地址（可以直接发给同局域网的其他人）: {scheme}://{lan_ip}:{args.port}")
     if scheme == "https":
         print("（首次访问浏览器会提示证书不受信任，点\"高级->继续前往\"即可，"
               "这是自签名证书的正常现象）")
