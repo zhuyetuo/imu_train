@@ -242,3 +242,7 @@ skin_health/data/*
 !skin_health/data/synthetic_scenarios/
 !skin_health/data/bhm_validation/
 !skin_health/data/rf_synthetic/
+
+# 牙齿检测：真实狗的照片数据，体量可能较大，不进git
+tooth_health/data/*
+!tooth_health/data/README.md
