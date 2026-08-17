@@ -103,14 +103,18 @@ def build_app():
         gr.Markdown("# 狗狗牙齿检测（正常/异常）")
         with gr.Tab("图片检测"):
             with gr.Row():
-                img_in = gr.Image(type="filepath", label="上传口腔照片")
+                # sources只留"upload"——默认还会带"webcam"(摄像头拍照)/"clipboard"
+                # 这两个选项，摄像头选项会挤占主要显示位置(变成"Click to Access
+                # Webcam"这种大按钮)，反而把"点击上传文件"这个真正要用的功能
+                # 挤到不显眼的地方，这里明确只保留上传
+                img_in = gr.Image(type="filepath", label="上传口腔照片", sources=["upload"])
                 img_out = gr.Image(label="检测结果")
             img_detail = gr.Textbox(label="检测详情", lines=3)
             img_btn = gr.Button("开始检测", variant="primary")
             img_btn.click(detect_image, inputs=img_in, outputs=[img_out, img_detail])
         with gr.Tab("视频检测"):
             with gr.Row():
-                vid_in = gr.Video(label="上传口腔视频")
+                vid_in = gr.Video(label="上传口腔视频", sources=["upload"])
                 vid_out = gr.Video(label="检测结果")
             vid_detail = gr.Textbox(label="检测详情", lines=5)
             vid_btn = gr.Button("开始检测（视频较长时会等一会）", variant="primary")
