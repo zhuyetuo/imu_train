@@ -127,13 +127,23 @@ LIVE_IMGSZ = 640  # 摄像头实时流用更小尺寸（图片/视频检测的IM
 def detect_frame(frame):
     """摄像头流式检测用——frame是Gradio webcam传过来的RGB numpy数组，
     跟detect_image/detect_video统一走BGR给ultralytics（cv2生态默认BGR），
-    出来再转回RGB给Gradio显示，两头颜色顺序对齐，不然画面颜色会不对。"""
+    出来再转回RGB给Gradio显示，两头颜色顺序对齐，不然画面颜色会不对。
+
+    这里包了try/except——流式场景下，如果某一帧处理时抛异常且没兜住，
+    Gradio可能会认为这个"事件"卡住没结束，后续帧因为concurrency_limit=1
+    (同一时刻只处理一帧)排在后面永远等不到轮到自己，表现出来就是画面
+    整个卡死不动，不是变慢。异常时直接把原始画面原样返回(不叠加检测框)，
+    保证流不会因为单帧出错就整体卡住，同时把错误打到终端方便排查。"""
     if frame is None:
         return None
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
-    annotated_bgr = results[0].plot()
-    return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    try:
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        results = MODEL.predict(frame_bgr, conf=CONF, imgsz=LIVE_IMGSZ, verbose=False)
+        annotated_bgr = results[0].plot()
+        return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    except Exception as e:
+        print(f"  [摄像头帧处理出错，跳过这一帧] {e}")
+        return frame
 
 
 def build_app():
@@ -181,14 +191,14 @@ def build_app():
                 cam_out = gr.Image(label="实时检测结果")
             cam_in.stream(
                 detect_frame, inputs=cam_in, outputs=cam_out,
-                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这才是延迟感
-                # 明显的真正原因(不是算力/网络)，调到0.05(~20FPS)。concurrency_limit=1
-                # 保证同一时刻只处理一帧，不会因为上一帧还没处理完、下一帧又来了导致
-                # 排队积压(积压是"延迟感随时间越来越大"的典型成因)。trigger_mode=
-                # "always_last"配合并发限制：处理忙不过来时，只保留最新一帧等着处理，
-                # 中间来不及处理的旧帧直接丢弃，保证画面永远是"当前能处理的最新帧"，
-                # 而不是"排在队列里的旧帧"，这是实时流场景该有的丢帧策略，不是bug
-                stream_every=0.05, concurrency_limit=1, trigger_mode="always_last",
+                # stream_every默认0.5秒，相当于浏览器强制限速在2FPS，这是延迟感
+                # 明显的主因(不是算力/网络)，调到0.1(~10FPS)。之前还加过
+                # trigger_mode="always_last"，实测在这个Gradio版本的webcam流式
+                # 组件上反而会导致整个画面卡死不动(不是变慢，是完全卡住)，
+                # 怀疑是这个参数跟streaming=True的内部队列机制冲突，已去掉，
+                # 只保留concurrency_limit=1(避免同一时刻处理多帧导致乱序/资源
+                # 争抢)，stream_every调低这一项本身已经能明显改善延迟感
+                stream_every=0.1, concurrency_limit=1,
             )
     return demo
 
