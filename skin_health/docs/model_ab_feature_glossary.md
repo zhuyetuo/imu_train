@@ -1,11 +1,17 @@
-# 模型A特征全览（含例子）
+# 模型A/B特征全览（含例子）
 
-> 模型A(行为严重度分类器)当前的全部44个特征，逐一列出计算方式/作用/例子，
-> 方便团队快速查阅。特征定义详见`rf_feature_spec.md`，代码见
-> `skin_health/code/rf_features.py`的`FEATURE_COLUMNS`。
+> 模型A(行为严重度分类器，纯IMU)当前全部44个特征 + 模型B(综合严重度
+> 分类器)在此基础上新增的10个特征(3个stacking + 7个问答)，逐一列出
+> 计算方式/作用/例子，方便团队快速查阅。特征定义详见`rf_feature_spec.md`
+> (模型A部分)、`questionnaire_feature_spec.md`(问答部分)、
+> `two_stage_rf_architecture.md`(两个模型的架构关系)，代码见
+> `skin_health/code/rf_features.py`的`FEATURE_COLUMNS`、
+> `questionnaire_features.py`的`QUESTIONNAIRE_FEATURE_COLUMNS`。
 >
 > 曾经讨论过但决定不加的特征（`weekday_weekend_ratio`、
 > `post_activity_scratch_ratio`等）及理由，见文末"讨论过但未采纳"一节。
+
+## 模型A：44个特征（纯IMU/行为，daily）
 
 ## 一、抓挠频率/时长（8个）
 
@@ -80,6 +86,33 @@
 | `rolling_std_7d` | 同窗口滚动标准差 | 这个尺度内的波动程度 | 过去7天有的天0.3次/小时、有的天1.5次/小时，波动很大 → `rolling_std_7d`偏高，提示这只狗最近状态不稳定 |
 
 （`rolling_mean/std_3d/14d/30d`跟`7d`同一逻辑，只是窗口长度不同）
+
+---
+
+## 模型B：在模型A的44个特征基础上，新增10个特征（共54个）
+
+模型A判C1/C2才触发问答，用户填了才有模型B的样本，详见
+`two_stage_rf_architecture.md`。
+
+## 十、Stacking特征（3个）—— 模型A的预测结果，当特征喂给模型B
+
+| 特征 | 计算方式 | 作用 | 例子 |
+|---|---|---|---|
+| `model_a_proba_C0` | 模型A预测"今天是C0(正常)"的概率(用GroupKFold的out-of-fold预测，不是同一份数据训练完直接predict，避免标签泄漏) | 把模型A已经学到的"今天行为严重度"判断，作为一个信息源直接喂给模型B，不用模型B从零重新学一遍 | 模型A认为今天85%概率是C0 → `model_a_proba_C0=0.85` |
+| `model_a_proba_C1` | 同上，预测"是C1"的概率 | 同上 | `model_a_proba_C1=0.12` |
+| `model_a_proba_C2` | 同上，预测"是C2"的概率 | 同上 | `model_a_proba_C2=0.03`（三个概率加起来=1） |
+
+## 十一、问答特征（7个）—— 用户填纸质表后才有，对应`questionnaire_paper_form.md`
+
+| 特征 | 计算方式 | 作用 | 例子 |
+|---|---|---|---|
+| `skin_redness_level` | 皮肤颜色题里"发红程度"部分，0-2三档(正常/轻微泛红/鲜红无破损) | IMU测不到皮肤本身的样子，这个是唯一直接反映"皮肤看起来怎样"的信号 | 用户选"C.明显鲜红，但还没有破皮" → `skin_redness_level=2` |
+| `skin_pigment_abnormal` | 皮肤颜色题里"色素异常"部分，0/1二值(有没有黑色油脂/色素沉着) | 独立于发红程度的另一种皮肤异常，色素沉着常提示慢性反复问题 | 用户选"D.皮肤表面有黑色油油的东西" → `skin_pigment_abnormal=1` |
+| `skin_lesion_severity` | 皮损题，0-3四档(完整/干燥少量皮屑/斑块脱屑/糜烂渗液) | 皮肤完整性是否被破坏，数值越高越提示已经出现实质性损伤 | 用户选"C.皮肤上有一块块大于1厘米异常区域" → `skin_lesion_severity=2` |
+| `odor_level` | 异味题，0-3四档(无/凑近/30-50cm可闻到/进屋即闻) | 异味程度间接反映细菌/酵母菌繁殖程度，跟感染/炎症相关 | 用户选"C.离它大概30-50cm，就能闻到比较明显的臭味" → `odor_level=2` |
+| `hair_loss_spot_count_level` | 秃毛分布题，0-3四档(无/1-2处/≥3处/连片) | 脱毛范围越大越提示全身性问题（比如跳蚤过敏、内分泌病），不只是局部摩擦 | 用户选"C.有3处或更多明显没有毛或毛发稀疏的地方" → `hair_loss_spot_count_level=2` |
+| `hair_loss_max_diameter_level` | 最大秃毛区域题，0-3四档(无/<1-2cm/2-3cm/>3cm) | 单块脱毛面积越大，皮肤暴露、失去保护的程度越严重 | 用户选"B.最大的一块很小，直径不到1-2cm" → `hair_loss_max_diameter_level=1` |
+| `coat_quality_level` | 整体毛发状态题，0-3四档(光亮/油腻打结/小范围断裂/大部分干枯) | 反映毛发的整体营养/健康状态，跟长期皮肤病/慢性消耗有关 | 用户选"B.毛发有点油、容易打结" → `coat_quality_level=1` |
 
 ---
 
