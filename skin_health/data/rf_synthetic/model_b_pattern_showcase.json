@@ -1,0 +1,252 @@
+{
+  "summary": {
+    "answered_conflicting_better": {
+      "n": 133,
+      "naive_fallback_accuracy": 0.0,
+      "model_b_accuracy": 0.789
+    },
+    "answered_conflicting_worse": {
+      "n": 97,
+      "naive_fallback_accuracy": 0.206,
+      "model_b_accuracy": 0.99
+    },
+    "answered_consistent": {
+      "n": 372,
+      "naive_fallback_accuracy": 0.46,
+      "model_b_accuracy": 0.935
+    }
+  },
+  "showcase": [
+    {
+      "questionnaire_behavior": "answered_conflicting_better",
+      "examples": [
+        {
+          "pet_id": "cyclical_conflicting_better_bichon_13",
+          "date": "2026-01-03",
+          "c_tier": "C1",
+          "s_tier_true": "S0",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S0",
+          "model_b_proba": {
+            "S0": 1.0,
+            "S1": 0.0,
+            "S2": 0.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 0,
+            "skin_pigment_abnormal": 1,
+            "skin_lesion_severity": 0,
+            "odor_level": 0,
+            "hair_loss_spot_count_level": 0,
+            "hair_loss_max_diameter_level": 0,
+            "coat_quality_level": 0
+          }
+        },
+        {
+          "pet_id": "cyclical_conflicting_better_bichon_13",
+          "date": "2026-01-27",
+          "c_tier": "C1",
+          "s_tier_true": "S0",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S0",
+          "model_b_proba": {
+            "S0": 0.986,
+            "S1": 0.014,
+            "S2": 0.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 0,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 1,
+            "odor_level": 0,
+            "hair_loss_spot_count_level": 1,
+            "hair_loss_max_diameter_level": 0,
+            "coat_quality_level": 0
+          }
+        },
+        {
+          "pet_id": "cyclical_conflicting_better_bichon_13",
+          "date": "2026-02-08",
+          "c_tier": "C1",
+          "s_tier_true": "S0",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S0",
+          "model_b_proba": {
+            "S0": 1.0,
+            "S1": 0.0,
+            "S2": 0.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 0,
+            "skin_pigment_abnormal": 1,
+            "skin_lesion_severity": 0,
+            "odor_level": 0,
+            "hair_loss_spot_count_level": 0,
+            "hair_loss_max_diameter_level": 0,
+            "coat_quality_level": 0
+          }
+        }
+      ]
+    },
+    {
+      "questionnaire_behavior": "answered_conflicting_worse",
+      "examples": [
+        {
+          "pet_id": "cold_start_loose_days_cyclical_09",
+          "date": "2026-01-03",
+          "c_tier": "C1",
+          "s_tier_true": "S2",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S2",
+          "model_b_proba": {
+            "S0": 0.0,
+            "S1": 0.0,
+            "S2": 1.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 2,
+            "skin_pigment_abnormal": 1,
+            "skin_lesion_severity": 2,
+            "odor_level": 2,
+            "hair_loss_spot_count_level": 1,
+            "hair_loss_max_diameter_level": 1,
+            "coat_quality_level": 1
+          }
+        },
+        {
+          "pet_id": "cold_start_loose_days_cyclical_09",
+          "date": "2026-01-04",
+          "c_tier": "C1",
+          "s_tier_true": "S2",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S2",
+          "model_b_proba": {
+            "S0": 0.0,
+            "S1": 0.0,
+            "S2": 1.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 2,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 2,
+            "odor_level": 2,
+            "hair_loss_spot_count_level": 2,
+            "hair_loss_max_diameter_level": 2,
+            "coat_quality_level": 2
+          }
+        },
+        {
+          "pet_id": "cold_start_loose_days_cyclical_09",
+          "date": "2026-01-10",
+          "c_tier": "C1",
+          "s_tier_true": "S2",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S2",
+          "model_b_proba": {
+            "S0": 0.0,
+            "S1": 0.0,
+            "S2": 1.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 2,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 3,
+            "odor_level": 3,
+            "hair_loss_spot_count_level": 1,
+            "hair_loss_max_diameter_level": 1,
+            "coat_quality_level": 2
+          }
+        }
+      ]
+    },
+    {
+      "questionnaire_behavior": "answered_consistent",
+      "examples": [
+        {
+          "pet_id": "chronic_high_moderate_off_body_bichon_12",
+          "date": "2026-01-01",
+          "c_tier": "C1",
+          "s_tier_true": "S2",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S2",
+          "model_b_proba": {
+            "S0": 0.0,
+            "S1": 0.0,
+            "S2": 1.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 2,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 2,
+            "odor_level": 2,
+            "hair_loss_spot_count_level": 1,
+            "hair_loss_max_diameter_level": 1,
+            "coat_quality_level": 1
+          }
+        },
+        {
+          "pet_id": "chronic_high_moderate_off_body_bichon_12",
+          "date": "2026-01-02",
+          "c_tier": "C1",
+          "s_tier_true": "S2",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S2",
+          "model_b_proba": {
+            "S0": 0.0,
+            "S1": 0.0,
+            "S2": 1.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 2,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 2,
+            "odor_level": 2,
+            "hair_loss_spot_count_level": 1,
+            "hair_loss_max_diameter_level": 1,
+            "coat_quality_level": 2
+          }
+        },
+        {
+          "pet_id": "chronic_high_moderate_off_body_bichon_12",
+          "date": "2026-01-10",
+          "c_tier": "C1",
+          "s_tier_true": "S0",
+          "naive_fallback_pred": "S1",
+          "naive_correct": false,
+          "model_b_pred": "S0",
+          "model_b_proba": {
+            "S0": 1.0,
+            "S1": 0.0,
+            "S2": 0.0
+          },
+          "model_b_correct": true,
+          "questionnaire": {
+            "skin_redness_level": 0,
+            "skin_pigment_abnormal": 0,
+            "skin_lesion_severity": 0,
+            "odor_level": 0,
+            "hair_loss_spot_count_level": 0,
+            "hair_loss_max_diameter_level": 0,
+            "coat_quality_level": 0
+          }
+        }
+      ]
+    }
+  ]
+}
