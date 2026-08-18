@@ -13,9 +13,11 @@
     answered_conflicting_better  latent 比 C_ordinal 推断的更轻（次数多但皮肤基本正常，
                                   可能是行为习惯而非病理性）
 
-主人自报的抓挠次数/时长桶（owner_reported_*）反映的是"抓挠行为本身"，跟当天
-真实event_count/duration相关（加一点主观感知噪声），不受true_skin_latent影响——
-这是跟IMU测量同一件事的两个信息源，不是跟皮肤状态相关的问题。
+2026-08更新：PM最终版问答题库（Wardyn，皮肤/瘙痒部分）里没有"抓挠次数/时长
+自报"这两题，按PM最终版为准，去掉owner_reported_scratch_count_bucket/
+owner_reported_scratch_duration_bucket这两个特征——抓挠次数/时长只由IMU
+（模型A/rf_features.py的event_count/total_duration_min等）提供，不再有
+问答自报的平行信号源。
 """
 import numpy as np
 import pandas as pd
@@ -27,13 +29,9 @@ ODOR_LEVELS = 4                  # 无/凑近/30-50cm/进屋即闻
 HAIR_LOSS_SPOT_LEVELS = 4        # 无/1-2处/>=3处/连续成片
 HAIR_LOSS_DIAMETER_LEVELS = 4    # 无/<1-2cm/2-3cm/>3cm
 COAT_QUALITY_LEVELS = 4          # 光亮/油腻打结/小范围断裂/大部分干枯
-SCRATCH_COUNT_BUCKETS = 5        # <5/5-15/15-30/30-50/>50，owner_reported
-SCRATCH_DURATION_BUCKETS = 5     # <0/0-1h/1-3h/3-6h/>6h，owner_reported
 PIGMENT_ABNORMAL_LEVELS = 2      # 二值：有没有黑色油脂/色素沉着（不是有序严重度）
 
 QUESTIONNAIRE_FEATURE_COLUMNS = [
-    "owner_reported_scratch_count_bucket",
-    "owner_reported_scratch_duration_bucket",
     "skin_redness_level",
     "skin_pigment_abnormal",
     "skin_lesion_severity",
@@ -63,25 +61,6 @@ def _latent_for(c_ordinal, questionnaire_behavior, has_red_flag, rng):
     return int(np.clip(base + rng.integers(-1, 2), 0, 3))
 
 
-def _bucket_from_count(rng, event_count):
-    """主人自报抓挠次数桶，围绕真实event_count加感知噪声后落桶。"""
-    perceived = max(0, event_count + rng.normal(0, max(1.0, event_count * 0.25)))
-    edges = [5, 15, 30, 50]
-    for i, e in enumerate(edges):
-        if perceived < e:
-            return i
-    return 4
-
-
-def _bucket_from_duration_min(rng, duration_min):
-    perceived_hours = max(0.0, duration_min / 60.0 + rng.normal(0, 0.3))
-    edges = [0.0001, 1, 3, 6]
-    for i, e in enumerate(edges):
-        if perceived_hours < e:
-            return i
-    return 4
-
-
 def _jitter(rng, value, max_level, p_jitter=0.3):
     """每个问答特征独立在latent基础上抖动±1（30%概率），不让任何一个观测特征
     精确等于用来算真值标签的latent——之前skin_redness_level=min(2,latent)是
@@ -95,13 +74,10 @@ def _jitter(rng, value, max_level, p_jitter=0.3):
     return int(np.clip(value, 0, max_level))
 
 
-def simulate_questionnaire_row(rng, c_ordinal, questionnaire_behavior, has_red_flag,
-                               event_count, duration_min):
+def simulate_questionnaire_row(rng, c_ordinal, questionnaire_behavior, has_red_flag):
     latent = _latent_for(c_ordinal, questionnaire_behavior, has_red_flag, rng)
     lvl3 = min(2, latent)  # 3档取值特征封顶到2
     return {
-        "owner_reported_scratch_count_bucket": _bucket_from_count(rng, event_count),
-        "owner_reported_scratch_duration_bucket": _bucket_from_duration_min(rng, duration_min),
         "skin_redness_level": _jitter(rng, lvl3, 2),
         "skin_pigment_abnormal": int(rng.random() < (0.15 + 0.15 * latent)),
         "skin_lesion_severity": _jitter(rng, min(HAIR_LOSS_SPOT_LEVELS - 1, latent), HAIR_LOSS_SPOT_LEVELS - 1),

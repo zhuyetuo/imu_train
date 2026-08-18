@@ -22,16 +22,47 @@ ROLLING_WINDOWS = (3, 7, 14, 30)
 # skip=7(参考SBS的跳过思路，但不是唯一选择)代表"排除掉可能已经开始异常
 # 的最近一段时间，看更早、更可能代表真实正常水平的历史"这个业务直觉，
 # 两种直觉都值得让模型自己验证谁更有用，不是predetermine哪个对。
+# 2026-08更新：产品希望基线能"多快建立多快用"，同时长期看又要够稳，不是
+# 只顾一头——之前只有7/14/30三档"短期"，现在把"recent"(不跳过，响应快)这组
+# 扩到短/中/长完整覆盖3/7/14/21/30/60天，同时保留"excl_recent"(跳过
+# 最近7天，排除近期可能已异常的时段，看更早、更可能代表真实正常水平的
+# 历史)这个独立业务直觉在14/30两档上——两种直觉(快vs稳、含近期vs排除近期)
+# 都留着让训练自己验证谁在什么阶段更有用，不是predetermine哪个对，也不是
+# 要拿新的窗口去替换旧的。
+#
+# 讨论过是否用"动态/膨胀窗口"(从1天开始、随数据积累逐渐变长、封顶后固定)
+# 去替代这一整组recent窗口，结论是不行——短窗口(3/7/14天)和长窗口(30/60天)
+# 不是同一件事的快慢版本，是两个不同目的的信号：短窗口专门用来抓**急性
+# 发作**(皮炎可能3-5天内从没事变严重)，长窗口是真正的**长期正常水平参考**。
+# 如果压缩成一个动态窗口，数据积累到第30/60天后分母就不会再是3-7天量级，
+# 急性发作的短期敏感度会被长期历史稀释掉，这跟短窗口本来的作用直接矛盾。
+# 短窗口负责"快"、长窗口负责"稳"，两者不冲突、不需要合并，各自独立保留。
+#
+# 180天这一档去掉了：狗的"正常水平"本身会随年龄/季节/换毛周期系统性漂移，
+# 用180天中位数当基线，容易把已经过时的状态当成"正常"，反而降低敏感度，
+# 跟基线设计的初衷(识别偏离正常)矛盾；另外60天和180天数值上大概率高度
+# 相关，除非发生跨季节的系统性变化——但那种变化恰恰是应该被模型察觉到的
+# 信号，不该被更长的基线平均掉。
 BASELINE_CONFIGS = [
-    {"name": "recent7", "skip": 0, "window": 7},
-    {"name": "recent14", "skip": 0, "window": 14},
-    {"name": "recent30", "skip": 0, "window": 30},
-    {"name": "excl_recent14", "skip": 7, "window": 14},
-    {"name": "excl_recent30", "skip": 7, "window": 30},
+    {"name": "recent3", "skip": 0, "window": 3, "min_valid": 2},
+    {"name": "recent7", "skip": 0, "window": 7, "min_valid": 4},
+    {"name": "recent14", "skip": 0, "window": 14, "min_valid": 5},
+    {"name": "recent21", "skip": 0, "window": 21, "min_valid": 7},
+    {"name": "recent30", "skip": 0, "window": 30, "min_valid": 10},
+    {"name": "recent60", "skip": 0, "window": 60, "min_valid": 15},
+    {"name": "excl_recent14", "skip": 7, "window": 14, "min_valid": 5},
+    {"name": "excl_recent30", "skip": 7, "window": 30, "min_valid": 10},
 ]
-BASELINE_MIN_VALID_DAYS = 5  # 窗口内至少要有几天good数据才算基线建立，比SBS的
-# MIN_BASELINE_DAYS=7独立设定，不是照抄——数值上凑巧接近是因为业务直觉相通
-# (至少要有接近一周的数据才谈得上"典型水平")，不是刻意对齐SBS的选择
+# min_valid按窗口长度递增(不是统一硬阈值)：窗口越长，要求窗口内"good"天数
+# 占比越高才建立基线，避免长窗口只有寥寥几天有效数据就被短窗口那套宽松
+# 标准放行——比如recent180如果只要5天good数据就成立，180天里绝大部分是
+# 缺失/插值的情况下算出的中位数没有代表性。recent3用min_valid=2，参考
+# ROLLING_WINDOWS滚动特征min_periods=max(2, w//2)的同一套"至少2天才算数"
+# 的宽松下限逻辑——这一档本来就是牺牲稳定性换响应速度的，不强求高占比。
+BASELINE_MIN_VALID_DAYS = 5  # 兜底默认值，配置里没显式给min_valid的窗口用这个
+# ——比SBS的MIN_BASELINE_DAYS=7独立设定，不是照抄，数值上凑巧接近是因为
+# 业务直觉相通(至少要有接近一周的数据才谈得上"典型水平")，不是刻意对齐
+# SBS的选择。
 BASELINE_DENOM_MIN = 1.0  # 分母下限，纯粹是防止除0/被极小基线值放大，不是业务参数
 
 
@@ -121,6 +152,7 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
         any_baseline_valid = np.zeros(n, dtype=bool)
         for cfg in BASELINE_CONFIGS:
             name, skip, window = cfg["name"], cfg["skip"], cfg["window"]
+            min_valid = cfg.get("min_valid", BASELINE_MIN_VALID_DAYS)
             base_event = np.full(n, np.nan)
             base_dur = np.full(n, np.nan)
             for i in range(n):
@@ -130,7 +162,7 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
                     continue
                 idx = np.arange(max(0, lo), hi)
                 idx = idx[good_mask[idx]]
-                if len(idx) < BASELINE_MIN_VALID_DAYS:
+                if len(idx) < min_valid:
                     continue
                 base_event[i] = np.median(event_arr[idx])
                 base_dur[i] = np.median(dur_arr[idx])
@@ -140,6 +172,69 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
             grp[f"baseline_ratio_duration_{name}"] = dur_arr / denom_dur
             any_baseline_valid |= ~np.isnan(base_event)
         grp["has_any_baseline"] = any_baseline_valid.astype(int)
+
+        # consecutive_days_above_baseline：对齐SBS的persistence_score维度——
+        # 那边显式track"最近连续几天变化幅度分超过阈值"，是一个时序状态量，
+        # 不是rolling_mean/std这类窗口统计量能精确重现的信息（详见
+        # rf_synthetic_validation_findings.md的覆盖度分析：4个SBS维度里，
+        # 变化幅度/聚集度/睡眠中断都有更细粒度的连续特征对应，只有持续性
+        # 这个"streak"信息缺失）。用excl_recent14基线（实测最有区分力的一组，
+        # 见rf_synthetic_validation_findings.md）的count/duration比率中较高
+        # 者判断"当天是否偏高"，阈值2.0对应SBS _DELTA_TIERS里score=20那档的
+        # ratio_min（score=10更宽松，这里选稍严格的2.0避免把太多天数计入
+        # 连续，具体阈值不是照抄SBS的PERSISTENCE_ENTRY_SCORE=10那一档，只是
+        # 业务直觉上的"明显偏高"参考点）。基线缺失(NaN)的天不重置也不计入
+        # ——跟SBS score_persistence()里"数据不足日跳过，既不重置也不计入
+        # 连续"的处理方式一致。
+        ratio_c = grp["baseline_ratio_count_excl_recent14"].values
+        ratio_d = grp["baseline_ratio_duration_excl_recent14"].values
+        elevated = np.maximum(ratio_c, ratio_d) >= 2.0
+        has_baseline = ~np.isnan(ratio_c)
+        streak = np.zeros(n, dtype=int)
+        cur = 0
+        for i in range(n):
+            if not has_baseline[i]:
+                streak[i] = cur  # 数据不足：不重置也不累加，保持上一次的streak值
+                continue
+            if elevated[i]:
+                cur += 1
+            else:
+                cur = 0
+            streak[i] = cur
+        grp["consecutive_days_above_baseline"] = streak
+
+        # flare_episode_count_90d / days_since_last_flare_end：纯设备信号
+        # 推断"这只狗是不是反复发作模式"，不依赖用户自报病史（不可靠，用户
+        # 可能没确诊、记错或懒得填，见讨论——设备判断优先）。复用上面算好的
+        # streak：streak连续达到3天才算一次"确认发作"（避免1-2天的偶发波动
+        # 被计成一次发作，3天是跟elevated判定阈值同一挂的宽松业务参考点，
+        # 不是精确校准值），发作确认那天记一次事件；flare_episode_count_90d
+        # 统计过去90天内确认过几次发作，days_since_last_flare_end统计距离
+        # 上一次发作结束过了多少天（发作结束＝streak从>=3回落到0的那一刻，
+        # 记最后一个仍处于发作状态的那天）。两个特征都只用event_count/
+        # total_duration_sec这两个已有的原始信号二次计算，不需要新数据源。
+        FLARE_CONFIRM_STREAK = 3
+        FLARE_LOOKBACK_DAYS = 90
+        confirmed_today = np.zeros(n, dtype=bool)
+        flare_end_today = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if streak[i] == FLARE_CONFIRM_STREAK and (i == 0 or streak[i - 1] < FLARE_CONFIRM_STREAK):
+                confirmed_today[i] = True
+            if streak[i] == 0 and i > 0 and streak[i - 1] >= FLARE_CONFIRM_STREAK:
+                flare_end_today[i - 1] = True  # 记最后一个仍处于发作状态的那天
+        confirmed_idx = np.where(confirmed_today)[0]
+        flare_end_idx = np.where(flare_end_today)[0]
+
+        flare_count = np.zeros(n, dtype=int)
+        days_since_end = np.full(n, np.nan)
+        for i in range(n):
+            lo = max(0, i - FLARE_LOOKBACK_DAYS + 1)
+            flare_count[i] = int(((confirmed_idx >= lo) & (confirmed_idx <= i)).sum())
+            past_ends = flare_end_idx[flare_end_idx <= i]
+            if len(past_ends) > 0:
+                days_since_end[i] = i - past_ends[-1]
+        grp["flare_episode_count_90d"] = flare_count
+        grp["days_since_last_flare_end"] = days_since_end
 
         # z_score_vs_self：用30天滚动均值/标准差近似这只狗自己的历史抓挠分布
         # （标准差用来标准化偏离程度，不依赖上面任何一组固定窗口的基线定义）
@@ -176,6 +271,7 @@ FEATURE_COLUMNS = [
     "wear_completeness_ratio",
     "history_days_available",
     "breed_or_size_class",
-    "has_any_baseline", "z_score_vs_self",
+    "has_any_baseline", "z_score_vs_self", "consecutive_days_above_baseline",
+    "flare_episode_count_90d", "days_since_last_flare_end",
 ] + BASELINE_FEATURE_COLUMNS \
   + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]
