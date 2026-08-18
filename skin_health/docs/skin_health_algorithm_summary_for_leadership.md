@@ -55,6 +55,8 @@ IMU项圈数据(抓挠/睡眠/活动)
 - 86个合成场景（覆盖各种抓挠模式：稳定/渐变发作/骤然发作/周期性/单日
   异常等），数据可复现，代码+数据全部入库
 - 模型A：44个特征，5折交叉验证宏F1 = **0.930**
+  （全部特征逐一列出计算方式/业务作用/示例，见
+  [`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md)）
 - 模型B：模型A的44个特征 + 3个stacking特征 + 7个问答特征(共54个)，
   宏F1 = **0.902**
 - 44个特征逐一有计算方式/业务含义/示例说明文档，方便团队核对
@@ -76,9 +78,12 @@ IMU项圈数据(抓挠/睡眠/活动)
 
 ## 参考文档
 
-- 架构设计：`two_stage_rf_architecture.md`
-- 特征全览（含示例）：`model_ab_feature_glossary.md`
-- 特征工程详细规格：`rf_feature_spec.md`、`questionnaire_feature_spec.md`
-- 合成数据验证结论：`rf_synthetic_validation_findings.md`
-- 问答纸质表：`questionnaire_paper_form.md`
-- 部署节奏：`deployment_plan_2026.md`
+- 架构设计：[`two_stage_rf_architecture.md`](./two_stage_rf_architecture.md)
+- **特征全览（54个特征逐一说明计算方式/作用/示例）**：
+  [`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md)
+- 特征工程详细规格：[`rf_feature_spec.md`](./rf_feature_spec.md)、
+  [`questionnaire_feature_spec.md`](./questionnaire_feature_spec.md)
+- 合成数据验证结论：
+  [`rf_synthetic_validation_findings.md`](./rf_synthetic_validation_findings.md)
+- 问答纸质表：[`questionnaire_paper_form.md`](./questionnaire_paper_form.md)
+- 部署节奏：[`deployment_plan_2026.md`](./deployment_plan_2026.md)
