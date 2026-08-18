@@ -1,6 +1,4 @@
-# 皮肤健康评估算法方案汇报（草稿）
-
-> 给领导看的汇总版，技术细节见文末"参考文档"链接的各份专项文档。
+# 皮肤健康评估算法方案汇报
 
 ## 一、要解决的问题
 
@@ -82,15 +80,3 @@ IMU项圈数据(抓挠/睡眠/活动)
    个体差异较大时（比如新狗刚入组、历史数据不足）的基准判断——现在
    短窗口基线(recent3等)已经部分缓解冷启动问题，这个方向优先级不高，
    等真实数据积累到一定量级（比如50-100只狗以上）之后再评估要不要做
-
-## 参考文档
-
-- 架构设计：[`two_stage_rf_architecture.md`](./two_stage_rf_architecture.md)
-- **特征全览（54个特征逐一说明计算方式/作用/示例）**：
-  [`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md)
-- 特征工程详细规格：[`rf_feature_spec.md`](./rf_feature_spec.md)、
-  [`questionnaire_feature_spec.md`](./questionnaire_feature_spec.md)
-- 合成数据验证结论：
-  [`rf_synthetic_validation_findings.md`](./rf_synthetic_validation_findings.md)
-- 问答纸质表：[`questionnaire_paper_form.md`](./questionnaire_paper_form.md)
-- 部署节奏：[`deployment_plan_2026.md`](./deployment_plan_2026.md)
