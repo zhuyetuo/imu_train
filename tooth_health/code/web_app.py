@@ -17,6 +17,7 @@ https://<这台机器的局域网IP>:6688（不是6666——Chrome把6666-6669�
 import argparse
 import time
 import uuid
+import warnings
 from pathlib import Path
 
 import cv2
@@ -24,6 +25,11 @@ import gradio as gr
 from ultralytics import YOLO
 
 from ssl_utils import ensure_self_signed_cert, get_lan_ip
+
+# 示例视频/detect_video产出的结果都是mp4v软件编码，Gradio的<video>预览组件
+# 检测到不是浏览器原生支持的编码时会自动转一遍(行为本身没问题，转完照样能看)，
+# 但每次都刷一条警告到终端，纯噪音，压掉这一条，不影响其他警告正常显示
+warnings.filterwarnings("ignore", message="Video does not have browser-compatible container or codec.*")
 
 MODEL = None
 RESULT_DIR = None
@@ -238,6 +244,13 @@ def main():
                          "(手机/笔记本)要用浏览器摄像头必须走HTTPS，这是浏览器"
                          "安全策略决定的。只有服务器自己用自己摄像头/根本不用"
                          "摄像头功能时，可以传这个参数关掉HTTPS图省事(用http)")
+    ap.add_argument("--share", action="store_true",
+                    help="额外开一个公网可访问的临时链接(通过Gradio自己的隧道"
+                         "服务器转发，不需要你自己有公网IP/做端口转发)，适合人"
+                         "在外面连不上公司局域网时用，局域网地址同时还能正常用，"
+                         "两个不冲突。这个链接一般72小时后失效，需要这台机器"
+                         "能连外网；默认不开，因为链接本身是公开的，只要有人拿到"
+                         "链接不用连公司网络也能访问，只在确实需要远程访问时开")
     args = ap.parse_args()
 
     weights_path = Path(args.weights)
@@ -266,9 +279,13 @@ def main():
     if scheme == "https":
         print("（首次访问浏览器会提示证书不受信任，点\"高级->继续前往\"即可，"
               "这是自签名证书的正常现象）")
+    if args.share:
+        print("正在申请公网临时链接（需要这台机器能连外网，稍等几秒）..."
+              "启动完成后下面会额外打印一个https://xxx.gradio.live这样的"
+              "链接，人在外面时用这个，不受限于局域网")
 
     demo = build_app()
-    demo.launch(**launch_kwargs)
+    demo.launch(share=args.share, **launch_kwargs)
 
 
 if __name__ == "__main__":
