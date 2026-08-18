@@ -61,8 +61,7 @@ def main():
             continue
         c_ordinal = TIER_ORDINAL[r["tier"]]
         has_red_flag = isinstance(r["red_flags"], list) and len(r["red_flags"]) > 0
-        q = simulate_questionnaire_row(rng, c_ordinal, qb, has_red_flag,
-                                       r["event_count"], r["total_duration_min"])
+        q = simulate_questionnaire_row(rng, c_ordinal, qb, has_red_flag)
         s_label = true_s_tier(c_ordinal, q["_true_skin_latent"])
         row = {c: r[c] for c in FEATURE_COLUMNS}
         row["pet_id"] = r["pet_id"]
