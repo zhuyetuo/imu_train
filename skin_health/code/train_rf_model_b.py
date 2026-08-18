@@ -33,7 +33,15 @@ def main():
     table = pd.read_csv(os.path.join(args.data_dir, "model_b_training_table.csv"))
     print(f"模型B训练表: {len(table)}行, {table.pet_id.nunique()}个场景狗")
 
-    X_a = table[FEATURE_COLUMNS].copy()
+    # 长窗口基线(比如recent180)在合成数据里可能整列全NaN(场景库最长历史不够
+    # 覆盖这个窗口)，HistGradientBoostingClassifier分箱阶段会因此报错，训练时
+    # 先排除——不是硬编码列名，判断条件是"全NaN"，真实数据积累够了会自动纳入。
+    feature_cols_a = [c for c in FEATURE_COLUMNS if not table[c].isna().all()]
+    dropped_a = [c for c in FEATURE_COLUMNS if c not in feature_cols_a]
+    if dropped_a:
+        print(f"以下模型A特征在当前数据里全为NaN，stacking训练时跳过: {dropped_a}")
+
+    X_a = table[feature_cols_a].copy()
     X_a["breed_or_size_class"] = X_a["breed_or_size_class"].astype("category")
     groups = table["pet_id"].values
     n_folds_a = min(5, table.pet_id.nunique())
@@ -52,7 +60,11 @@ def main():
         table[f"model_a_proba_{cls}"] = oof_proba[:, i]
     stack_cols = [f"model_a_proba_{cls}" for cls in classes_a]
 
-    feature_cols_b = FEATURE_COLUMNS + stack_cols + QUESTIONNAIRE_FEATURE_COLUMNS
+    feature_cols_b_all = FEATURE_COLUMNS + stack_cols + QUESTIONNAIRE_FEATURE_COLUMNS
+    feature_cols_b = [c for c in feature_cols_b_all if not table[c].isna().all()]
+    dropped_b = [c for c in feature_cols_b_all if c not in feature_cols_b]
+    if dropped_b:
+        print(f"以下模型B特征在当前数据里全为NaN，训练时跳过: {dropped_b}")
     X = table[feature_cols_b].copy()
     X["breed_or_size_class"] = X["breed_or_size_class"].astype("category")
     y = table["s_tier"].values

@@ -22,16 +22,34 @@ ROLLING_WINDOWS = (3, 7, 14, 30)
 # skip=7(参考SBS的跳过思路，但不是唯一选择)代表"排除掉可能已经开始异常
 # 的最近一段时间，看更早、更可能代表真实正常水平的历史"这个业务直觉，
 # 两种直觉都值得让模型自己验证谁更有用，不是predetermine哪个对。
+# 2026-08更新：产品希望基线能"多快建立多快用"，同时长期看又要够稳，不是
+# 只顾一头——之前只有7/14/30三档"短期"，现在把"recent"(不跳过，响应快)这组
+# 扩到短/中/长完整覆盖3/7/14/21/30/60/180天，同时保留"excl_recent"(跳过
+# 最近7天，排除近期可能已异常的时段，看更早、更可能代表真实正常水平的
+# 历史)这个独立业务直觉在14/30两档上——两种直觉(快vs稳、含近期vs排除近期)
+# 都留着让训练自己验证谁在什么阶段更有用，不是predetermine哪个对，也不是
+# 要拿新的窗口去替换旧的。
 BASELINE_CONFIGS = [
-    {"name": "recent7", "skip": 0, "window": 7},
-    {"name": "recent14", "skip": 0, "window": 14},
-    {"name": "recent30", "skip": 0, "window": 30},
-    {"name": "excl_recent14", "skip": 7, "window": 14},
-    {"name": "excl_recent30", "skip": 7, "window": 30},
+    {"name": "recent3", "skip": 0, "window": 3, "min_valid": 2},
+    {"name": "recent7", "skip": 0, "window": 7, "min_valid": 4},
+    {"name": "recent14", "skip": 0, "window": 14, "min_valid": 5},
+    {"name": "recent21", "skip": 0, "window": 21, "min_valid": 7},
+    {"name": "recent30", "skip": 0, "window": 30, "min_valid": 10},
+    {"name": "recent60", "skip": 0, "window": 60, "min_valid": 15},
+    {"name": "recent180", "skip": 0, "window": 180, "min_valid": 30},
+    {"name": "excl_recent14", "skip": 7, "window": 14, "min_valid": 5},
+    {"name": "excl_recent30", "skip": 7, "window": 30, "min_valid": 10},
 ]
-BASELINE_MIN_VALID_DAYS = 5  # 窗口内至少要有几天good数据才算基线建立，比SBS的
-# MIN_BASELINE_DAYS=7独立设定，不是照抄——数值上凑巧接近是因为业务直觉相通
-# (至少要有接近一周的数据才谈得上"典型水平")，不是刻意对齐SBS的选择
+# min_valid按窗口长度递增(不是统一硬阈值)：窗口越长，要求窗口内"good"天数
+# 占比越高才建立基线，避免长窗口只有寥寥几天有效数据就被短窗口那套宽松
+# 标准放行——比如recent180如果只要5天good数据就成立，180天里绝大部分是
+# 缺失/插值的情况下算出的中位数没有代表性。recent3用min_valid=2，参考
+# ROLLING_WINDOWS滚动特征min_periods=max(2, w//2)的同一套"至少2天才算数"
+# 的宽松下限逻辑——这一档本来就是牺牲稳定性换响应速度的，不强求高占比。
+BASELINE_MIN_VALID_DAYS = 5  # 兜底默认值，配置里没显式给min_valid的窗口用这个
+# ——比SBS的MIN_BASELINE_DAYS=7独立设定，不是照抄，数值上凑巧接近是因为
+# 业务直觉相通(至少要有接近一周的数据才谈得上"典型水平")，不是刻意对齐
+# SBS的选择。
 BASELINE_DENOM_MIN = 1.0  # 分母下限，纯粹是防止除0/被极小基线值放大，不是业务参数
 
 
@@ -121,6 +139,7 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
         any_baseline_valid = np.zeros(n, dtype=bool)
         for cfg in BASELINE_CONFIGS:
             name, skip, window = cfg["name"], cfg["skip"], cfg["window"]
+            min_valid = cfg.get("min_valid", BASELINE_MIN_VALID_DAYS)
             base_event = np.full(n, np.nan)
             base_dur = np.full(n, np.nan)
             for i in range(n):
@@ -130,7 +149,7 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
                     continue
                 idx = np.arange(max(0, lo), hi)
                 idx = idx[good_mask[idx]]
-                if len(idx) < BASELINE_MIN_VALID_DAYS:
+                if len(idx) < min_valid:
                     continue
                 base_event[i] = np.median(event_arr[idx])
                 base_dur[i] = np.median(dur_arr[idx])

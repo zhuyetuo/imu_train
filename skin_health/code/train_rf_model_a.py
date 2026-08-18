@@ -60,7 +60,19 @@ def main():
     print(f"训练表: {len(table)}行, {table.pet_id.nunique()}只(场景)狗, "
           f"标签分布:\n{table.tier.value_counts()}")
 
-    X = table[FEATURE_COLUMNS].copy()
+    feature_cols = list(FEATURE_COLUMNS)
+    all_nan_cols = [c for c in feature_cols if table[c].isna().all()]
+    if all_nan_cols:
+        # 长窗口基线(比如recent180)在合成数据里天然全是NaN——场景库最长只有
+        # 60天历史，180天窗口永远建不起来，不是bug，是数据规模还没到那一档。
+        # HistGradientBoostingClassifier对整列全NaN的特征会在分箱阶段报错
+        # (sliding_window_view要求至少2个distinct值)，训练时先排除，真实数据
+        # 积累到能覆盖这些长窗口后就会自动纳入(判断条件是"全NaN"，不是硬编码
+        # 列名，数据一旦有值就不会再被这里排除)。
+        print(f"以下特征在当前数据里全为NaN，训练时跳过: {all_nan_cols}")
+        feature_cols = [c for c in feature_cols if c not in all_nan_cols]
+
+    X = table[feature_cols].copy()
     X["breed_or_size_class"] = X["breed_or_size_class"].astype("category")
     y = table["tier"].values
     groups = table["pet_id"].values
@@ -101,7 +113,7 @@ def main():
     result = permutation_importance(model, X, y, n_repeats=15, random_state=42,
                                      scoring="f1_macro", n_jobs=-1)
     importance_df = pd.DataFrame({
-        "feature": FEATURE_COLUMNS,
+        "feature": feature_cols,
         "importance_mean": result.importances_mean,
         "importance_std": result.importances_std,
     }).sort_values("importance_mean", ascending=False)
