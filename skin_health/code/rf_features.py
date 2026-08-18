@@ -203,6 +203,39 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
             streak[i] = cur
         grp["consecutive_days_above_baseline"] = streak
 
+        # flare_episode_count_90d / days_since_last_flare_end：纯设备信号
+        # 推断"这只狗是不是反复发作模式"，不依赖用户自报病史（不可靠，用户
+        # 可能没确诊、记错或懒得填，见讨论——设备判断优先）。复用上面算好的
+        # streak：streak连续达到3天才算一次"确认发作"（避免1-2天的偶发波动
+        # 被计成一次发作，3天是跟elevated判定阈值同一挂的宽松业务参考点，
+        # 不是精确校准值），发作确认那天记一次事件；flare_episode_count_90d
+        # 统计过去90天内确认过几次发作，days_since_last_flare_end统计距离
+        # 上一次发作结束过了多少天（发作结束＝streak从>=3回落到0的那一刻，
+        # 记最后一个仍处于发作状态的那天）。两个特征都只用event_count/
+        # total_duration_sec这两个已有的原始信号二次计算，不需要新数据源。
+        FLARE_CONFIRM_STREAK = 3
+        FLARE_LOOKBACK_DAYS = 90
+        confirmed_today = np.zeros(n, dtype=bool)
+        flare_end_today = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if streak[i] == FLARE_CONFIRM_STREAK and (i == 0 or streak[i - 1] < FLARE_CONFIRM_STREAK):
+                confirmed_today[i] = True
+            if streak[i] == 0 and i > 0 and streak[i - 1] >= FLARE_CONFIRM_STREAK:
+                flare_end_today[i - 1] = True  # 记最后一个仍处于发作状态的那天
+        confirmed_idx = np.where(confirmed_today)[0]
+        flare_end_idx = np.where(flare_end_today)[0]
+
+        flare_count = np.zeros(n, dtype=int)
+        days_since_end = np.full(n, np.nan)
+        for i in range(n):
+            lo = max(0, i - FLARE_LOOKBACK_DAYS + 1)
+            flare_count[i] = int(((confirmed_idx >= lo) & (confirmed_idx <= i)).sum())
+            past_ends = flare_end_idx[flare_end_idx <= i]
+            if len(past_ends) > 0:
+                days_since_end[i] = i - past_ends[-1]
+        grp["flare_episode_count_90d"] = flare_count
+        grp["days_since_last_flare_end"] = days_since_end
+
         # z_score_vs_self：用30天滚动均值/标准差近似这只狗自己的历史抓挠分布
         # （标准差用来标准化偏离程度，不依赖上面任何一组固定窗口的基线定义）
         eps = 1e-6
@@ -239,5 +272,6 @@ FEATURE_COLUMNS = [
     "history_days_available",
     "breed_or_size_class",
     "has_any_baseline", "z_score_vs_self", "consecutive_days_above_baseline",
+    "flare_episode_count_90d", "days_since_last_flare_end",
 ] + BASELINE_FEATURE_COLUMNS \
   + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]
