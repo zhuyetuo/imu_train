@@ -266,7 +266,13 @@ def main():
 
     launch_kwargs = {"server_name": "0.0.0.0", "server_port": args.port}
     scheme = "http"
-    if not args.no_https:
+    if not args.no_https and not args.share:
+        # --share模式下不能同时配自己的HTTPS证书——Gradio的公网隧道内部是用
+        # 普通HTTP转发到本地服务的，本地服务如果只接受HTTPS会导致隧道连不上，
+        # 公网链接打开显示"No interface is running"（实测复现过）。--share时
+        # 公网链接本身走的是Gradio自己签发的正规HTTPS(不是我们的自签名证书)，
+        # 摄像头功能走公网链接访问时天然满足HTTPS要求，不需要本地也开HTTPS，
+        # 所以--share和自己的证书二选一，优先让--share正常工作
         cert_path, key_path = ensure_self_signed_cert(Path(args.data_dir) / "ssl")
         launch_kwargs["ssl_certfile"] = str(cert_path)
         launch_kwargs["ssl_keyfile"] = str(key_path)
@@ -280,6 +286,11 @@ def main():
         print("（首次访问浏览器会提示证书不受信任，点\"高级->继续前往\"即可，"
               "这是自签名证书的正常现象）")
     if args.share:
+        if not args.no_https:
+            print("注意：开了--share之后本地这一路自动降级成http（跟自己的"
+                  "HTTPS证书二选一是Gradio隧道机制决定的，不是漏改参数），"
+                  "所以局域网这个地址下摄像头功能会打不开；公网链接本身自带"
+                  "正规HTTPS，摄像头功能请用下面即将打印出来的公网链接访问")
         print("正在申请公网临时链接（需要这台机器能连外网，稍等几秒）..."
               "启动完成后下面会额外打印一个https://xxx.gradio.live这样的"
               "链接，人在外面时用这个，不受限于局域网")
