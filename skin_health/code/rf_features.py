@@ -141,6 +141,36 @@ def compute_rf_features(events, wear_hours, breed_map, target_wear_hours=24.0):
             any_baseline_valid |= ~np.isnan(base_event)
         grp["has_any_baseline"] = any_baseline_valid.astype(int)
 
+        # consecutive_days_above_baseline：对齐SBS的persistence_score维度——
+        # 那边显式track"最近连续几天变化幅度分超过阈值"，是一个时序状态量，
+        # 不是rolling_mean/std这类窗口统计量能精确重现的信息（详见
+        # rf_synthetic_validation_findings.md的覆盖度分析：4个SBS维度里，
+        # 变化幅度/聚集度/睡眠中断都有更细粒度的连续特征对应，只有持续性
+        # 这个"streak"信息缺失）。用excl_recent14基线（实测最有区分力的一组，
+        # 见rf_synthetic_validation_findings.md）的count/duration比率中较高
+        # 者判断"当天是否偏高"，阈值2.0对应SBS _DELTA_TIERS里score=20那档的
+        # ratio_min（score=10更宽松，这里选稍严格的2.0避免把太多天数计入
+        # 连续，具体阈值不是照抄SBS的PERSISTENCE_ENTRY_SCORE=10那一档，只是
+        # 业务直觉上的"明显偏高"参考点）。基线缺失(NaN)的天不重置也不计入
+        # ——跟SBS score_persistence()里"数据不足日跳过，既不重置也不计入
+        # 连续"的处理方式一致。
+        ratio_c = grp["baseline_ratio_count_excl_recent14"].values
+        ratio_d = grp["baseline_ratio_duration_excl_recent14"].values
+        elevated = np.maximum(ratio_c, ratio_d) >= 2.0
+        has_baseline = ~np.isnan(ratio_c)
+        streak = np.zeros(n, dtype=int)
+        cur = 0
+        for i in range(n):
+            if not has_baseline[i]:
+                streak[i] = cur  # 数据不足：不重置也不累加，保持上一次的streak值
+                continue
+            if elevated[i]:
+                cur += 1
+            else:
+                cur = 0
+            streak[i] = cur
+        grp["consecutive_days_above_baseline"] = streak
+
         # z_score_vs_self：用30天滚动均值/标准差近似这只狗自己的历史抓挠分布
         # （标准差用来标准化偏离程度，不依赖上面任何一组固定窗口的基线定义）
         eps = 1e-6
@@ -176,6 +206,6 @@ FEATURE_COLUMNS = [
     "wear_completeness_ratio",
     "history_days_available",
     "breed_or_size_class",
-    "has_any_baseline", "z_score_vs_self",
+    "has_any_baseline", "z_score_vs_self", "consecutive_days_above_baseline",
 ] + BASELINE_FEATURE_COLUMNS \
   + [f"rolling_mean_{w}d" for w in ROLLING_WINDOWS] + [f"rolling_std_{w}d" for w in ROLLING_WINDOWS]

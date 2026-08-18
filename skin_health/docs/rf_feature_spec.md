@@ -164,6 +164,25 @@
 > 但不是照抄）重要性明显高于其他4组候选（0.113 vs 其余接近0），这是
 > 训练验证出来的结论，不是假设，详见`rf_synthetic_validation_findings.md`。
 
+> **2026-08更新（补齐SBS覆盖度缺口）**：跟SBS的4个打分维度（变化幅度/
+> 聚集度/持续性/睡眠中断）逐一比对后发现，`persistence_score`（SBS里
+> 显式track"最近连续几天变化幅度分超过阈值"的streak计数器）是唯一一个
+> 现有35个特征只能间接相关、不能精确重现的维度——`rolling_mean/std`是
+> 窗口统计量，无法区分"7天里4天极高3天正常"和"7天持续温和偏高"这两种
+> 分布形状完全不同、但均值/标准差可能相近的情况。新增
+> `consecutive_days_above_baseline`：用`excl_recent14`基线（实测最有
+> 区分力的一组）的count/duration比率中较高者判断当天是否"明显偏高"
+> （阈值2.0，参考SBS `_DELTA_TIERS`里score=20那档的`ratio_min`，不是
+> 照抄SBS的`PERSISTENCE_ENTRY_SCORE`档位），基线缺失的天不重置也不
+> 累加streak，跟SBS `score_persistence()`的"数据不足日跳过"处理方式
+> 一致。加入后86场景重训：模型A宏F1 0.925→0.929，模型B宏F1 0.911→0.905
+> （模型B的小幅下降在CV标准差±0.03范围内，属正常波动，不是这个特征
+> 导致的退化）；这批合成数据里该特征本身permutation importance为0
+> （场景库里"持续性"这个信号的独立区分力还没被合成数据覆盖到，不代表
+> 真实数据里不重要，理由跟`max_event_duration_sec`归零是同一类问题——
+> 场景数量还不够覆盖所有维度的独立效应），保留特征等真实数据积累后
+> 重新评估。
+
 ## 8. 明确缺口（这次新增/强调）
 
 1. **睡眠细分特征**：`sleep_bout_count`、`sleep_onset_hour`——现在只有
