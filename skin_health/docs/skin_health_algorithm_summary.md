@@ -58,9 +58,13 @@ IMU项圈数据(抓挠/睡眠/活动)
   异常等），数据可复现，代码+数据全部入库
 - 模型A：44个特征，5折交叉验证宏F1 = **0.930**
   （全部特征逐一列出计算方式/业务作用/示例，见
-  [`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md)）
+  [`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md)；
+  8种抓挠模式逐类举例、跟统计规则的方案的逐日对比，见
+  [`model_a_pattern_showcase.md`](./model_a_pattern_showcase.md)）
 - 模型B：模型A的44个特征 + 3个stacking特征 + 7个问答特征(共54个)，
   宏F1 = **0.902**
+  （问答信息价值的效果对比举例，见
+  [`model_b_pattern_showcase.md`](./model_b_pattern_showcase.md)）
 - 44个特征逐一有计算方式/业务含义/示例说明文档，方便团队核对
   ([`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md))
 - 纸质版问答表已设计完成，按PM最终版题库对齐
