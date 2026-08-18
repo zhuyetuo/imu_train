@@ -63,7 +63,7 @@ IMU项圈数据(抓挠/睡眠/活动)
 - 模型B：模型A的44个特征 + 3个stacking特征 + 7个问答特征(共54个)，
   宏F1 = **0.902**
 - 44个特征逐一有计算方式/业务含义/示例说明文档，方便团队核对
-  (`model_ab_feature_glossary.md`)
+  ([`model_ab_feature_glossary.md`](./model_ab_feature_glossary.md))
 - 纸质版问答表已设计完成，按PM最终版题库对齐
   ([`questionnaire_paper_form.md`](./questionnaire_paper_form.md))
 
