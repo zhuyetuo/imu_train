@@ -14,7 +14,26 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
     python pm_skin_scoring/code/questionnaire_app.py
     浏览器打开 http://localhost:7860
 """
+import socket
+
 import gradio as gr
+
+
+def get_lan_ip() -> str:
+    """探测这台机器对外的局域网IP（不实际发送数据，只是借这个UDP连接动作
+    让操作系统选一个出口网卡地址）。用来在启动日志里打印局域网内其他设备
+    能访问到的地址，不然server_name="0.0.0.0"打印出来的0.0.0.0本身不是
+    一个能在浏览器里直接打开的地址，容易让人误以为要打开"0.0.0.0"。
+    探测不到就退回127.0.0.1，只有本机能用，不影响本机自己访问。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
 
 # ── PM原始分值表（PFSY01-06，来自Wardyn题库CSV）──────────────────────────
 # 每题: (题干, [(选项文案, 分值), ...])
@@ -100,12 +119,9 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
 def build_app():
     with gr.Blocks(title="狗狗皮肤问答（PM原版打分）") as demo:
         gr.Markdown(
-            "# 狗狗皮肤问答表（PM原版一比一复刻）\n"
+            "# 狗狗皮肤问答表\n"
             "填表说明：设备检测到抓挠水平比平时高，麻烦花1-2分钟观察并填写下面的问题，"
-            "帮助更准确判断是否需要就医。选项分值来自PM原始Wardyn题库，选完自动算出"
-            "「问答分数」，可以直接填进飞书表格对应的列。\n\n"
-            "> 这是PM原方案的固定加权公式，跟`skin_health/`目录下算法组自己设计的RF方案"
-            "是两套独立的东西，不要混淆。"
+            "帮助更准确判断是否需要就医。"
         )
 
         with gr.Row():
@@ -125,9 +141,6 @@ def build_app():
         has_hair_loss = gr.Radio(
             ["是", "否"],
             label="1. 您家宠物身上是否有毛发稀疏或出现没有毛的情况？",
-            info="选「是」：全部问题都需要回答。选「否」：以下两题不需要回答——"
-                 "「宠物身上没有毛或毛发稀疏的地方是如何分布的？」"
-                 "「最大的一块秃毛区域大概有多大？」，其余问题仍需回答",
         )
 
         gr.Markdown("## 二、皮肤色泽评估")
@@ -163,12 +176,12 @@ def build_app():
         )
         coat = gr.Radio(
             [t for t, _ in COAT_QUALITY_OPTIONS],
-            label="7. 宠物整体毛发状态看起来怎么样？（这题始终要填）",
+            label="7. 宠物整体毛发状态看起来怎么样？",
         )
 
         gr.Markdown("## 结果")
         with gr.Row():
-            total_score = gr.Number(label="问答分数（0819飞书表格「问答分数」列）", precision=0)
+            total_score = gr.Number(label="问答分数", precision=0)
         breakdown_md = gr.Markdown()
 
         calc_btn = gr.Button("计算分数", variant="primary")
@@ -195,8 +208,11 @@ def build_app():
 
 
 def main():
+    port = 7860
+    lan_ip = get_lan_ip()
+    print(f"局域网访问地址: http://{lan_ip}:{port}  (把这个链接发给同一局域网内的其他设备)")
     demo = build_app()
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=port)
 
 
 if __name__ == "__main__":
