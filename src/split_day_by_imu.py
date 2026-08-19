@@ -148,6 +148,17 @@ def main():
                          "session任务会导入报错，传--cam_mode 3能保证每个任务都带上"
                          "video3字段，真的缺失的那个机位给空字符串\"\"占位，不是拿"
                          "别的机位画面顶替")
+    ap.add_argument("--media_dir", default=None,
+                    help="传了会额外把day_dir下全部原始CSV/MP4（扁平的那份，不是"
+                         "imu*/子目录里的拷贝，内容一样，没必要复制两次）同步到这个"
+                         "Nginx媒体目录：CSV复制到--media_dir根目录，MP4复制到"
+                         "--media_dir/transcoded/子目录，正好匹配--csv_url_prefix/"
+                         "--video_url_prefix默认生成的URL路径。老流程"
+                         "(run_review_bins_all_days.sh)历史上只往媒体目录同步过"
+                         "cam1的CSV(裁剪片段流程只用得到cam1这一份)，cam2/cam3的"
+                         "原始CSV从来没人同步过，直接用旧媒体目录会读不到——传这个"
+                         "参数能把这天全部CSV/MP4一次性补全，不用手动cp。已存在"
+                         "且大小一致的文件自动跳过，不重复复制")
     args = ap.parse_args()
 
     day_dir = args.day_dir
@@ -171,8 +182,12 @@ def main():
     skip_notes = []
     imu_dirs_used = set()
     # imu_num -> [{"session":.., "csv": filename, "cam_videos": [(cam_num, filename), ...]}, ...]
-    # 只在传了--url_prefix时才用得上，用来生成labelstudio_review_imu{N}.json
+    # 只在传了--csv_url_prefix时才用得上，用来生成labelstudio_review_imu{N}.json
     imu_sessions = {}
+    # 原始扁平文件路径去重集合，只在传了--media_dir时用得上——用set是因为
+    # 同一个机位的mp4会被多个imu共用，不去重会重复同步
+    all_csv_paths = set()
+    all_video_paths = set()
 
     for (session, suffix), imu_nums in sorted(sessions.items()):
         cam_videos = discover_cam_videos(session, suffix, day_dir)
@@ -194,6 +209,10 @@ def main():
             for src in targets:
                 dst = os.path.join(imu_dir, os.path.basename(src))
                 copy_tasks.append((src, dst, imu_dir))
+
+            all_csv_paths.add(csv_path)
+            for _, p in cam_videos:
+                all_video_paths.add(p)
 
             imu_sessions.setdefault(imu_num, []).append({
                 "session": session,
@@ -227,6 +246,35 @@ def main():
     print(f"\n完成：{'（dry_run，未真正复制）' if args.dry_run else ''}")
     print(f"  涉及 {len(imu_dirs_used)} 个imu目录: {sorted(os.path.basename(d) for d in imu_dirs_used)}")
     print(f"  复制 {n_copied} 个文件，跳过 {n_skipped} 个（已存在且大小一致，视为已复制过）")
+
+    if args.media_dir:
+        # 同步扁平的原始CSV/MP4到Nginx媒体目录：CSV→media_dir根目录，
+        # MP4→media_dir/transcoded/子目录，正好匹配--csv_url_prefix/
+        # --video_url_prefix默认生成的URL路径。老流程只同步过cam1的CSV，
+        # 这里把这天全部涉及到的CSV/MP4(all_csv_paths/all_video_paths，
+        # 已经按session+cam去重过)一次性补全。
+        csv_dst_dir = args.media_dir
+        video_dst_dir = os.path.join(args.media_dir, "transcoded")
+        sync_tasks = ([(p, os.path.join(csv_dst_dir, os.path.basename(p))) for p in sorted(all_csv_paths)]
+                     + [(p, os.path.join(video_dst_dir, os.path.basename(p))) for p in sorted(all_video_paths)])
+        print(f"\n同步 {len(sync_tasks)} 个文件到Nginx媒体目录 ({args.media_dir})...")
+        n_sync_copied = 0
+        n_sync_skipped = 0
+        for i, (src, dst) in enumerate(sync_tasks, 1):
+            name = os.path.basename(dst)
+            if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
+                n_sync_skipped += 1
+                print(f"  [{i}/{len(sync_tasks)}] 跳过（已存在）: {name}")
+                continue
+            if args.dry_run:
+                print(f"  [{i}/{len(sync_tasks)}] [dry_run] {src} → {dst}")
+            else:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                print(f"  [{i}/{len(sync_tasks)}] 复制中: {name} ...", end="", flush=True)
+                shutil.copy2(src, dst)
+                print(" 完成")
+            n_sync_copied += 1
+        print(f"  同步完成：复制 {n_sync_copied} 个，跳过 {n_sync_skipped} 个")
 
     if args.csv_url_prefix:
         print(f"\n生成 Label Studio 任务JSON（每个imu一份）...")
