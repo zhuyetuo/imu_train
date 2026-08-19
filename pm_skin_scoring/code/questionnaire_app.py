@@ -316,8 +316,14 @@ def build_app():
                 with gr.Row():
                     refresh_btn = gr.Button("刷新")
                     delete_btn = gr.Button("删除选中行")
+                # value传函数本身(不是load_records()调用后的结果)——数据本来就
+                # 已经实时存在records.csv里，服务重启/刷新页面都不会丢；之前
+                # "刷新页面历史记录就没了"的问题出在这里：value=load_records()
+                # 只在demo启动那一刻调用了一次，之后每个新打开的页面/每次刷新
+                # 都复用那个启动时刻的旧快照，不会重新读文件。传函数引用，
+                # Gradio会在每次有人打开/刷新页面时重新调用一次，读到最新内容
                 history_table = gr.Dataframe(
-                    headers=RECORD_COLUMNS, value=load_records(), interactive=False, wrap=True,
+                    headers=RECORD_COLUMNS, value=load_records, interactive=False, wrap=True,
                 )
                 export_btn = gr.DownloadButton("导出为CSV")
                 selected_row_idx = gr.State(value=None)
