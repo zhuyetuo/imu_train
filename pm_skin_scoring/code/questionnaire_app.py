@@ -159,6 +159,18 @@ def find_duplicate_index(rows: list, dog_name: str, fill_date: str, filler: str)
     return None
 
 
+def _letter_of(choice: str) -> str:
+    """把"D. 皮肤表面有黑色油油的东西，可以擦下来。"这种完整选项文案
+    压缩成只留最前面的选项字母"D"——历史记录表格/导出CSV只需要知道
+    选了哪个选项，不需要每次都把一整句选项原文堆在格子里。has_hair_loss
+    这题本身答案就是"是"/"否"两个字，不是"A./B."这种格式，原样返回。"""
+    if not choice:
+        return ""
+    if len(choice) >= 2 and choice[0] in "ABCDE" and choice[1] == ".":
+        return choice[0]
+    return choice
+
+
 def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
                 hair_spot, hair_diameter, coat, total_score, confirm_overwrite):
     """保存一条问答记录。狗狗名字/填表日期/填写人三者组合已存在时，默认
@@ -171,8 +183,9 @@ def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
     rows = load_records()
     dup_idx = find_duplicate_index(rows, dog_name, fill_date_str, filler)
 
-    new_row = [dog_name, fill_date_str, filler, has_hair_loss or "", color or "", odor or "",
-               lesion or "", hair_spot or "", hair_diameter or "", coat or "",
+    new_row = [dog_name, fill_date_str, filler, has_hair_loss or "",
+               _letter_of(color), _letter_of(odor), _letter_of(lesion),
+               _letter_of(hair_spot), _letter_of(hair_diameter), _letter_of(coat),
                total_score, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
 
     if dup_idx is not None and not confirm_overwrite:
