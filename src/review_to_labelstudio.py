@@ -101,11 +101,22 @@ def make_annotation(start_ts, end_ts, label):
 
 # ── 模式 1：clips_*/ 目录扫描 ─────────────────────────────────────────────────
 
-def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_name):
+def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_name, cam_mode="auto"):
     """
     扫描 infer_dir/clips_*/ 目录，按 clip 键分组：
       camN mp4 → videoN（N按机位号动态生成，不写死1/2两个）
       camN csv（优先cam1，没有就取分组里任意一个有csv的机位）→ csv1 + 标注
+
+    cam_mode 控制每个任务固定生成几个videoN字段：
+      "auto"（默认）：每个clip组按自己实际探测到的最高机位号生成，
+                     组跟组之间video字段数量可能不一样
+      "2" / "3"：不管这个clip组实际找到几个机位的视频，固定生成
+                video1..videoN这N个字段——Label Studio项目如果配置成
+                固定N个Video组件，任务JSON里缺哪个key就会导入报错，
+                所以要按项目实际配置传这个参数，保证每个任务的字段
+                数量一致。真的缺失的机位（比如原始只拍了2个视角但
+                cam_mode=3）该字段值给空字符串""占位，不是拿别的
+                机位视频顶替（避免误导复查人员"这就是cam3的画面"）。
     """
     tasks = []
     task_id = 1
@@ -144,19 +155,20 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
             if not mp4_by_cam and not cam1_csv_name:
                 continue
 
-            # 映射成video1/video2/video3...，覆盖"这个session实际探测到的
-            # 最高机位号"这个范围（不是只覆盖真正裁剪成功的那几个）——
-            # 缺失的机位（比如这段clip cam2裁剪失败，或者这个session压根
-            # 只有2个机位但Label Studio项目配置固定引用了video1/video2/
-            # video3三个字段）统一用第一个有效URL兜底，保证每个videoN字段
-            # 都有值，Label Studio的Video组件不会因为key缺失/空URL报错
+            # 映射成video1/video2/video3...：cam_mode="auto"时字段数量跟着
+            # 这个clip组实际探测到的最高机位号走；cam_mode="2"/"3"时不管
+            # 实际找到几个机位，固定生成这么多个videoN字段，保证同一批任务
+            # 的字段数量一致，匹配Label Studio项目固定配置的Video组件个数。
+            # 真正缺失的机位给空字符串""占位，不拿别的机位视频顶替。
             cam_nums_present = {int(re.search(r"\d+", c).group()): c for c in mp4_by_cam}
-            max_cam_num = max(cam_nums_present) if cam_nums_present else 1
+            if cam_mode == "auto":
+                slot_count = max(cam_nums_present) if cam_nums_present else 1
+            else:
+                slot_count = int(cam_mode)
             urls_by_num = {n: video_url(mp4_by_cam[c], video_url_prefix)
                           for n, c in cam_nums_present.items()}
-            fallback_url = next(iter(urls_by_num.values()), "")
-            task_data = {f"video{n}": urls_by_num.get(n, fallback_url)
-                        for n in range(1, max_cam_num + 1)}
+            task_data = {f"video{n}": urls_by_num.get(n, "")
+                        for n in range(1, slot_count + 1)}
             task_data["csv1"] = csv_url(cam1_csv_name, csv_url_prefix) if cam1_csv_name else ""
 
             # 从 key 解析日期和时间（如 multicam_20260717_185620_clip03_190408-190410）
@@ -271,6 +283,15 @@ def main():
                         help="MP4 文件 URL 前缀（默认 csv_url_prefix/transcoded）")
     parser.add_argument("--use_clips",  action="store_true",
                         help="扫描 clips_*/ 目录（推荐），而非 _infer.json")
+    parser.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
+                        help="每个任务固定生成几个videoN字段（仅--use_clips模式生效）。"
+                             "auto（默认）=按每个clip组实际探测到的机位数量走，不同"
+                             "组之间字段数量可能不一样；传2或3可以强制固定字段数量"
+                             "（要跟Label Studio项目里配置的Video组件个数一致，否则"
+                             "导入会报错缺字段）——比如项目按3机位配置好了，但某天"
+                             "原始视频只拍了2个视角，传--cam_mode 3能保证那天的任务"
+                             "也带上video3字段（值是空字符串占位，不是拿别的机位画面"
+                             "顶替），不会导致那天的任务导入失败")
     parser.add_argument("--mode", default="scratch_only",
                         choices=["scratch_only", "uncertain", "all"])
     parser.add_argument("--low_threshold",  type=float, default=0.3)
@@ -283,7 +304,7 @@ def main():
     if args.use_clips:
         print("模式: clips 裁剪片段")
         tasks = build_tasks_from_clips(
-            args.infer_dir, args.csv_url_prefix, video_prefix, args.label)
+            args.infer_dir, args.csv_url_prefix, video_prefix, args.label, args.cam_mode)
     else:
         infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
         infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
