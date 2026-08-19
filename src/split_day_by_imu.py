@@ -27,9 +27,19 @@ cmd、PowerShell)直接python运行都可以。
 
     # 只想看会怎么处理、不真的复制文件：
     python split_day_by_imu.py --day_dir 2026_8_18 --dry_run
+
+    # 顺便给每个imu*/目录生成一份labelstudio_review_imu{N}.json，Label
+    # Studio项目建好后直接导入即可（一个session一个任务，data里是
+    # csv1/video1/video2/video3等字段，没有预标注——这里只是把原始数据
+    # 整理成任务，不是复查模型推理结果，跟src/review_to_labelstudio.py
+    # 处理clips_*/目录、带预标注的场景不是一回事）：
+    python split_day_by_imu.py \
+        --day_dir 2026_8_18 \
+        --url_prefix http://192.168.2.140:8182/2026_8_18
 """
 import argparse
 import glob
+import json
 import os
 import re
 import shutil
@@ -103,6 +113,16 @@ def main():
     ap.add_argument("--output_dir", default=None,
                     help="imu*/子目录建在哪（默认跟--day_dir同一个目录，直接在里面建imu1/imu2/...）")
     ap.add_argument("--dry_run", action="store_true", help="只打印会怎么处理，不真的复制文件")
+    ap.add_argument("--url_prefix", default=None,
+                    help="传了才会额外生成labelstudio_review_imu{N}.json（每个imu目录"
+                         "一份，放在output_dir顶层，不是imu*/子目录里面）。这个前缀是"
+                         "output_dir（包含imu1/imu2/...这些子目录的那一层）最终会被"
+                         "浏览器/Label Studio访问到的URL，比如把output_dir整个复制到"
+                         "Nginx媒体目录/2026_8_18/下、Nginx配了http://host:port/映射"
+                         "到那个媒体根目录，这里就传http://host:port/2026_8_18——"
+                         "脚本会自动拼成http://host:port/2026_8_18/imu1/xxx.mp4这样"
+                         "的完整URL填进JSON。不传就只做文件复制，不生成JSON（跟以前"
+                         "行为一致）")
     args = ap.parse_args()
 
     day_dir = args.day_dir
@@ -122,9 +142,12 @@ def main():
     # 不然大文件(mp4)复制期间光标停在同一行不动，看着像卡住了，加个
     # "第几个/总共几个"的进度提示，哪怕复制单个大文件本身还是要等，
     # 至少能确认程序在正常往前走，不是死掉了。
-    copy_tasks = []  # [(src, dst), ...]
+    copy_tasks = []  # [(src, dst, imu_dir), ...]
     skip_notes = []
     imu_dirs_used = set()
+    # imu_num -> [{"session":.., "csv": filename, "cam_videos": [(cam_num, filename), ...]}, ...]
+    # 只在传了--url_prefix时才用得上，用来生成labelstudio_review_imu{N}.json
+    imu_sessions = {}
 
     for (session, suffix), imu_nums in sorted(sessions.items()):
         cam_videos = discover_cam_videos(session, suffix, day_dir)
@@ -146,6 +169,12 @@ def main():
             for src in targets:
                 dst = os.path.join(imu_dir, os.path.basename(src))
                 copy_tasks.append((src, dst, imu_dir))
+
+            imu_sessions.setdefault(imu_num, []).append({
+                "session": session,
+                "csv": os.path.basename(csv_path),
+                "cam_videos": [(cam_num, os.path.basename(p)) for cam_num, p in cam_videos],
+            })
 
     for note in skip_notes:
         print(note)
@@ -173,6 +202,31 @@ def main():
     print(f"\n完成：{'（dry_run，未真正复制）' if args.dry_run else ''}")
     print(f"  涉及 {len(imu_dirs_used)} 个imu目录: {sorted(os.path.basename(d) for d in imu_dirs_used)}")
     print(f"  复制 {n_copied} 个文件，跳过 {n_skipped} 个（已存在且大小一致，视为已复制过）")
+
+    if args.url_prefix:
+        print(f"\n生成 Label Studio 任务JSON（每个imu一份）...")
+        prefix = args.url_prefix.rstrip("/")
+        for imu_num, sess_list in sorted(imu_sessions.items()):
+            tasks = []
+            for task_id, s in enumerate(sorted(sess_list, key=lambda x: x["session"]), 1):
+                imu_folder = f"imu{imu_num}"
+                task_data = {"csv1": f"{prefix}/{imu_folder}/{s['csv']}"}
+                for cam_num, fname in s["cam_videos"]:
+                    task_data[f"video{cam_num}"] = f"{prefix}/{imu_folder}/{fname}"
+                tasks.append({
+                    "id": task_id,
+                    "data": task_data,
+                    "annotations": [],  # 原始数据整理，没有预标注，从零开始标
+                    "meta": {"session": s["session"], "imu": imu_folder,
+                             "note": "原始录制数据，未经模型推理，请从头标注"},
+                })
+            json_path = os.path.join(output_dir, f"labelstudio_review_imu{imu_num}.json")
+            if not args.dry_run:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(tasks, f, ensure_ascii=False, indent=2)
+            print(f"  → {json_path}  ({len(tasks)} 个任务)"
+                  f"{' [dry_run，未真正写文件]' if args.dry_run else ''}")
+        print(f"\n导入方式: Label Studio → Import → 选择对应imu的JSON文件")
 
 
 if __name__ == "__main__":
