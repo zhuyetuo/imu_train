@@ -109,12 +109,17 @@ def build_app():
         )
 
         with gr.Row():
+            # interactive显式写True——这几个组件没被当作任何事件回调的
+            # input参数用，Gradio会按"纯展示用途"自动判成不可交互(灰掉/
+            # 选不了)，不显式声明的话下拉框会变成只读的，之前"选不了"
+            # 就是这个问题
             dog_name = gr.Dropdown(
                 ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"],
-                label="狗狗名字",
+                label="狗狗名字", interactive=True,
             )
-            fill_date = gr.DateTime(label="填表日期", include_time=False, type="string")
-            filler = gr.Dropdown(["周蕾", "刘雪飞"], label="填写人")
+            fill_date = gr.DateTime(label="填表日期", include_time=False, type="string",
+                                    interactive=True)
+            filler = gr.Dropdown(["周蕾", "刘雪飞"], label="填写人", interactive=True)
 
         gr.Markdown("## 一、前置问题")
         has_hair_loss = gr.Radio(
@@ -144,13 +149,17 @@ def build_app():
         )
 
         gr.Markdown("## 五、毛发质量评估")
+        # 默认隐藏(visible=False)——前置问题选"否"时这两题根本不适用，不该
+        # 让用户看到一道"不用回答"的题还留在页面上；选"是"时才显示出来
         hair_spot = gr.Radio(
             [t for t, _ in HAIR_SPOT_OPTIONS],
-            label="5. 宠物身上没有毛或毛发稀疏的地方是如何分布的？（前置问题选「是」才需要填）",
+            label="5. 宠物身上没有毛或毛发稀疏的地方是如何分布的？",
+            visible=False,
         )
         hair_diameter = gr.Radio(
             [t for t, _ in HAIR_DIAMETER_OPTIONS],
-            label="6. 最大的一块秃毛区域大概有多大？（前置问题选「是」才需要填）",
+            label="6. 最大的一块秃毛区域大概有多大？",
+            visible=False,
         )
         coat = gr.Radio(
             [t for t, _ in COAT_QUALITY_OPTIONS],
@@ -169,6 +178,18 @@ def build_app():
         # 提到的诉求是"自动计算分数"，按钮留着方便手动强制刷新，两种方式都支持
         for inp in inputs:
             inp.change(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
+
+        def toggle_hair_questions(choice):
+            """前置问题选"是"才显示5/6两题，选"否"（或还没选）直接隐藏——
+            不是显示出来但标"不用填"，是真的不出现在页面上。切回"否"时
+            顺便清空已选的答案，避免用户先选了"是"填了答案、又改成"否"，
+            答案还留在(已隐藏的)组件里造成困惑。"""
+            show = choice == "是"
+            return gr.update(visible=show, value=None), gr.update(visible=show, value=None)
+
+        has_hair_loss.change(
+            fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
+        )
 
     return demo
 
