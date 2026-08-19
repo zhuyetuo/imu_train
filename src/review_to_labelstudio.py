@@ -47,6 +47,16 @@ def parse_cam(basename: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def parse_imu_label(basename: str) -> str:
+    """提取触发检测的IMU标识，比如
+    ..._cam1_imu1_raw_byIMU3_clip01_...mp4 → 'IMU3'。
+    mp4文件名带"_by{IMU}"（见extract_clips.py的imu_tag），csv文件名不带
+    （csv的stem里已经有实际IMU编号），取不到就返回''（比如老产出的文件名
+    没有这个标识，或者传进来的是csv文件名）。"""
+    m = re.search(r"_by([A-Za-z0-9]+)", basename)
+    return m.group(1) if m else ""
+
+
 def session_key(basename: str) -> str:
     """提取会话前缀（cam_tag 之前的部分）"""
     stem = os.path.splitext(basename)[0]
@@ -137,10 +147,12 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
                 continue
             cam = parse_cam(fname) or "cam1"  # 老文件名没有cam标识时按cam1处理，兼容以前的产出
             key = clip_key(fname)
-            g = groups.setdefault(key, {"mp4": {}, "csv": {}})
+            g = groups.setdefault(key, {"mp4": {}, "csv": {}, "imu_label": ""})
             ext = os.path.splitext(fname)[1].lower()
             if ext in (".mp4", ".avi", ".mov"):
                 g["mp4"][cam] = fname
+                if not g["imu_label"]:
+                    g["imu_label"] = parse_imu_label(fname)  # mp4文件名带_by{IMU}，csv不带
             elif ext == ".csv":
                 g["csv"][cam] = fname
 
@@ -194,9 +206,10 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
                 "data": task_data,
                 "annotations": [{"result": results}] if results else [],
                 "meta": {
-                    "clip_key": key,
-                    "bin":      os.path.basename(clip_dir),
-                    "note":     "模型检测到抓挠片段，请核实",
+                    "clip_key":  key,
+                    "bin":       os.path.basename(clip_dir),
+                    "imu_label": g["imu_label"],  # 触发检测的IMU，比如"IMU3"，可能是""（老产出/取不到）
+                    "note":      "模型检测到抓挠片段，请核实",
                 }
             })
             task_id += 1
@@ -297,6 +310,13 @@ def main():
     parser.add_argument("--low_threshold",  type=float, default=0.3)
     parser.add_argument("--high_threshold", type=float, default=0.65)
     parser.add_argument("--label", default="抓挠")
+    parser.add_argument("--split_by_imu", action="store_true",
+                        help="除了生成混合所有IMU的主JSON，额外按触发检测的IMU"
+                             "（meta.imu_label，比如'IMU3'）各自拆分出一份"
+                             "{output去掉.json}_{IMU}.json，方便只导入某一条狗"
+                             "的复查任务，跟混合版互不影响，两种用法都能用。"
+                             "仅--use_clips模式生效（_infer.json模式的task本身"
+                             "就是按单个IMU的CSV生成的，不需要再拆）")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
@@ -323,6 +343,22 @@ def main():
 
     print(f"共生成 {len(tasks)} 个 Label Studio 任务")
     print(f"已保存: {args.output}")
+
+    if args.split_by_imu and args.use_clips:
+        # 按meta.imu_label分组，另外各写一份——跟主JSON(混合全部IMU)是两套
+        # 独立文件，同一批tasks各自完整复制一份，不是从主JSON里挪走，导入
+        # 主JSON看全部、导入某个IMU的JSON只看那一条狗，互不冲突。
+        by_imu = {}
+        for t in tasks:
+            label = t.get("meta", {}).get("imu_label") or "unknown"
+            by_imu.setdefault(label, []).append(t)
+        base, ext = os.path.splitext(args.output)
+        for label, sub_tasks in sorted(by_imu.items()):
+            sub_path = f"{base}_{label}{ext}"
+            with open(sub_path, "w", encoding="utf-8") as f:
+                json.dump(sub_tasks, f, ensure_ascii=False, indent=2)
+            print(f"  → {sub_path}  ({len(sub_tasks)} 个任务，仅{label})")
+
     print(f"\n导入方式: Label Studio → Import → 选择上面的 JSON 文件")
 
 

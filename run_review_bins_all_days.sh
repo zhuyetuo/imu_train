@@ -21,6 +21,10 @@
 #                 好了，但某天原始视频只拍了2个视角，传CAM_MODE=3能保证那天的任务
 #                 也带上video3字段（空字符串占位，不拿别的机位画面顶替），不会因为
 #                 缺字段导致那天的任务导入Label Studio报错
+#   SPLIT_BY_IMU  除了生成混合所有IMU的主labelstudio_review.json，额外按触发
+#                 检测的IMU拆分出labelstudio_review_IMU1.json/IMU2.json/...
+#                 各一份，方便只导入某一条狗的复查任务（默认0=不拆，只生成
+#                 主JSON，跟以前行为一致；传1开启）
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
@@ -59,6 +63,7 @@ LS_URL_PREFIX="${LS_URL_PREFIX:-http://192.168.2.140:8182}"
 LS_VIDEO_URL_PREFIX="${LS_VIDEO_URL_PREFIX:-}"   # 默认为 LS_URL_PREFIX/transcoded
 LS_MODE="${LS_MODE:-scratch_only}"
 CAM_MODE="${CAM_MODE:-auto}"
+SPLIT_BY_IMU="${SPLIT_BY_IMU:-0}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
                                         # 3s会导致约一半真实事件被错误合并，1s已能消除碎片化且合并更少）
@@ -197,6 +202,9 @@ for day in "${days[@]}"; do
         clip_subdirs=("")
     fi
 
+    split_arg=""
+    [[ "$SPLIT_BY_IMU" == "1" ]] && split_arg="--split_by_imu"
+
     for sub in "${clip_subdirs[@]}"; do
         scan_dir="$out_dir${sub:+/$sub}"
         ls_json="$scan_dir/labelstudio_review.json"
@@ -207,6 +215,7 @@ for day in "${days[@]}"; do
             $video_prefix_arg \
             --use_clips \
             --cam_mode "$CAM_MODE" \
+            $split_arg \
             --mode "$LS_MODE"
         echo "  $day${sub:+ [$sub]} → $ls_json"
     done
