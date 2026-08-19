@@ -2,13 +2,20 @@
 把推理结果或裁剪片段转换为 Label Studio 任务。
 
 两种模式:
-  --use_clips   扫描 clips_*/ 目录，每个 clip 三件套(cam1.mp4 + cam2.mp4 + cam1.csv)
-                生成一个 Label Studio 任务（推荐，与 witmotion_imu 格式一致）
+  --use_clips   扫描 clips_*/ 目录，每个 clip 若干件套(cam1.mp4 + cam2.mp4
+                [+ cam3.mp4 ...] + cam1.csv) 生成一个 Label Studio 任务
+                （推荐，与 witmotion_imu 格式一致）。机位数量不固定——
+                有几个机位就生成video1..videoN几个字段，2机位的场次只有
+                video1/video2，3机位（或以后更多）的场次会自动多出
+                video3/video4...，不用为新增机位改代码。
   默认          从 *_infer.json 生成任务（引用完整录制文件）
 
 Label Studio 项目配置:
-  video1 = cam1 视频, video2 = cam2 视频, csv1 = cam1 IMU CSV
-  from_name="label", to_name="ts"
+  video1 = cam1 视频, video2 = cam2 视频, video3 = cam3 视频（如果有）,
+  csv1 = cam1 IMU CSV, from_name="label", to_name="ts"
+  ——新增机位时，Label Studio项目的Labeling Interface配置里要记得加上
+  对应的 <Video name="video3" value="$video3"/> 才能实际显示出来，这个
+  是Label Studio项目配置本身的事，这份脚本只负责把URL放进task JSON。
 
 用法:
   # 裁剪片段模式（推荐）
@@ -97,9 +104,8 @@ def make_annotation(start_ts, end_ts, label):
 def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_name):
     """
     扫描 infer_dir/clips_*/ 目录，按 clip 键分组：
-      cam1 mp4 → video1
-      cam2 mp4 → video2
-      cam1 csv → csv1 + 标注（覆盖整个 clip）
+      camN mp4 → videoN（N按机位号动态生成，不写死1/2两个）
+      camN csv（优先cam1，没有就取分组里任意一个有csv的机位）→ csv1 + 标注
     """
     tasks = []
     task_id = 1
@@ -110,48 +116,48 @@ def build_tasks_from_clips(infer_dir, csv_url_prefix, video_url_prefix, label_na
         return tasks
 
     for clip_dir in clip_dirs:
-        # 按 clip_key 分组
-        groups = {}  # clip_key → {cam1_mp4, cam2_mp4, cam1_csv}
+        # 按 clip_key 分组，每组里 mp4_by_cam/csv_by_cam 存 {"cam1": fname, "cam2": fname, ...}
+        # 机位号不固定——遇到cam3/cam4的文件也会自动分进去，不需要为新机位改代码
+        groups = {}
 
         for fname in sorted(os.listdir(clip_dir)):
             fpath = os.path.join(clip_dir, fname)
             if not os.path.isfile(fpath):
                 continue
-            cam = parse_cam(fname)
+            cam = parse_cam(fname) or "cam1"  # 老文件名没有cam标识时按cam1处理，兼容以前的产出
             key = clip_key(fname)
-            if key not in groups:
-                groups[key] = {}
+            g = groups.setdefault(key, {"mp4": {}, "csv": {}})
             ext = os.path.splitext(fname)[1].lower()
             if ext in (".mp4", ".avi", ".mov"):
-                if cam in ("cam1", ""):
-                    groups[key]["cam1_mp4"] = fname
-                elif cam == "cam2":
-                    groups[key]["cam2_mp4"] = fname
+                g["mp4"][cam] = fname
             elif ext == ".csv":
-                if cam in ("cam1", ""):
-                    groups[key]["cam1_csv"] = fname
-                elif cam == "cam2":
-                    groups[key]["cam2_csv"] = fname
+                g["csv"][cam] = fname
 
         for key in sorted(groups):
             g = groups[key]
-            cam1_mp4_name = g.get("cam1_mp4", "")
-            cam2_mp4_name = g.get("cam2_mp4", "")
-            # csv1 = 检测狗的 CSV（cam1 或 cam2 均可）
-            cam1_csv_name = g.get("cam1_csv", "") or g.get("cam2_csv", "")
+            mp4_by_cam = g["mp4"]
+            csv_by_cam = g["csv"]
 
-            if not cam1_mp4_name and not cam1_csv_name:
+            # csv1 = 检测狗的 CSV，优先取cam1，没有就取分组里随便哪个机位有的
+            cam1_csv_name = csv_by_cam.get("cam1") or next(iter(csv_by_cam.values()), "")
+
+            if not mp4_by_cam and not cam1_csv_name:
                 continue
 
-            v1_url = video_url(cam1_mp4_name, video_url_prefix) if cam1_mp4_name else ""
-            v2_url = video_url(cam2_mp4_name, video_url_prefix) if cam2_mp4_name else v1_url
-            c1_url = csv_url(cam1_csv_name, csv_url_prefix) if cam1_csv_name else ""
-
-            task_data = {
-                "video1": v1_url,
-                "video2": v2_url,
-                "csv1":   c1_url,
-            }
+            # 映射成video1/video2/video3...，覆盖"这个session实际探测到的
+            # 最高机位号"这个范围（不是只覆盖真正裁剪成功的那几个）——
+            # 缺失的机位（比如这段clip cam2裁剪失败，或者这个session压根
+            # 只有2个机位但Label Studio项目配置固定引用了video1/video2/
+            # video3三个字段）统一用第一个有效URL兜底，保证每个videoN字段
+            # 都有值，Label Studio的Video组件不会因为key缺失/空URL报错
+            cam_nums_present = {int(re.search(r"\d+", c).group()): c for c in mp4_by_cam}
+            max_cam_num = max(cam_nums_present) if cam_nums_present else 1
+            urls_by_num = {n: video_url(mp4_by_cam[c], video_url_prefix)
+                          for n, c in cam_nums_present.items()}
+            fallback_url = next(iter(urls_by_num.values()), "")
+            task_data = {f"video{n}": urls_by_num.get(n, fallback_url)
+                        for n in range(1, max_cam_num + 1)}
+            task_data["csv1"] = csv_url(cam1_csv_name, csv_url_prefix) if cam1_csv_name else ""
 
             # 从 key 解析日期和时间（如 multicam_20260717_185620_clip03_190408-190410）
             # 日期从会话前缀中提取：multicam_YYYYMMDD_...
