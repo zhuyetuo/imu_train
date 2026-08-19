@@ -137,10 +137,30 @@ def session_prefix(stem: str) -> tuple:
 
 
 def camera_video_stem(session: str, cam_num: int, suffix: str = KNOWN_STEM_SUFFIXES[0]) -> str:
-    """两个机位视频的文件名后缀固定是 cam1_imu1 / cam2_imu2，
+    """机位视频的文件名后缀固定是 cam1_imu1 / cam2_imu2 / cam3_imu3...，
     不管这个场次实际挂了几条狗的IMU。suffix 从 session_prefix() 的返回值传进来，
     保证跟触发检测的这个CSV用的是同一套命名规则。"""
     return f"{session}_cam{cam_num}_imu{cam_num}{suffix}"
+
+
+# 房间机位数量不固定——2026_8_18起新增了cam3，以后可能还会加。cam1/cam2固定
+# 两个机位一直存在，永远尝试裁剪（哪怕视频文件缺失也要在日志里显示⚠️，
+# 保持跟以前完全一致的行为）；cam3起是可选新增机位，只有这个场次(video_dir)
+# 里真的能找到对应视频文件时才纳入处理，找不到就当作"这天只有2个机位"，
+# 自动退化成以前的处理方式，不会在日志里凭空出现一个不存在的cam3⚠️。
+BASE_CAM_NUMS = (1, 2)
+MAX_OPTIONAL_CAM_NUM = 6  # 探测上限，够用就行，不用配置成参数
+
+
+def detect_session_cams(session: str, suffix: str, video_dir: str) -> list:
+    """返回这个场次实际要处理的机位号列表：cam1/cam2固定包含，
+    cam3起只在video_dir下真的找到对应视频文件时才加进来。"""
+    cams = list(BASE_CAM_NUMS)
+    for cam_num in range(BASE_CAM_NUMS[-1] + 1, MAX_OPTIONAL_CAM_NUM + 1):
+        stem = camera_video_stem(session, cam_num, suffix)
+        if find_video(stem, video_dir):
+            cams.append(cam_num)
+    return cams
 
 
 def extract_imu_label(stem: str) -> str:
@@ -396,14 +416,14 @@ def _symlink_into(src_path: str, dst_dir: str) -> None:
 
 
 def _process_one(task: dict) -> dict:
-    """处理单个 clip 任务（在线程池中运行）。"""
+    """处理单个 clip 任务（在线程池中运行）。cams是这个场次要处理的机位列表
+    （[{"num":1,"stem":...,"mp4":...}, ...]），数量不固定——cam1/cam2固定
+    存在，cam3起只有真的探测到视频文件才会出现在这个列表里，处理逻辑对
+    2个和3个（或更多）机位完全一样，不用分支判断。"""
     args       = task["args"]
     has_ffmpeg = task["has_ffmpeg"]
-    stem1      = task["stem1"]
-    stem2      = task["stem2"]
+    cams       = task["cams"]
     src_csv1   = task["src_csv1"]
-    cam1_mp4   = task["cam1_mp4"]
-    cam2_mp4   = task["cam2_mp4"]
     video_t0   = task["video_t0"]
     clip_dir   = task["clip_dir"]
     suffix     = task["suffix"]
@@ -425,32 +445,33 @@ def _process_one(task: dict) -> dict:
     # （UUID虽然也能保证唯一，但看不出是哪次运行产出的，出问题不好排查）。
     run_suffix = f"_{args.run_tag}" if args.run_tag else ""
     imu_label = task.get("imu_label", "IMU")
-    # cam1/cam2的视频现在是固定的两个机位文件，不再跟触发检测的狗一一对应，
+    # 各机位的视频现在是固定的机位文件，不再跟触发检测的狗一一对应，
     # 文件名里必须带上是"哪条狗"触发的(imu_tag)，不然两条狗在同一个场次里
     # 检测到相近时间的事件时，输出文件名会撞在一起(后一个把前一个覆盖掉)
     imu_tag = f"_by{imu_label}"
-    cam1_clip_mp4 = os.path.join(clip_dir, stem1 + imu_tag + suffix + run_suffix + ".mp4")
-    cam2_clip_mp4 = os.path.join(clip_dir, stem2 + imu_tag + suffix + run_suffix + ".mp4")
     cam1_clip_csv = os.path.join(clip_dir, detected_stem + suffix + run_suffix + ".csv")  # 检测狗的 CSV
 
     windows_detected = task.get("windows_detected")  # 触发检测的那条狗自己的逐窗口置信度
-    ok_cam1 = cut_clip(cam1_mp4, start_sec, end_sec, cam1_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label, encoder=args.encoder,
-                       preset=args.preset, ffmpeg_threads=args.ffmpeg_threads) if (cam1_mp4 and has_ffmpeg) else False
-    ok_cam2 = cut_clip(cam2_mp4, start_sec, end_sec, cam2_clip_mp4, args.context_s, video_t0,
-                       windows=windows_detected, label_text=imu_label, encoder=args.encoder,
-                       preset=args.preset, ffmpeg_threads=args.ffmpeg_threads) if (cam2_mp4 and has_ffmpeg) else False
-    ok_csv  = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
+    cam_results = {}  # cam_num -> {"ok": bool, "mp4": bool(源文件是否存在), "clip_path": str}
+    for cam in cams:
+        cam_num  = cam["num"]
+        cam_mp4  = cam["mp4"]
+        cam_clip_mp4 = os.path.join(clip_dir, cam["stem"] + imu_tag + suffix + run_suffix + ".mp4")
+        ok = cut_clip(cam_mp4, start_sec, end_sec, cam_clip_mp4, args.context_s, video_t0,
+                     windows=windows_detected, label_text=imu_label, encoder=args.encoder,
+                     preset=args.preset, ffmpeg_threads=args.ffmpeg_threads) if (cam_mp4 and has_ffmpeg) else False
+        cam_results[cam_num] = {"ok": ok, "has_source": bool(cam_mp4), "clip_path": cam_clip_mp4}
+
+    ok_csv = slice_csv(src_csv1, cam1_clip_csv, pad_start, pad_end) if os.path.exists(src_csv1) else False
 
     if secondary_dir:
-        if ok_cam1:
-            _symlink_into(cam1_clip_mp4, secondary_dir)
-        if ok_cam2:
-            _symlink_into(cam2_clip_mp4, secondary_dir)
+        for cam_num, res in cam_results.items():
+            if res["ok"]:
+                _symlink_into(res["clip_path"], secondary_dir)
         if ok_csv:
             _symlink_into(cam1_clip_csv, secondary_dir)
 
-    return {**task, "ok_cam1": ok_cam1, "ok_cam2": ok_cam2, "ok_csv": ok_csv}
+    return {**task, "cam_results": cam_results, "ok_csv": ok_csv}
 
 
 def main():
@@ -539,19 +560,22 @@ def main():
         if not segs:
             continue
 
-        # 房间固定2个机位(cam1/cam2)拍全景，触发检测的可能是任意一条狗的IMU
-        # (imu1/imu2/imu3/imu4...)——不管是哪条狗，两个机位的视频永远是同一对
-        # 固定文件(cam1_imu1/cam2_imu2)，不能再按"imu编号=机位编号"做字符串替换
-        # (3条狗以后，imu3/imu4没有自己的专属视频，那样替换会找到不存在的文件)。
+        # 房间固定机位拍全景，触发检测的可能是任意一条狗的IMU
+        # (imu1/imu2/imu3/imu4...)——不管是哪条狗，各机位的视频永远是同一批
+        # 固定文件(cam1_imu1/cam2_imu2/cam3_imu3...)，不能再按"imu编号=机位
+        # 编号"做字符串替换(狗的数量可能超过机位数量，那样替换会找到不存在
+        # 的文件)。机位数量不固定——cam1/cam2一直都有，cam3起是新增机位，
+        # 只在这个场次真的探测到对应视频文件时才纳入，探测不到就自动退化成
+        # 只处理cam1/cam2，跟以前完全一样。
         detected_stem = os.path.splitext(csv_basename)[0]
         session, suffix = session_prefix(detected_stem)
-        stem1 = camera_video_stem(session, 1, suffix)  # cam1固定视频
-        stem2 = camera_video_stem(session, 2, suffix)  # cam2固定视频
         imu_label = extract_imu_label(detected_stem)  # 真正触发检测的狗，比如"IMU3"
 
         src_csv1 = os.path.join(args.video_dir, csv_basename)
-        cam1_mp4 = find_video(stem1, args.video_dir)
-        cam2_mp4 = find_video(stem2, args.video_dir)
+        cam_nums = detect_session_cams(session, suffix, args.video_dir)
+        cams = [{"num": n, "stem": camera_video_stem(session, n, suffix),
+                 "mp4": find_video(camera_video_stem(session, n, suffix), args.video_dir)}
+                for n in cam_nums]
         video_t0 = csv_start_sec(src_csv1) if os.path.exists(src_csv1) else 0.0
 
         # 置信度字幕烧的是"触发检测的那条狗自己"的逐窗口置信度，两个机位视频上
@@ -590,10 +614,10 @@ def main():
 
             all_tasks.append({
                 "args": args, "has_ffmpeg": has_ffmpeg,
-                "stem1": stem1, "stem2": stem2,
+                "cams": cams,
                 "detected_stem": detected_stem,  # CSV clip 用检测狗的 stem
                 "bin_label_mean": bin_label_mean, "secondary_dir": secondary_dir,
-                "src_csv1": src_csv1, "cam1_mp4": cam1_mp4, "cam2_mp4": cam2_mp4,
+                "src_csv1": src_csv1,
                 "video_t0": video_t0, "clip_dir": clip_dir, "suffix": suffix,
                 "windows_detected": windows_detected, "imu_label": imu_label,
                 "seg": {"start_ts": t0_str, "end_ts": t1_str,
@@ -624,15 +648,20 @@ def main():
             conf_max  = seg["conf_max"]
             bin_label = res["bin_label"]
             bin_label_mean = res.get("bin_label_mean")
-            stem1     = res["stem1"]
+            cams      = res["cams"]
             suffix    = res["suffix"]
             bin_by    = res["bin_by"]
+            cam_results = res["cam_results"]
 
-            parts = [
-                "cam1✅" if res["ok_cam1"] else ("cam1⚠️" if not res["cam1_mp4"] else "cam1❌"),
-                "cam2✅" if res["ok_cam2"] else ("cam2⚠️" if not res["cam2_mp4"] else "cam2❌"),
-                "csv✅"  if res["ok_csv"]  else "csv❌",
-            ]
+            # 状态列按这个场次实际有的机位数量动态生成(2个还是3个都一样处理)，
+            # 不再写死cam1/cam2两个
+            parts = []
+            for cam in cams:
+                cam_num = cam["num"]
+                r = cam_results[cam_num]
+                tag = f"cam{cam_num}"
+                parts.append(f"{tag}✅" if r["ok"] else (f"{tag}⚠️" if not r["has_source"] else f"{tag}❌"))
+            parts.append("csv✅" if res["ok_csv"] else "csv❌")
             status = " ".join(parts)
             if is_both:
                 conf_str = f"max={conf_max:.2f} mean={conf_mean:.2f}"
@@ -642,9 +671,10 @@ def main():
                        f"{t0_str[11:19]}→{t1_str[11:19] if t1_str else '?'}  "
                        f"{conf_str}  {status}")
 
+            first_clip_name = cams[0]["stem"] + suffix + ".mp4" if cams else ""
             line = (f"{res['csv_basename']}\t{t0_str[11:19]}\t{t1_str[11:19] if t1_str else '?'}"
                     f"\tconf_mean={conf_mean:.3f}\tconf_max={conf_max:.3f}"
-                    f"\t{stem1 + suffix + '.mp4'}\t{status}")
+                    f"\t{first_clip_name}\t{status}")
             with lock:
                 bin_logs[bin_label].append(line)
                 if is_both:
