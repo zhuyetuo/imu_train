@@ -116,41 +116,59 @@ def main():
         print(f"[警告] {day_dir} 下没有找到任何 *_camN_imuN(_raw|_resampled16hz).csv")
         return
 
-    print(f"共探测到 {len(sessions)} 个录制场次，逐个处理...")
+    print(f"共探测到 {len(sessions)} 个录制场次，先扫描要复制的文件...")
 
-    n_copied = 0
-    n_skipped = 0
+    # 先把所有(src, dst)复制任务列出来，才知道总数，才能打进度条——
+    # 不然大文件(mp4)复制期间光标停在同一行不动，看着像卡住了，加个
+    # "第几个/总共几个"的进度提示，哪怕复制单个大文件本身还是要等，
+    # 至少能确认程序在正常往前走，不是死掉了。
+    copy_tasks = []  # [(src, dst), ...]
+    skip_notes = []
     imu_dirs_used = set()
 
     for (session, suffix), imu_nums in sorted(sessions.items()):
         cam_videos = discover_cam_videos(session, suffix, day_dir)
         if not cam_videos:
-            print(f"  [跳过] {session}{suffix}：没有找到任何机位视频")
+            skip_notes.append(f"  [跳过] {session}{suffix}：没有找到任何机位视频")
             continue
 
         for imu_num in imu_nums:
             csv_stem = camera_video_stem(session, imu_num, suffix)  # csv命名跟机位视频同一套规则(camN_imuN)
             csv_path = find_file(csv_stem, day_dir, (".csv",))
             if not csv_path:
-                print(f"  [跳过] {session}{suffix} IMU{imu_num}：没找到对应CSV({csv_stem}.csv)")
+                skip_notes.append(f"  [跳过] {session}{suffix} IMU{imu_num}：没找到对应CSV({csv_stem}.csv)")
                 continue
 
             imu_dir = os.path.join(output_dir, f"imu{imu_num}")
             imu_dirs_used.add(imu_dir)
-            if not args.dry_run:
-                os.makedirs(imu_dir, exist_ok=True)
 
             targets = [csv_path] + [p for _, p in cam_videos]
             for src in targets:
                 dst = os.path.join(imu_dir, os.path.basename(src))
-                if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
-                    n_skipped += 1
-                    continue
-                if args.dry_run:
-                    print(f"    [dry_run] {src} → {dst}")
-                else:
-                    shutil.copy2(src, dst)
-                n_copied += 1
+                copy_tasks.append((src, dst, imu_dir))
+
+    for note in skip_notes:
+        print(note)
+
+    total = len(copy_tasks)
+    print(f"共 {total} 个文件待处理（含跳过已存在的），开始{'模拟' if args.dry_run else ''}复制...")
+
+    n_copied = 0
+    n_skipped = 0
+    for i, (src, dst, imu_dir) in enumerate(copy_tasks, 1):
+        name = os.path.basename(dst)
+        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
+            n_skipped += 1
+            print(f"  [{i}/{total}] 跳过（已存在）: {name}")
+            continue
+        if args.dry_run:
+            print(f"  [{i}/{total}] [dry_run] {src} → {dst}")
+        else:
+            os.makedirs(imu_dir, exist_ok=True)
+            print(f"  [{i}/{total}] 复制中: {name} ...", end="", flush=True)
+            shutil.copy2(src, dst)
+            print(" 完成")
+        n_copied += 1
 
     print(f"\n完成：{'（dry_run，未真正复制）' if args.dry_run else ''}")
     print(f"  涉及 {len(imu_dirs_used)} 个imu目录: {sorted(os.path.basename(d) for d in imu_dirs_used)}")
