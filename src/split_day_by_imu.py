@@ -123,6 +123,16 @@ def main():
                          "脚本会自动拼成http://host:port/2026_8_18/imu1/xxx.mp4这样"
                          "的完整URL填进JSON。不传就只做文件复制，不生成JSON（跟以前"
                          "行为一致）")
+    ap.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
+                    help="labelstudio_review_imu{N}.json里每个任务固定生成几个videoN"
+                         "字段（只影响JSON生成，不影响实际复制了哪些视频文件）。"
+                         "auto（默认）=每个session按自己实际探测到的最高机位号走，"
+                         "不同session之间字段数量可能不一样；传2或3强制固定字段数量"
+                         "——同一批天数里有的session只拍到2个视角、有的拍到3个时，"
+                         "如果Label Studio项目固定配置了3个Video组件，缺video3字段的"
+                         "session任务会导入报错，传--cam_mode 3能保证每个任务都带上"
+                         "video3字段，真的缺失的那个机位给空字符串\"\"占位，不是拿"
+                         "别的机位画面顶替")
     args = ap.parse_args()
 
     day_dir = args.day_dir
@@ -211,8 +221,17 @@ def main():
             for task_id, s in enumerate(sorted(sess_list, key=lambda x: x["session"]), 1):
                 imu_folder = f"imu{imu_num}"
                 task_data = {"csv1": f"{prefix}/{imu_folder}/{s['csv']}"}
-                for cam_num, fname in s["cam_videos"]:
-                    task_data[f"video{cam_num}"] = f"{prefix}/{imu_folder}/{fname}"
+                # video1/video2/video3...固定生成几个字段：auto按这个session
+                # 实际探测到的最高机位号走；cam_mode="2"/"3"时不管实际找到
+                # 几个机位，固定生成这么多个字段，真正缺失的机位给空字符串
+                # ""占位，不拿别的机位视频顶替（避免误导标注人员）。
+                urls_by_cam = {cam_num: f"{prefix}/{imu_folder}/{fname}" for cam_num, fname in s["cam_videos"]}
+                if args.cam_mode == "auto":
+                    slot_count = max(urls_by_cam) if urls_by_cam else 1
+                else:
+                    slot_count = int(args.cam_mode)
+                for n in range(1, slot_count + 1):
+                    task_data[f"video{n}"] = urls_by_cam.get(n, "")
                 tasks.append({
                     "id": task_id,
                     "data": task_data,
