@@ -202,6 +202,17 @@ def export_records_csv():
     return RECORDS_CSV
 
 
+def delete_record(row_idx):
+    """删除选中的那一行。row_idx是None（还没在表格里点选任何行）时
+    什么都不做，直接返回当前记录，避免误触发删除第0行。"""
+    rows = load_records()
+    if row_idx is None or not (0 <= row_idx < len(rows)):
+        return rows
+    del rows[row_idx]
+    _write_all(rows)
+    return rows
+
+
 def build_app():
     with gr.Blocks(title="狗狗皮肤问答（PM原版打分）") as demo:
         with gr.Tabs():
@@ -302,14 +313,24 @@ def build_app():
 
             with gr.Tab("历史记录"):
                 gr.Markdown("## 历史记录")
-                refresh_btn = gr.Button("刷新")
+                with gr.Row():
+                    refresh_btn = gr.Button("刷新")
+                    delete_btn = gr.Button("删除选中行")
                 history_table = gr.Dataframe(
                     headers=RECORD_COLUMNS, value=load_records(), interactive=False, wrap=True,
                 )
                 export_btn = gr.DownloadButton("导出为CSV")
+                selected_row_idx = gr.State(value=None)
 
                 refresh_btn.click(fn=load_records, outputs=[history_table])
                 export_btn.click(fn=export_records_csv, outputs=[export_btn])
+                def _on_select_row(evt: gr.SelectData):
+                    return evt.index[0]
+
+                history_table.select(fn=_on_select_row, outputs=[selected_row_idx])
+                delete_btn.click(
+                    fn=delete_record, inputs=[selected_row_idx], outputs=[history_table],
+                )
 
         save_inputs = [dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
                        hair_spot, hair_diameter, coat, total_score, confirm_overwrite]
