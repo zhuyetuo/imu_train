@@ -11,17 +11,22 @@ mp4是所有狗共用的，但复查/标注工具经常是"按一个目录一个
 把"这条狗的CSV + 全部机位视频"放进同一个目录，能直接把这个目录整个丢给
 那类工具，不用工具自己再去猜"这条狗对应哪几个机位视频"。
 
+这个文件是完全独立的单文件脚本（不依赖仓库里的extract_clips.py，也不需要
+放在src/目录下），可以单独拷到任何地方运行，包括Windows——路径全部用
+os.path.join()拼接，没有写死"/"分隔符，Windows下(比如Git Bash/MINGW64、
+cmd、PowerShell)直接python运行都可以。
+
 用法：
-    python src/split_day_by_imu.py --day_dir data/raw_custom/data/2026_8_18
+    python split_day_by_imu.py --day_dir 2026_8_18
 
     # 输出到别的目录，不在原始day_dir里创建imu*/子目录（比如不想污染
     # 原始数据目录）：
-    python src/split_day_by_imu.py \
-        --day_dir data/raw_custom/data/2026_8_18 \
-        --output_dir data/raw_custom/data_by_imu/2026_8_18
+    python split_day_by_imu.py \
+        --day_dir 2026_8_18 \
+        --output_dir 2026_8_18_by_imu
 
     # 只想看会怎么处理、不真的复制文件：
-    python src/split_day_by_imu.py --day_dir data/raw_custom/data/2026_8_18 --dry_run
+    python split_day_by_imu.py --day_dir 2026_8_18 --dry_run
 """
 import argparse
 import glob
@@ -30,10 +35,31 @@ import re
 import shutil
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from extract_clips import KNOWN_STEM_SUFFIXES, camera_video_stem, session_prefix  # noqa: E402
-
 MAX_CAM_NUM = 6  # 探测机位号的上限，够用就行，不用配置成参数
+
+# 支持的文件名后缀——跟仓库里src/extract_clips.py的KNOWN_STEM_SUFFIXES保持
+# 一致（这里是特意复制过来的一份，不是import，为了这个文件能单独拷走运行，
+# 不依赖仓库目录结构）。以后witmotion_imu采集脚本如果又出现新的命名后缀，
+# 这两处都要同步加一下。
+KNOWN_STEM_SUFFIXES = ("_resampled16hz", "_raw")
+
+
+def session_prefix(stem: str) -> tuple:
+    """去掉末尾的 _camN_imuM{后缀}，得到这次录制场次的公共前缀 + 匹配到的
+    后缀（比如 multicam_20260731_024344249_cam1_imu3_resampled16hz
+    → ("multicam_20260731_024344249", "_resampled16hz")）。跟
+    src/extract_clips.py里的同名函数逻辑完全一致。"""
+    for suf in KNOWN_STEM_SUFFIXES:
+        new_stem, n = re.subn(rf"_cam\d+_imu\d+{re.escape(suf)}$", "", stem)
+        if n:
+            return new_stem, suf
+    return stem, KNOWN_STEM_SUFFIXES[0]
+
+
+def camera_video_stem(session: str, cam_num: int, suffix: str = KNOWN_STEM_SUFFIXES[0]) -> str:
+    """机位视频的文件名固定是 {session}_camN_imuN{suffix}，跟
+    src/extract_clips.py里的同名函数逻辑完全一致。"""
+    return f"{session}_cam{cam_num}_imu{cam_num}{suffix}"
 
 
 def find_file(stem: str, day_dir: str, exts: tuple) -> str:
