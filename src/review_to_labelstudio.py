@@ -85,6 +85,17 @@ def clip_key(basename: str) -> str:
 
 # ── URL 构建 ──────────────────────────────────────────────────────────────────
 
+def parse_bin_lo(bin_name: str) -> float:
+    """从meta.bin(比如'clips_0.7-0.8')解析出这个置信度桶的下界0.7。
+    extract_clips.py按BINS=[0.0,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.01]分桶，
+    桶边界本身就是常用阈值(0.3/0.5/0.7等)，用"桶下界>=阈值"筛选等价于
+    "这个clip的置信度>=阈值"，不需要额外去读scratch_log_review_*.txt里
+    逐clip的精确conf_max/conf_mean数值。解析不出来时返回-1（保守地当成
+    "置信度未知"，任何正数阈值筛选都会把它排除掉，不会误留进结果里）。"""
+    m = re.search(r"(\d+\.\d+)-", bin_name)
+    return float(m.group(1)) if m else -1.0
+
+
 def csv_url(basename: str, csv_prefix: str) -> str:
     return f"{csv_prefix.rstrip('/')}/{basename}"
 
@@ -317,6 +328,17 @@ def main():
                              "的复查任务，跟混合版互不影响，两种用法都能用。"
                              "仅--use_clips模式生效（_infer.json模式的task本身"
                              "就是按单个IMU的CSV生成的，不需要再拆）")
+    parser.add_argument("--min_conf", default=None,
+                        help="除了生成完整的一批JSON，额外按置信度下限再筛一份"
+                             "——比如传0.7，会另外生成{output去掉.json}_0.7.json"
+                             "（以及--split_by_imu时对应的{IMU}_0.7.json），只保留"
+                             "meta.bin置信度桶下界>=0.7的任务（即extract_clips.py"
+                             "分到clips_0.7-0.8/、clips_0.8-0.9/等桶的clip，桶下界"
+                             "低于0.7的排除）。完整版JSON照常生成，这个是在它基础上"
+                             "额外多出的筛选版，两者并存、不是互相替代。可以传多个"
+                             "阈值，逗号分隔，比如'0.7,0.9'会各自生成一份。仅"
+                             "--use_clips模式生效（bin这个字段只有clips模式的task"
+                             "才有）")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
@@ -344,20 +366,39 @@ def main():
     print(f"共生成 {len(tasks)} 个 Label Studio 任务")
     print(f"已保存: {args.output}")
 
+    def _write(path, sub_tasks, note):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sub_tasks, f, ensure_ascii=False, indent=2)
+        print(f"  → {path}  ({len(sub_tasks)} 个任务{note})")
+
+    base, ext = os.path.splitext(args.output)
+
+    by_imu = {}
     if args.split_by_imu and args.use_clips:
         # 按meta.imu_label分组，另外各写一份——跟主JSON(混合全部IMU)是两套
         # 独立文件，同一批tasks各自完整复制一份，不是从主JSON里挪走，导入
         # 主JSON看全部、导入某个IMU的JSON只看那一条狗，互不冲突。
-        by_imu = {}
         for t in tasks:
             label = t.get("meta", {}).get("imu_label") or "unknown"
             by_imu.setdefault(label, []).append(t)
-        base, ext = os.path.splitext(args.output)
         for label, sub_tasks in sorted(by_imu.items()):
-            sub_path = f"{base}_{label}{ext}"
-            with open(sub_path, "w", encoding="utf-8") as f:
-                json.dump(sub_tasks, f, ensure_ascii=False, indent=2)
-            print(f"  → {sub_path}  ({len(sub_tasks)} 个任务，仅{label})")
+            _write(f"{base}_{label}{ext}", sub_tasks, f"，仅{label}")
+
+    if args.min_conf and args.use_clips:
+        # 按置信度下限再筛一份——完整版JSON（以及上面按IMU拆分的版本）照常
+        # 生成，这个是在它们基础上额外多出的筛选版，两者并存，不是互相替代。
+        thresholds = [t.strip() for t in args.min_conf.split(",") if t.strip()]
+        print(f"\n按置信度筛选（阈值: {', '.join(thresholds)}）...")
+        for th_str in thresholds:
+            th = float(th_str)
+            filtered = [t for t in tasks if parse_bin_lo(t.get("meta", {}).get("bin", "")) >= th]
+            _write(f"{base}_{th_str}{ext}", filtered, f"，置信度>={th_str}")
+            if args.split_by_imu:
+                for label, sub_tasks in sorted(by_imu.items()):
+                    sub_filtered = [t for t in sub_tasks
+                                   if parse_bin_lo(t.get("meta", {}).get("bin", "")) >= th]
+                    _write(f"{base}_{label}_{th_str}{ext}", sub_filtered,
+                          f"，仅{label}且置信度>={th_str}")
 
     print(f"\n导入方式: Label Studio → Import → 选择上面的 JSON 文件")
 
