@@ -14,9 +14,20 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
     python pm_skin_scoring/code/questionnaire_app.py
     浏览器打开 http://localhost:7860
 """
+import csv
+import os
 import socket
+from datetime import datetime
 
 import gradio as gr
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
+RECORDS_CSV = os.path.join(DATA_DIR, "records.csv")
+RECORD_COLUMNS = [
+    "狗狗名字", "填表日期", "填写人",
+    "有无毛发稀疏", "皮肤颜色", "体味", "皮损", "秃毛分布", "秃毛面积", "整体毛质",
+    "问答分数", "保存时间",
+]
 
 
 def get_lan_ip() -> str:
@@ -116,92 +127,195 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
     return total, breakdown
 
 
+# ── 历史记录：本地CSV持久化 ────────────────────────────────────────────────
+
+def load_records() -> list:
+    """返回records.csv里的全部记录（不含表头），每条是一个list，按
+    RECORD_COLUMNS的顺序。文件不存在时返回空列表，不报错——第一次用
+    这个页面、还没保存过任何记录是正常状态。"""
+    if not os.path.exists(RECORDS_CSV):
+        return []
+    with open(RECORDS_CSV, encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        rows = list(reader)
+    return rows[1:] if rows else []  # 去掉表头行
+
+
+def _write_all(rows: list) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(RECORDS_CSV, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(RECORD_COLUMNS)
+        writer.writerows(rows)
+
+
+def find_duplicate_index(rows: list, dog_name: str, fill_date: str, filler: str):
+    """狗狗名字+填表日期+填写人三者都相同才算重复——这三个凑一起唯一
+    标识"这次填表"，避免同一天同一个人给同一只狗重复交了两份不同答案的
+    表，后一份把前一份静默覆盖掉。返回命中的行下标，没有命中返回None。"""
+    for i, row in enumerate(rows):
+        if len(row) >= 3 and row[0] == dog_name and row[1] == fill_date and row[2] == filler:
+            return i
+    return None
+
+
+def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
+                hair_spot, hair_diameter, coat, total_score, confirm_overwrite):
+    """保存一条问答记录。狗狗名字/填表日期/填写人三者组合已存在时，默认
+    拒绝保存并提示——避免手滑/误操作把之前填好的记录覆盖掉；用户确认
+    要覆盖后勾选"确认覆盖"复选框再保存一次，才会真的替换旧记录。"""
+    if not dog_name or not fill_date or not filler:
+        return "❌ 请先选择狗狗名字、填表日期、填写人再保存", load_records(), gr.update(value=False)
+
+    fill_date_str = fill_date.split(" ")[0] if fill_date else fill_date  # 只保留日期部分
+    rows = load_records()
+    dup_idx = find_duplicate_index(rows, dog_name, fill_date_str, filler)
+
+    new_row = [dog_name, fill_date_str, filler, has_hair_loss or "", color or "", odor or "",
+               lesion or "", hair_spot or "", hair_diameter or "", coat or "",
+               total_score, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+
+    if dup_idx is not None and not confirm_overwrite:
+        msg = (f"⚠️ 已存在完全相同的记录（{dog_name} / {fill_date_str} / {filler}），"
+               "为避免误操作覆盖旧数据，没有保存。如果确实要用这次的答案覆盖旧记录，"
+               "勾选下面「确认覆盖」后再点一次保存")
+        return msg, rows, gr.update(value=False)
+
+    if dup_idx is not None:
+        rows[dup_idx] = new_row
+        msg = f"✅ 已覆盖旧记录：{dog_name} / {fill_date_str} / {filler}"
+    else:
+        rows.append(new_row)
+        msg = f"✅ 已保存新记录：{dog_name} / {fill_date_str} / {filler}"
+
+    _write_all(rows)
+    return msg, rows, gr.update(value=False)  # 保存完把"确认覆盖"复选框重置回未勾选
+
+
+def export_records_csv():
+    """导出当前全部历史记录为一个独立CSV文件供下载——直接把records.csv
+    本身返回给gr.File就行，不需要另外拷贝一份，本来就是CSV格式。文件
+    不存在（还没保存过任何记录）时先创建一个只有表头的空文件，避免
+    下载按钮点了报错。"""
+    if not os.path.exists(RECORDS_CSV):
+        _write_all([])
+    return RECORDS_CSV
+
+
 def build_app():
     with gr.Blocks(title="狗狗皮肤问答（PM原版打分）") as demo:
-        gr.Markdown(
-            "# 狗狗皮肤问答表\n"
-            "填表说明：设备检测到抓挠水平比平时高，麻烦花1-2分钟观察并填写下面的问题，"
-            "帮助更准确判断是否需要就医。"
-        )
+        with gr.Tabs():
+            with gr.Tab("填写问答"):
+                gr.Markdown(
+                    "# 狗狗皮肤问答表\n"
+                    "填表说明：设备检测到抓挠水平比平时高，麻烦花1-2分钟观察并填写下面的问题，"
+                    "帮助更准确判断是否需要就医。"
+                )
 
-        with gr.Row():
-            # interactive显式写True——这几个组件没被当作任何事件回调的
-            # input参数用，Gradio会按"纯展示用途"自动判成不可交互(灰掉/
-            # 选不了)，不显式声明的话下拉框会变成只读的，之前"选不了"
-            # 就是这个问题
-            dog_name = gr.Dropdown(
-                ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"],
-                label="狗狗名字", interactive=True,
-            )
-            fill_date = gr.DateTime(label="填表日期", include_time=False, type="string",
-                                    interactive=True)
-            filler = gr.Dropdown(["周蕾", "刘雪飞"], label="填写人", interactive=True)
+                with gr.Row():
+                    # interactive显式写True——这几个组件没被当作任何事件回调的
+                    # input参数用，Gradio会按"纯展示用途"自动判成不可交互(灰掉/
+                    # 选不了)，不显式声明的话下拉框会变成只读的，之前"选不了"
+                    # 就是这个问题
+                    dog_name = gr.Dropdown(
+                        ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"],
+                        label="狗狗名字", interactive=True,
+                    )
+                    fill_date = gr.DateTime(label="填表日期", include_time=False, type="string",
+                                            interactive=True)
+                    filler = gr.Dropdown(["周蕾", "刘雪飞"], label="填写人", interactive=True)
 
-        gr.Markdown("## 一、前置问题")
-        has_hair_loss = gr.Radio(
-            ["是", "否"],
-            label="1. 您家宠物身上是否有毛发稀疏或出现没有毛的情况？",
-        )
+                gr.Markdown("## 一、前置问题")
+                has_hair_loss = gr.Radio(
+                    ["是", "否"],
+                    label="1. 您家宠物身上是否有毛发稀疏或出现没有毛的情况？",
+                )
 
-        gr.Markdown("## 二、皮肤色泽评估")
-        color = gr.Radio(
-            [t for t, _ in SKIN_COLOR_OPTIONS],
-            label="2. 您拨开宠物毛发看皮肤时，皮肤颜色是什么样的？",
-        )
+                gr.Markdown("## 二、皮肤色泽评估")
+                color = gr.Radio(
+                    [t for t, _ in SKIN_COLOR_OPTIONS],
+                    label="2. 您拨开宠物毛发看皮肤时，皮肤颜色是什么样的？",
+                )
 
-        gr.Markdown("## 三、体味评估")
-        odor = gr.Radio(
-            [t for t, _ in ODOR_OPTIONS],
-            label="3. 宠物身上有没有明显异味？",
-        )
+                gr.Markdown("## 三、体味评估")
+                odor = gr.Radio(
+                    [t for t, _ in ODOR_OPTIONS],
+                    label="3. 宠物身上有没有明显异味？",
+                )
 
-        gr.Markdown("## 四、皮肤损伤评估")
-        lesion = gr.Radio(
-            [t for t, _ in LESION_OPTIONS],
-            label="4. 宠物的皮肤是否完整？",
-        )
+                gr.Markdown("## 四、皮肤损伤评估")
+                lesion = gr.Radio(
+                    [t for t, _ in LESION_OPTIONS],
+                    label="4. 宠物的皮肤是否完整？",
+                )
 
-        gr.Markdown("## 五、毛发质量评估")
-        # 默认隐藏(visible=False)——前置问题选"否"时这两题根本不适用，不该
-        # 让用户看到一道"不用回答"的题还留在页面上；选"是"时才显示出来
-        hair_spot = gr.Radio(
-            [t for t, _ in HAIR_SPOT_OPTIONS],
-            label="5. 宠物身上没有毛或毛发稀疏的地方是如何分布的？",
-            visible=False,
-        )
-        hair_diameter = gr.Radio(
-            [t for t, _ in HAIR_DIAMETER_OPTIONS],
-            label="6. 最大的一块秃毛区域大概有多大？",
-            visible=False,
-        )
-        coat = gr.Radio(
-            [t for t, _ in COAT_QUALITY_OPTIONS],
-            label="7. 宠物整体毛发状态看起来怎么样？",
-        )
+                gr.Markdown("## 五、毛发质量评估")
+                # 默认隐藏(visible=False)——前置问题选"否"时这两题根本不适用，
+                # 不该让用户看到一道"不用回答"的题还留在页面上；选"是"时才显示
+                hair_spot = gr.Radio(
+                    [t for t, _ in HAIR_SPOT_OPTIONS],
+                    label="5. 宠物身上没有毛或毛发稀疏的地方是如何分布的？",
+                    visible=False,
+                )
+                hair_diameter = gr.Radio(
+                    [t for t, _ in HAIR_DIAMETER_OPTIONS],
+                    label="6. 最大的一块秃毛区域大概有多大？",
+                    visible=False,
+                )
+                coat = gr.Radio(
+                    [t for t, _ in COAT_QUALITY_OPTIONS],
+                    label="7. 宠物整体毛发状态看起来怎么样？",
+                )
 
-        gr.Markdown("## 结果")
-        with gr.Row():
-            total_score = gr.Number(label="问答分数", precision=0)
-        breakdown_md = gr.Markdown()
+                gr.Markdown("## 结果")
+                with gr.Row():
+                    total_score = gr.Number(label="问答分数", precision=0)
+                breakdown_md = gr.Markdown()
 
-        calc_btn = gr.Button("计算分数", variant="primary")
-        inputs = [has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
-        calc_btn.click(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
-        # 选项一变就自动重新算一次，不用每次都手动点按钮——飞书表格截图里
-        # 提到的诉求是"自动计算分数"，按钮留着方便手动强制刷新，两种方式都支持
-        for inp in inputs:
-            inp.change(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
+                calc_btn = gr.Button("计算分数", variant="primary")
+                inputs = [has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
+                calc_btn.click(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
+                # 选项一变就自动重新算一次，不用每次都手动点按钮
+                for inp in inputs:
+                    inp.change(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
 
-        def toggle_hair_questions(choice):
-            """前置问题选"是"才显示5/6两题，选"否"（或还没选）直接隐藏——
-            不是显示出来但标"不用填"，是真的不出现在页面上。切回"否"时
-            顺便清空已选的答案，避免用户先选了"是"填了答案、又改成"否"，
-            答案还留在(已隐藏的)组件里造成困惑。"""
-            show = choice == "是"
-            return gr.update(visible=show, value=None), gr.update(visible=show, value=None)
+                def toggle_hair_questions(choice):
+                    """前置问题选"是"才显示5/6两题，选"否"（或还没选）直接隐藏——
+                    不是显示出来但标"不用填"，是真的不出现在页面上。切回"否"时
+                    顺便清空已选的答案，避免用户先选了"是"填了答案、又改成"否"，
+                    答案还留在(已隐藏的)组件里造成困惑。"""
+                    show = choice == "是"
+                    return gr.update(visible=show, value=None), gr.update(visible=show, value=None)
 
-        has_hair_loss.change(
-            fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
+                has_hair_loss.change(
+                    fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
+                )
+
+                gr.Markdown("## 保存")
+                confirm_overwrite = gr.Checkbox(
+                    label="确认覆盖已有的同名记录",
+                    info="狗狗名字+填表日期+填写人都相同的记录已存在时，默认不会保存，"
+                         "勾选这个再点保存才会真的覆盖旧记录",
+                )
+                save_btn = gr.Button("保存记录")
+                save_status = gr.Markdown()
+
+            with gr.Tab("历史记录"):
+                gr.Markdown("## 历史记录")
+                refresh_btn = gr.Button("刷新")
+                history_table = gr.Dataframe(
+                    headers=RECORD_COLUMNS, value=load_records(), interactive=False, wrap=True,
+                )
+                export_btn = gr.DownloadButton("导出为CSV")
+
+                refresh_btn.click(fn=load_records, outputs=[history_table])
+                export_btn.click(fn=export_records_csv, outputs=[export_btn])
+
+        save_inputs = [dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
+                       hair_spot, hair_diameter, coat, total_score, confirm_overwrite]
+        save_btn.click(
+            fn=save_record, inputs=save_inputs,
+            outputs=[save_status, history_table, confirm_overwrite],
         )
 
     return demo

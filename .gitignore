@@ -257,3 +257,8 @@ tooth_health/data/examples/images/*
 !tooth_health/data/examples/videos/
 tooth_health/data/examples/videos/*
 !tooth_health/data/examples/videos/.gitkeep
+
+# PM版问答打分页面：本地保存的问答记录(records.csv)是运行时产生的真实
+# 填表数据，不进git，只保留目录结构本身
+pm_skin_scoring/data/*
+!pm_skin_scoring/data/.gitkeep
