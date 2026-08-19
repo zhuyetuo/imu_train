@@ -171,6 +171,30 @@ def _letter_of(choice: str) -> str:
     return choice
 
 
+def _missing_questions(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+    """检查必填题有没有漏填。皮肤颜色/体味/皮损/整体毛质这4题始终必填；
+    秃毛分布/秃毛面积只有前置问题选"是"时才必填——选"否"时这两题界面上
+    本来就是隐藏的，不该也不会要求填，留空(NaN)是它们在"否"这个分支下
+    唯一合法的状态，不是"漏填"。返回缺失的题目名称列表，空列表=都填好了。"""
+    missing = []
+    if not has_hair_loss:
+        missing.append("前置问题（有无毛发稀疏）")
+    if not color:
+        missing.append("皮肤颜色")
+    if not odor:
+        missing.append("体味")
+    if not lesion:
+        missing.append("皮损")
+    if not coat:
+        missing.append("整体毛质")
+    if has_hair_loss == "是":
+        if not hair_spot:
+            missing.append("秃毛分布")
+        if not hair_diameter:
+            missing.append("秃毛面积")
+    return missing
+
+
 def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
                 hair_spot, hair_diameter, coat, total_score, confirm_overwrite):
     """保存一条问答记录。狗狗名字/填表日期/填写人三者组合已存在时，默认
@@ -178,6 +202,11 @@ def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
     要覆盖后勾选"确认覆盖"复选框再保存一次，才会真的替换旧记录。"""
     if not dog_name or not fill_date or not filler:
         return "❌ 请先选择狗狗名字、填表日期、填写人再保存", load_records(), gr.update(value=False)
+
+    missing = _missing_questions(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat)
+    if missing:
+        msg = "❌ 还有必填题没填：" + "、".join(missing)
+        return msg, load_records(), gr.update(value=False)
 
     fill_date_str = fill_date.split(" ")[0] if fill_date else fill_date  # 只保留日期部分
     rows = load_records()
