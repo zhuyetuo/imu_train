@@ -35,7 +35,13 @@ cmd、PowerShell)直接python运行都可以。
     # 处理clips_*/目录、带预标注的场景不是一回事）：
     python split_day_by_imu.py \
         --day_dir 2026_8_18 \
-        --url_prefix http://192.168.2.140:8182/2026_8_18
+        --csv_url_prefix http://192.168.2.140:8182 \
+        --cam_mode 3
+    # （视频URL默认是csv_url_prefix去掉末尾斜杠再加/transcoded，即
+    # http://192.168.2.140:8182/transcoded，跟run_review_bins_all_days.sh
+    # 里Nginx媒体目录(MEDIA_DIR)的CSV在根目录/MP4在transcoded/子目录这套
+    # 约定一致——生成JSON后，还要把day_dir下的原始CSV/MP4实际放到这个
+    # Nginx媒体目录对应的位置，这个脚本只生成JSON里的URL，不负责搬文件）
 """
 import argparse
 import glob
@@ -113,16 +119,25 @@ def main():
     ap.add_argument("--output_dir", default=None,
                     help="imu*/子目录建在哪（默认跟--day_dir同一个目录，直接在里面建imu1/imu2/...）")
     ap.add_argument("--dry_run", action="store_true", help="只打印会怎么处理，不真的复制文件")
-    ap.add_argument("--url_prefix", default=None,
+    ap.add_argument("--csv_url_prefix", default=None,
                     help="传了才会额外生成labelstudio_review_imu{N}.json（每个imu目录"
                          "一份，放在output_dir顶层，不是imu*/子目录里面）。这个前缀是"
-                         "output_dir（包含imu1/imu2/...这些子目录的那一层）最终会被"
-                         "浏览器/Label Studio访问到的URL，比如把output_dir整个复制到"
-                         "Nginx媒体目录/2026_8_18/下、Nginx配了http://host:port/映射"
-                         "到那个媒体根目录，这里就传http://host:port/2026_8_18——"
-                         "脚本会自动拼成http://host:port/2026_8_18/imu1/xxx.mp4这样"
-                         "的完整URL填进JSON。不传就只做文件复制，不生成JSON（跟以前"
-                         "行为一致）")
+                         "CSV文件在Nginx等服务上实际能访问到的URL根路径——注意跟"
+                         "run_review_bins_all_days.sh的MEDIA_DIR是同一套约定：Nginx"
+                         "服务的通常是一个扁平媒体目录(CSV在根目录，MP4在其"
+                         "transcoded/子目录下)，不是嵌套的imu1/imu2/...目录结构，"
+                         "所以这里生成的URL用的是扁平文件名，不带imu{N}/这段路径——"
+                         "同一个机位的mp4在imu1/imu2/imu3三份拷贝里文件名完全一样，"
+                         "扁平存放不会冲突。你还需要把day_dir下的原始CSV/MP4（不是"
+                         "imu*/子目录里复制出来的那份，用原始那份就够，内容一样）"
+                         "实际放到这个URL对应的服务器目录下，这个脚本只负责生成JSON"
+                         "里的URL，不负责往Nginx媒体目录搬文件。不传就只做imu*/目录"
+                         "整理，不生成JSON（跟以前行为一致）")
+    ap.add_argument("--video_url_prefix", default=None,
+                    help="MP4文件的URL根路径，默认是--csv_url_prefix去掉末尾斜杠"
+                         "再加/transcoded（跟review_to_labelstudio.py的默认规则"
+                         "一致）。你的Nginx媒体目录如果视频不是放在transcoded/"
+                         "子目录，需要显式传这个覆盖默认值")
     ap.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
                     help="labelstudio_review_imu{N}.json里每个任务固定生成几个videoN"
                          "字段（只影响JSON生成，不影响实际复制了哪些视频文件）。"
@@ -213,19 +228,23 @@ def main():
     print(f"  涉及 {len(imu_dirs_used)} 个imu目录: {sorted(os.path.basename(d) for d in imu_dirs_used)}")
     print(f"  复制 {n_copied} 个文件，跳过 {n_skipped} 个（已存在且大小一致，视为已复制过）")
 
-    if args.url_prefix:
+    if args.csv_url_prefix:
         print(f"\n生成 Label Studio 任务JSON（每个imu一份）...")
-        prefix = args.url_prefix.rstrip("/")
+        csv_prefix = args.csv_url_prefix.rstrip("/")
+        video_prefix = (args.video_url_prefix or f"{csv_prefix}/transcoded").rstrip("/")
         for imu_num, sess_list in sorted(imu_sessions.items()):
             tasks = []
             for task_id, s in enumerate(sorted(sess_list, key=lambda x: x["session"]), 1):
                 imu_folder = f"imu{imu_num}"
-                task_data = {"csv1": f"{prefix}/{imu_folder}/{s['csv']}"}
+                # URL用扁平文件名，不带imu{N}/这段路径——Nginx服务的通常是
+                # 扁平媒体目录(CSV在根/MP4在transcoded/子目录)，不是嵌套的
+                # imu*/目录结构，见--csv_url_prefix的帮助说明
+                task_data = {"csv1": f"{csv_prefix}/{s['csv']}"}
                 # video1/video2/video3...固定生成几个字段：auto按这个session
                 # 实际探测到的最高机位号走；cam_mode="2"/"3"时不管实际找到
                 # 几个机位，固定生成这么多个字段，真正缺失的机位给空字符串
                 # ""占位，不拿别的机位视频顶替（避免误导标注人员）。
-                urls_by_cam = {cam_num: f"{prefix}/{imu_folder}/{fname}" for cam_num, fname in s["cam_videos"]}
+                urls_by_cam = {cam_num: f"{video_prefix}/{fname}" for cam_num, fname in s["cam_videos"]}
                 if args.cam_mode == "auto":
                     slot_count = max(urls_by_cam) if urls_by_cam else 1
                 else:
