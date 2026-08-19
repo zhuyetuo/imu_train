@@ -152,9 +152,21 @@ BASE_CAM_NUMS = (1, 2)
 MAX_OPTIONAL_CAM_NUM = 6  # 探测上限，够用就行，不用配置成参数
 
 
-def detect_session_cams(session: str, suffix: str, video_dir: str) -> list:
-    """返回这个场次实际要处理的机位号列表：cam1/cam2固定包含，
-    cam3起只在video_dir下真的找到对应视频文件时才加进来。"""
+def detect_session_cams(session: str, suffix: str, video_dir: str, cam_mode: str = "auto") -> list:
+    """返回这个场次实际要处理的机位号列表。
+
+    cam_mode="auto"（默认）：cam1/cam2固定包含，cam3起只在video_dir下真的
+      找到对应视频文件时才加进来，找不到就当这天只有2个机位，不会在日志
+      里凭空出现一个不存在的cam3⚠️。
+    cam_mode="2" / "3"：不做探测，直接固定返回[1,2]或[1,2,3]——跟
+      review_to_labelstudio.py的--cam_mode是同一个语义，保证同一批任务
+      的机位数量是固定的（哪怕某天cam3视频真的缺失，也要在状态输出里
+      显示cam3⚠️，而不是这天的日志行里少一列，跟别的天格式对不上）。
+    """
+    if cam_mode == "2":
+        return [1, 2]
+    if cam_mode == "3":
+        return [1, 2, 3]
     cams = list(BASE_CAM_NUMS)
     for cam_num in range(BASE_CAM_NUMS[-1] + 1, MAX_OPTIONAL_CAM_NUM + 1):
         stem = camera_video_stem(session, cam_num, suffix)
@@ -521,6 +533,13 @@ def main():
                              "Nginx媒体目录时后一次会静默覆盖前一次，导致Label Studio里"
                              "复查任务链接的文件名对不上实际内容。留空则不加（跟以前"
                              "行为一致），多次运行结果会共用同一个媒体目录时强烈建议传")
+    parser.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
+                        help="固定处理几个机位: auto（默认）=按每个场次实际探测到的"
+                             "机位视频文件走，只有2个机位的天不会凭空出现cam3；"
+                             "传2或3强制固定机位数量，哪怕某天缺某个机位的视频文件，"
+                             "状态输出里也会显示对应的cam2/cam3⚠️（而不是那天的日志"
+                             "行缺一列），保证同一批天数处理下来日志格式一致。"
+                             "要跟review_to_labelstudio.py的--cam_mode传一样的值")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -572,7 +591,7 @@ def main():
         imu_label = extract_imu_label(detected_stem)  # 真正触发检测的狗，比如"IMU3"
 
         src_csv1 = os.path.join(args.video_dir, csv_basename)
-        cam_nums = detect_session_cams(session, suffix, args.video_dir)
+        cam_nums = detect_session_cams(session, suffix, args.video_dir, args.cam_mode)
         cams = [{"num": n, "stem": camera_video_stem(session, n, suffix),
                  "mp4": find_video(camera_video_stem(session, n, suffix), args.video_dir)}
                 for n in cam_nums]
