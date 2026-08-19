@@ -109,14 +109,20 @@ def build_app():
         )
 
         with gr.Row():
-            dog_name = gr.Textbox(label="狗狗名字")
-            fill_date = gr.Textbox(label="填表日期", placeholder="比如 2026-08-19")
+            dog_name = gr.Dropdown(
+                ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"],
+                label="狗狗名字",
+            )
+            fill_date = gr.DateTime(label="填表日期", include_time=False, type="string")
+            filler = gr.Dropdown(["周蕾", "刘雪飞"], label="填写人")
 
         gr.Markdown("## 一、前置问题")
         has_hair_loss = gr.Radio(
             ["是", "否"],
             label="1. 您家宠物身上是否有毛发稀疏或出现没有毛的情况？",
-            info="选「是」才需要继续填写下面的秃毛分布/秃毛面积两题；选「否」这两题按0分计",
+            info="选「是」：全部问题都需要回答。选「否」：以下两题不需要回答——"
+                 "「宠物身上没有毛或毛发稀疏的地方是如何分布的？」"
+                 "「最大的一块秃毛区域大概有多大？」，其余问题仍需回答",
         )
 
         gr.Markdown("## 二、皮肤色泽评估")
