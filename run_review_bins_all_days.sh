@@ -172,6 +172,7 @@ if [[ "$EXTRACT_CLIPS" == "1" ]]; then
             --encoder    "${ENCODER:-cpu}" \
             --preset     "${PRESET:-veryfast}" \
             --ffmpeg_threads "${FFMPEG_THREADS:-2}" \
+            --cam_mode   "$CAM_MODE" \
             --run_tag    "$(basename "$RESULT_ROOT")"
     done
 fi
