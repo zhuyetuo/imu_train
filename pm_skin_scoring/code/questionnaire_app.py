@@ -30,7 +30,6 @@ import math
 import os
 import re
 import socket
-import sys
 from datetime import datetime
 
 import gradio as gr
