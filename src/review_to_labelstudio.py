@@ -304,10 +304,10 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         能顺便核查"模型是不是有漏检"，只导出命中的片段做不到这一点
       - 只保留置信度(conf_field，默认conf_max)>=min_conf的抓挠片段进
         annotations，其余片段不出现在标注结果里(不是标成"低置信度"，
-        是直接不标)；一个片段都没达标时，这个task的annotations是一个
-        "result为空列表"的完成标注(不是没有annotations)，Label Studio
-        里会显示"已标注，0个标签"，复查人能一眼看出"模型说这段没有
-        抓挠"，还是得靠人确认对不对
+        是直接不标)；一个片段都没达标时，这个task的annotations是空
+        列表(未标注状态)，不是塞一个"result为空的annotation"进去——
+        那样Label Studio会显示成"已完成"，容易让复查人误以为这段已经
+        看过了，直接跳过，跟"提醒核查漏检"这个目的正好相反
       - 机位处理跟build_tasks_from_clips一样支持cam_mode(auto/2/3)
       - 标注人固定标成"ML"（completed_by），跟人工标注区分开
     """
@@ -353,23 +353,30 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
                if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
         results = [make_annotation(seg["start_ts"], seg["end_ts"], label_name) for seg in kept]
 
-        # 不管results是不是空都生成task——空的也是一次有效的"模型判断"，
-        # 让复查人能看到"这段模型认为没有抓挠"，用来核查漏检，不是只有
-        # 命中的才值得导出
+        # 不管results是不是空都生成task——让复查人能看到全部录制数据，
+        # 用来核查漏检，不是只有命中的才值得导出。但"没有达标片段"跟
+        # "标注了、标注内容是空"是两回事：没检测到就是没有标注，
+        # annotations给空列表(未标注状态)，不能塞一个"result为空的
+        # annotation"进去冒充"已经标注完、判定为无"，那样Label Studio
+        # 里会显示成"已完成"，反而让人误以为这段已经复查过，不会再点
+        # 开看，跟"提醒核查漏检"这个目的正好相反。
         if results:
             note = f"模型ML自动检测，{conf_field}>={min_conf}，共{len(results)}段（原始{len(scratch_segs)}段中筛出）"
+            annotations = [{
+                "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
+                "result": results,
+            }]
         elif scratch_segs:
             note = (f"模型记录到{len(scratch_segs)}段疑似抓挠，但{conf_field}都低于{min_conf}阈值，"
-                   f"这段标注结果为空，请核实是否漏检")
+                   f"未生成标注，请人工核实是否漏检")
+            annotations = []
         else:
-            note = "模型ML完全没有检测到抓挠片段，这段标注结果为空，请核实是否漏检"
+            note = "模型ML完全没有检测到抓挠片段，未生成标注，请人工核实是否漏检"
+            annotations = []
         tasks.append({
             "id": task_id,
             "data": task_data,
-            "annotations": [{
-                "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
-                "result": results,
-            }],
+            "annotations": annotations,
             "meta": {
                 "session": sess, "csv_file": main_csv,
                 "labeled_by": "ML",
@@ -466,7 +473,7 @@ def main():
         out_path = f"{base}_full_ml{ext}"
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(ml_tasks, f, ensure_ascii=False, indent=2)
-        n_hit = sum(1 for t in ml_tasks if t["annotations"][0]["result"])
+        n_hit = sum(1 for t in ml_tasks if t["annotations"])
         print(f"  → {out_path}  （{len(ml_tasks)} 个任务，其中{n_hit}个有达标片段、"
               f"{len(ml_tasks) - n_hit}个模型未检出，含全部录制数据供核查漏检）")
         return
