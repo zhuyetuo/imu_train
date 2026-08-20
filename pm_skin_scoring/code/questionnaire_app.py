@@ -26,6 +26,7 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
     浏览器打开 http://localhost:7860
 """
 import csv
+import glob
 import math
 import os
 import re
@@ -528,9 +529,10 @@ def export_records_csv():
     return RECORDS_CSV
 
 
-# ── IMU统计数据导入：读每个根目录下的imu_daily_scratch_stats.csv（
+# ── IMU统计数据导入：读 {root}/{day}/imu_daily_scratch_stats.csv（
 # src/imu_scratch_daily_stats.py / run_review_bins_all_days.sh的IMU_STATS=1
-# 产出的那份），供「C值计算」标签按(天,机位)选择自动填充。
+# 产出的那份，每天一份、落在各自的日期目录下），供「C值计算」标签按
+# (天,机位)选择自动填充。
 #
 # 不是现场扫描/现算全部_infer.json——之前那样做会把root下所有已经跑过
 # ML_PRELABEL的天都翻出来，哪怕IMU_STATS=1只对某一天(比如8-19)跑过，
@@ -569,11 +571,15 @@ def _parse_bool(value) -> bool:
 
 
 def scan_imu_roots(roots_str: str):
-    """扫描输入框里逗号分隔的每个根目录，找每个根目录下的
-    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份），只有这份文件
-    里出现过的(天,机位)才会列出来——没跑过统计的天不会被误当成"有数据"。
-    返回(所有行的列表, 下拉选项更新, 状态提示)。目录/文件不存在或读取
-    出错的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过了哪些。"""
+    """扫描输入框里逗号分隔的每个根目录，找里面每个日期目录下的
+    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份，每天一份、
+    落在各自的日期目录里）。只有真的存在这份文件的天才会列出来——
+    没跑过统计的天不会被误当成"有数据"。
+
+    返回(所有行的列表, 下拉选项更新, 状态提示)。目录不存在/一个统计
+    文件都没有的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过
+    了哪些；单个日期的文件读取出错只跳过那一天，不影响同一个root下的
+    其它天。"""
     roots = [r.strip() for r in (roots_str or "").split(",") if r.strip()]
     if not roots:
         return [], gr.update(choices=[], value=None), "❌ 请先填至少一个根目录"
@@ -581,22 +587,27 @@ def scan_imu_roots(roots_str: str):
     all_rows = []
     skipped = []
     for root in roots:
-        stats_csv = os.path.join(root, STATS_CSV_NAME)
-        if not os.path.exists(stats_csv):
-            skipped.append(f"{root}（没有{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
+        if not os.path.isdir(root):
+            skipped.append(f"{root}（目录不存在）")
             continue
-        try:
-            with open(stats_csv, encoding="utf-8-sig", newline="") as f:
-                rows = list(csv.DictReader(f))
-        except Exception as e:
-            skipped.append(f"{root}（读取{STATS_CSV_NAME}出错：{e}）")
+        # 每天一份，在各自的日期目录下——不是root下一个总的文件
+        stats_csvs = sorted(glob.glob(os.path.join(root, "*", STATS_CSV_NAME)))
+        if not stats_csvs:
+            skipped.append(f"{root}（没有找到任何{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
             continue
         root_label = os.path.basename(root.rstrip("/\\")) or root
-        for row in rows:
-            row = dict(row)
-            row["root"] = root
-            row["root_label"] = root_label
-            all_rows.append(row)
+        for stats_csv in stats_csvs:
+            try:
+                with open(stats_csv, encoding="utf-8-sig", newline="") as f:
+                    rows = list(csv.DictReader(f))
+            except Exception as e:
+                skipped.append(f"{stats_csv}（读取出错：{e}）")
+                continue
+            for row in rows:
+                row = dict(row)
+                row["root"] = root
+                row["root_label"] = root_label
+                all_rows.append(row)
 
     if not all_rows:
         msg = "❌ 没有扫描到任何天/机位的数据"
@@ -805,12 +816,13 @@ def build_app():
             with gr.Tab("导入IMU统计数据"):
                 gr.Markdown(
                     "# 导入IMU统计数据\n"
-                    "填好推理结果根目录（逗号分隔可以填多个），点\"扫描\"——会去每个根"
-                    "目录下找`imu_daily_scratch_stats.csv`（`run_review_bins_all_days.sh`"
-                    "加`IMU_STATS=1`那次批处理跑完之后产出的那份，或者单独跑"
-                    "`src/imu_scratch_daily_stats.py`），只有这份文件里出现过的(天,机位)"
-                    "才会列进下面的下拉框——没跑过统计的天不会被误当成\"有数据\"。选好一个，"
-                    "点\"应用\"一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "填好推理结果根目录（逗号分隔可以填多个），点「扫描」——会去每个根"
+                    "目录下的**每个日期目录**里找`imu_daily_scratch_stats.csv`"
+                    "（`run_review_bins_all_days.sh`加`IMU_STATS=1`那次批处理跑完之后"
+                    "产出的，每天一份、存在各自的日期目录下，所以跑多天不会互相覆盖；"
+                    "也可以单独跑`src/imu_scratch_daily_stats.py`）。只有真的存在这份"
+                    "文件的天才会列进下面的下拉框——没跑过统计的天不会被误当成「有数据」。"
+                    "选好一个，点「应用」一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
                     "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
