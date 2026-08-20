@@ -131,15 +131,22 @@ def c_tier_of(c_value):
     return "C0"
 
 
-def s_tier_of(s_value):
-    """⚠️ PM原文档里这三档的边界写的是"0≤S<12+"/"12+≤S<20+"/"20+≤S≤70"，
-    "+"号具体含义不确定（可能是待定/近似值，不是精确数字），而且"≤70"
-    这个上限跟她自己举的满分示例(74.25分)对不上，大概率是文档还没最终
-    定稿。这里按字面数字(12/20)取整数边界实现，S2不设上限(实际会被公式
-    本身的最大值74.25自然限制住)——这个分档结果目前只能当参考，正式
-    上线前必须找PM确认这三个边界的准确数值。"""
+def s_tier_of(s_value, red_flag=False):
+    """PM确认后的精确边界（不再是"12+/20+/70"这种带问号的数字）：
+    S0：0≤S<12；S1：12≤S<20；S2：20≤S≤74.25。74.25正好是公式本身能
+    算出的理论最大值(C=100×40%+皮肤组满分55×35%+毛发组满分60×25%)，
+    S2不用额外设上限，公式自身就封顶在这——这个跟她给的示例完全对得上，
+    不再是之前那个自相矛盾的"≤70"。
+
+    另外有一条红旗规则：任意单项（体味/皮损/秃毛分布/秃毛面积/整体
+    毛质，这5题满分都是20，皮肤颜色满分只有15、够不到这条规则）打了
+    20分满分，不管总分算出来多少，直接判S2——跟C值那边"红旗信号触发
+    直接给C2"是同一类"某个维度已经严重到可以跳过加权总分直接定档"的
+    设计。"""
     if s_value is None:
         return ""
+    if red_flag:
+        return "S2"
     if s_value >= 20:
         return "S2"
     if s_value >= 12:
@@ -176,11 +183,17 @@ def compute_score(c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_d
     # 会丢精度、跟她原文的数字对不上
     total = _round_half_up(c_score + skin_group_score + hair_group_score, 2)
 
+    # 红旗规则：体味/皮损/秃毛分布/秃毛面积/整体毛质这5题满分都是20分
+    # （皮肤颜色满分只有15，够不到），任意一题打满20分，不管总分多少
+    # 直接判S2——PM文档明确写"信号细节单项打分为20分时，直接触发S2"
+    red_flag = 20 in (s_odor, s_lesion, s_spot, s_diameter, s_coat)
+
     c_tier = c_tier_of(c_value)
-    s_tier = s_tier_of(total)
+    s_tier = s_tier_of(total, red_flag)
     c_line = (f"| **C值({c} × {C_WEIGHT:.0%}) [{c_tier}]** | **{c_score:.1f}** |\n"
              if c_value is not None else
              "| ⚠️ 还没填C值，下面只按问答部分算(未乘40%的C值项) | — |\n")
+    red_flag_line = "\n> 🚩 触发红旗信号：有单项打了20分满分，S档位直接判S2，不看加权总分" if red_flag else ""
 
     breakdown = (
         f"| 题目 | 原始分 |\n|---|---|\n"
@@ -195,8 +208,7 @@ def compute_score(c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_d
         f"| **毛发状态组小计 × {HAIR_GROUP_WEIGHT:.0%}** | **{hair_group_raw} × {HAIR_GROUP_WEIGHT:.0%} = {hair_group_score:.2f}** |\n"
         f"| 问答部分小计(皮肤组+毛发组，不含C值) | {questionnaire_total} |\n"
         f"| **S总分 = C×40%+皮肤组×35%+毛发组×25%** | **{total}**{f'　→　**{s_tier}**' if s_tier else ''} |\n"
-        f"\n> ⚠️ S档位边界(S0/S1/S2)数值来自PM文档但标注了"
-        f"「+」号、含义不确定，正式上线前需要跟PM确认准确边界，目前仅供参考。"
+        f"{red_flag_line}"
     )
     return questionnaire_total, total, c_tier, s_tier, breakdown
 
@@ -410,7 +422,7 @@ def build_app():
                     s_total_score = gr.Number(label="S总分（含C值×40%）", precision=2)
                 with gr.Row():
                     c_tier_box = gr.Textbox(label="C档位", interactive=False)
-                    s_tier_box = gr.Textbox(label="S档位（⚠️边界待PM确认，仅供参考）", interactive=False)
+                    s_tier_box = gr.Textbox(label="S档位", interactive=False)
                 breakdown_md = gr.Markdown()
 
                 calc_btn = gr.Button("计算分数", variant="primary")
