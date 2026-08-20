@@ -15,18 +15,28 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
     浏览器打开 http://localhost:7860
 """
 import csv
+import math
 import os
 import socket
 from datetime import datetime
 
 import gradio as gr
 
+
+def _round_half_up(value: float, ndigits: int) -> float:
+    """标准四舍五入，不用Python内置round()——它是banker's rounding
+    (round-half-to-even)，round(74.25, 1)算出来是74.2不是74.25，之前
+    在skin_health/合成数据标签生成那边就踩过同一个坑(见
+    rf_synthetic_validation_findings.md)，这里用floor(x+0.5)方式避开。"""
+    factor = 10 ** ndigits
+    return math.floor(value * factor + 0.5) / factor
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 RECORDS_CSV = os.path.join(DATA_DIR, "records.csv")
 RECORD_COLUMNS = [
-    "狗狗名字", "填表日期", "填写人",
+    "狗狗名字", "填表日期", "填写人", "C值", "C档位",
     "有无毛发稀疏", "皮肤颜色", "体味", "皮损", "秃毛分布", "秃毛面积", "整体毛质",
-    "问答分数", "保存时间",
+    "问答分数", "S总分", "S档位", "保存时间",
 ]
 
 
@@ -96,16 +106,48 @@ def _score_of(choice: str, options: list) -> int:
     return 0
 
 
-# PM原表按大类分组加权：皮肤状态(皮肤颜色+体味+皮损)组内原始分相加后
-# 乘以35%权重；毛发状态(秃毛部位+秃毛面积+整体毛质)组内原始分相加后
-# 乘以25%权重，两组加权分相加得到最终问答分数——不是6道题原始分直接
-# 相加，PM原表里这两组权重加起来是60%，还有别的类别(比如抓挠行为)
-# 占剩下的40%，但这份问答表不涉及那部分，这里只按这两组算。
+# PM完整总分公式（见pm_skin_scoring/docs/pm_rules_verification.md）：
+#   S = C值(0-100) × 40%  +  皮肤状态组原始分小计 × 35%  +  毛发状态组原始分小计 × 25%
+# 皮肤状态组=皮肤颜色+体味+皮损，毛发状态组=秃毛部位+秃毛面积+整体毛质，
+# 组内原始分直接相加、不归一化，再乘以组权重。C值来自IMU行为严重度评分
+# （skin_health/code/scratch_burden.py的SBS引擎，已逐条核对跟PM这份文档
+# 的变化幅度/聚集程度/持续程度/中断影响四项评分规则完全一致），这个
+# 问答页面本身不计算C值，需要手动填入（比如从Wardyn后台/SBS跑批结果里
+# 抄一个过来）。
+C_WEIGHT = 0.40
 SKIN_GROUP_WEIGHT = 0.35
 HAIR_GROUP_WEIGHT = 0.25
 
 
-def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+def c_tier_of(c_value):
+    """C0：0≤C<30，C1：30≤C<50，C2：50≤C≤100，跟scratch_burden.py的
+    score_day()判定完全一致。"""
+    if c_value is None:
+        return ""
+    if c_value >= 50:
+        return "C2"
+    if c_value >= 30:
+        return "C1"
+    return "C0"
+
+
+def s_tier_of(s_value):
+    """⚠️ PM原文档里这三档的边界写的是"0≤S<12+"/"12+≤S<20+"/"20+≤S≤70"，
+    "+"号具体含义不确定（可能是待定/近似值，不是精确数字），而且"≤70"
+    这个上限跟她自己举的满分示例(74.25分)对不上，大概率是文档还没最终
+    定稿。这里按字面数字(12/20)取整数边界实现，S2不设上限(实际会被公式
+    本身的最大值74.25自然限制住)——这个分档结果目前只能当参考，正式
+    上线前必须找PM确认这三个边界的准确数值。"""
+    if s_value is None:
+        return ""
+    if s_value >= 20:
+        return "S2"
+    if s_value >= 12:
+        return "S1"
+    return "S0"
+
+
+def compute_score(c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
     """前置问题选"否"时，秃毛分布/秃毛面积这两题不需要回答，按0分计（不是
     "扣分"，是这两题在这只狗身上根本不适用，PM原表里这种情况也是记0分，
     不是留空导致的缺失）。整体毛质题不受前置问题限制，始终参与计分。"""
@@ -125,21 +167,38 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
     hair_group_raw = s_spot + s_diameter + s_coat
     skin_group_score = skin_group_raw * SKIN_GROUP_WEIGHT
     hair_group_score = hair_group_raw * HAIR_GROUP_WEIGHT
-    total = round(skin_group_score + hair_group_score, 1)
+    questionnaire_total = _round_half_up(skin_group_score + hair_group_score, 2)
+
+    c = c_value if c_value is not None else 0
+    c_score = c * C_WEIGHT
+    # 保留2位小数，不是1位——PM文档举的满分例子是精确到分的"74.25"，
+    # 权重0.35/0.25乘上整数原始分本来就可能产生2位小数，四舍五入到1位
+    # 会丢精度、跟她原文的数字对不上
+    total = _round_half_up(c_score + skin_group_score + hair_group_score, 2)
+
+    c_tier = c_tier_of(c_value)
+    s_tier = s_tier_of(total)
+    c_line = (f"| **C值({c} × {C_WEIGHT:.0%}) [{c_tier}]** | **{c_score:.1f}** |\n"
+             if c_value is not None else
+             "| ⚠️ 还没填C值，下面只按问答部分算(未乘40%的C值项) | — |\n")
 
     breakdown = (
         f"| 题目 | 原始分 |\n|---|---|\n"
+        f"{c_line}"
         f"| 皮肤颜色 | {s_color} |\n"
         f"| 体味 | {s_odor} |\n"
         f"| 皮损 | {s_lesion} |\n"
-        f"| **皮肤状态组小计 × {SKIN_GROUP_WEIGHT:.0%}** | **{skin_group_raw} × {SKIN_GROUP_WEIGHT:.0%} = {skin_group_score:.1f}** |\n"
+        f"| **皮肤状态组小计 × {SKIN_GROUP_WEIGHT:.0%}** | **{skin_group_raw} × {SKIN_GROUP_WEIGHT:.0%} = {skin_group_score:.2f}** |\n"
         f"| 秃毛分布 | {s_spot}{'（未评估，计0分）' if has_hair_loss != '是' else ''} |\n"
         f"| 秃毛面积 | {s_diameter}{'（未评估，计0分）' if has_hair_loss != '是' else ''} |\n"
         f"| 整体毛质 | {s_coat} |\n"
-        f"| **毛发状态组小计 × {HAIR_GROUP_WEIGHT:.0%}** | **{hair_group_raw} × {HAIR_GROUP_WEIGHT:.0%} = {hair_group_score:.1f}** |\n"
-        f"| **问答分数合计** | **{total}** |\n"
+        f"| **毛发状态组小计 × {HAIR_GROUP_WEIGHT:.0%}** | **{hair_group_raw} × {HAIR_GROUP_WEIGHT:.0%} = {hair_group_score:.2f}** |\n"
+        f"| 问答部分小计(皮肤组+毛发组，不含C值) | {questionnaire_total} |\n"
+        f"| **S总分 = C×40%+皮肤组×35%+毛发组×25%** | **{total}**{f'　→　**{s_tier}**' if s_tier else ''} |\n"
+        f"\n> ⚠️ S档位边界(S0/S1/S2)数值来自PM文档但标注了"
+        f"「+」号、含义不确定，正式上线前需要跟PM确认准确边界，目前仅供参考。"
     )
-    return total, breakdown
+    return questionnaire_total, total, c_tier, s_tier, breakdown
 
 
 # ── 历史记录：本地CSV持久化 ────────────────────────────────────────────────
@@ -210,8 +269,9 @@ def _missing_questions(has_hair_loss, color, odor, lesion, hair_spot, hair_diame
     return missing
 
 
-def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
-                hair_spot, hair_diameter, coat, total_score, confirm_overwrite):
+def save_record(dog_name, fill_date, filler, c_value, has_hair_loss, color, odor, lesion,
+                hair_spot, hair_diameter, coat, questionnaire_score, s_total_score,
+                c_tier, s_tier, confirm_overwrite):
     """保存一条问答记录。狗狗名字/填表日期/填写人三者组合已存在时，默认
     拒绝保存并提示——避免手滑/误操作把之前填好的记录覆盖掉；用户确认
     要覆盖后勾选"确认覆盖"复选框再保存一次，才会真的替换旧记录。"""
@@ -227,10 +287,12 @@ def save_record(dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
     rows = load_records()
     dup_idx = find_duplicate_index(rows, dog_name, fill_date_str, filler)
 
-    new_row = [dog_name, fill_date_str, filler, has_hair_loss or "",
-               _letter_of(color), _letter_of(odor), _letter_of(lesion),
+    new_row = [dog_name, fill_date_str, filler,
+               c_value if c_value is not None else "", c_tier or "",
+               has_hair_loss or "", _letter_of(color), _letter_of(odor), _letter_of(lesion),
                _letter_of(hair_spot), _letter_of(hair_diameter), _letter_of(coat),
-               total_score, datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+               questionnaire_score, s_total_score, s_tier or "",
+               datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
 
     if dup_idx is not None and not confirm_overwrite:
         msg = (f"⚠️ 已存在完全相同的记录（{dog_name} / {fill_date_str} / {filler}），"
@@ -335,17 +397,29 @@ def build_app():
                     label="7. 宠物整体毛发状态看起来怎么样？",
                 )
 
+                gr.Markdown(
+                    "## 六、IMU行为严重度（C值）\n"
+                    "这个页面只负责问答部分，C值来自IMU数据分析结果（Wardyn/SBS引擎），"
+                    "需要手动填入——不填也能看问答部分的分数，只是S总分会先按C=0算。"
+                )
+                c_value = gr.Number(label="C值（0-100）", minimum=0, maximum=100)
+
                 gr.Markdown("## 结果")
                 with gr.Row():
-                    total_score = gr.Number(label="问答分数", precision=1)
+                    questionnaire_score = gr.Number(label="问答分数（皮肤组+毛发组加权分，不含C值）", precision=2)
+                    s_total_score = gr.Number(label="S总分（含C值×40%）", precision=2)
+                with gr.Row():
+                    c_tier_box = gr.Textbox(label="C档位", interactive=False)
+                    s_tier_box = gr.Textbox(label="S档位（⚠️边界待PM确认，仅供参考）", interactive=False)
                 breakdown_md = gr.Markdown()
 
                 calc_btn = gr.Button("计算分数", variant="primary")
-                inputs = [has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
-                calc_btn.click(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
+                inputs = [c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
+                calc_outputs = [questionnaire_score, s_total_score, c_tier_box, s_tier_box, breakdown_md]
+                calc_btn.click(fn=compute_score, inputs=inputs, outputs=calc_outputs)
                 # 选项一变就自动重新算一次，不用每次都手动点按钮
                 for inp in inputs:
-                    inp.change(fn=compute_score, inputs=inputs, outputs=[total_score, breakdown_md])
+                    inp.change(fn=compute_score, inputs=inputs, outputs=calc_outputs)
 
                 def toggle_hair_questions(choice):
                     """前置问题选"是"才显示5/6两题，选"否"（或还没选）直接隐藏——
@@ -395,8 +469,9 @@ def build_app():
                     fn=delete_record, inputs=[selected_row_idx], outputs=[history_table],
                 )
 
-        save_inputs = [dog_name, fill_date, filler, has_hair_loss, color, odor, lesion,
-                       hair_spot, hair_diameter, coat, total_score, confirm_overwrite]
+        save_inputs = [dog_name, fill_date, filler, c_value, has_hair_loss, color, odor, lesion,
+                       hair_spot, hair_diameter, coat, questionnaire_score, s_total_score,
+                       c_tier_box, s_tier_box, confirm_overwrite]
         save_btn.click(
             fn=save_record, inputs=save_inputs,
             outputs=[save_status, history_table, confirm_overwrite],
