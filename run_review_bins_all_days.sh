@@ -31,9 +31,12 @@
 #                 labelstudio_review_IMU1_{阈值}.json等），只保留置信度分桶
 #                 下界>=阈值的任务，完整版JSON照常生成，筛选版是额外多出来的，
 #                 不是替代（默认空=不筛）
-#   ML_PRELABEL   传1时，额外生成一组"全录制视频+ML自动预标注"的Label Studio
-#                 任务（不裁剪clip，标注人标成ML），跟clips那一套完全独立、
-#                 互不影响（默认0=不生成）
+#   ML_PRELABEL   传1时，额外生成一份"全录制视频+ML自动预标注"的Label Studio
+#                 任务(labelstudio_review_full_ml.json)，不裁剪clip，标注人标成
+#                 ML，跟clips那一套完全独立、互不影响（默认0=不生成）。每个录制
+#                 场次不管有没有检测到达标片段都会生成task(没检测到的标注结果
+#                 为空)，让复查的人能看到全部录制数据，方便顺便核查模型有没有
+#                 漏检，不是只导出命中的部分
 #   ML_MIN_CONF   ML_PRELABEL=1时，只标注置信度>=这个值的抓挠片段（默认0.8，
 #                 跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件用的，
 #                 这个是给ML预标注模式筛具体标哪些片段用的）
@@ -257,7 +260,7 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
             --ml_min_conf "$ML_MIN_CONF" \
             --cam_mode "$CAM_MODE" \
             --label "抓挠"
-        echo "  $day → ${ls_json%.json}_full_ml_predictions.json / _full_ml_annotations.json"
+        echo "  $day → ${ls_json%.json}_full_ml.json"
     done
 fi
 
