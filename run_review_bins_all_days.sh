@@ -51,9 +51,9 @@
 #                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，每天各产出一份
 #                 CSV(RESULT_ROOT/{day}/imu_daily_scratch_stats.csv)，供pm_skin_scoring
 #                 网页的「C值计算」标签按日期+IMU读取自动填充（默认0=不生成）。
-#                 注意会把RESULT_ROOT下所有已跑过推理的天都重算一遍(不只是这次
-#                 INCLUDE_DAYS的那几天)——基线是拿全部天算的，补跑了新的一天之后
-#                 之前那些天的基线也会跟着变准，顺手一起更新
+#                 只会写本次INCLUDE_DAYS那几天的统计文件，不碰别的日期目录；
+#                 但基线是拿RESULT_ROOT下全部已跑过推理的天算的，所以哪怕只跑
+#                 一天，基线也是有历史可比的（前提是之前跑过别的天）
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
@@ -285,11 +285,14 @@ fi
 if [[ "$IMU_STATS" == "1" ]]; then
     echo ""
     echo "▶ 统计每天每个IMU的抓挠情况（$ML_CONF_FIELD>=$ML_MIN_CONF才算抓挠，供C值计算网页读取）..."
-    # 不传--days：本次跑的那几天固然要更新，但基线是拿root下全部天算的，
-    # 补跑了新的一天之后，之前那些天的基线也会跟着变准，顺手一起重算了，
-    # 反正只是读已有的_infer.json，很快
+    # 只写本次实际跑的那几天的统计文件——基线那边会自己去读root下全部
+    # 已有的天(见compute_stats的注释)，但"写哪几天的文件"必须严格限制在
+    # 本次INCLUDE_DAYS，不然会在所有历史日期目录下都生成一份统计文件，
+    # 网页上就分不清"哪些天是我真的处理过的"了
+    days_arg=$(IFS=,; echo "${days[*]}")
     python src/imu_scratch_daily_stats.py \
         --infer_root "$RESULT_ROOT" \
+        --days "$days_arg" \
         --min_conf "$ML_MIN_CONF" \
         --conf_field "$ML_CONF_FIELD"
 fi
