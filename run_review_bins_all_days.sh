@@ -31,6 +31,12 @@
 #                 labelstudio_review_IMU1_{阈值}.json等），只保留置信度分桶
 #                 下界>=阈值的任务，完整版JSON照常生成，筛选版是额外多出来的，
 #                 不是替代（默认空=不筛）
+#   ML_PRELABEL   传1时，额外生成一组"全录制视频+ML自动预标注"的Label Studio
+#                 任务（不裁剪clip，标注人标成ML），跟clips那一套完全独立、
+#                 互不影响（默认0=不生成）
+#   ML_MIN_CONF   ML_PRELABEL=1时，只标注置信度>=这个值的抓挠片段（默认0.8，
+#                 跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件用的，
+#                 这个是给ML预标注模式筛具体标哪些片段用的）
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
@@ -71,6 +77,8 @@ LS_MODE="${LS_MODE:-scratch_only}"
 CAM_MODE="${CAM_MODE:-auto}"
 SPLIT_BY_IMU="${SPLIT_BY_IMU:-0}"
 MIN_CONF="${MIN_CONF:-}"
+ML_PRELABEL="${ML_PRELABEL:-0}"
+ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
                                         # 3s会导致约一半真实事件被错误合并，1s已能消除碎片化且合并更少）
@@ -231,6 +239,28 @@ for day in "${days[@]}"; do
     done
 done
 
+# ── ML自动预标注（全录制视频，不裁剪clip）────────────────
+# 跟上面clips那一套完全独立：读out_dir/_infer下的原始推理结果，不依赖
+# extract_clips.py的输出，只标注高置信度片段，标注人标成ML
+if [[ "$ML_PRELABEL" == "1" ]]; then
+    echo ""
+    echo "▶ 生成 ML 自动预标注任务（全录制视频，置信度>=$ML_MIN_CONF）..."
+    for day in "${days[@]}"; do
+        out_dir="$RESULT_ROOT/$day"
+        ls_json="$out_dir/labelstudio_review.json"
+        python src/review_to_labelstudio.py \
+            --infer_dir "$out_dir/_infer" \
+            --output "$ls_json" \
+            --csv_url_prefix "$LS_URL_PREFIX" \
+            $video_prefix_arg \
+            --ml_full_video \
+            --ml_min_conf "$ML_MIN_CONF" \
+            --cam_mode "$CAM_MODE" \
+            --label "抓挠"
+        echo "  $day → ${ls_json%.json}_full_ml_predictions.json / _full_ml_annotations.json"
+    done
+fi
+
 # ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
 # 注意：Nginx 在 Docker 容器内运行，软链接目标不可见，需复制实体文件
 if [[ "$SYMLINK_CSV" == "1" ]]; then
@@ -268,6 +298,21 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
                 _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
             fi
         done < <(find "$clips_root"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+
+        # ML_PRELABEL引用的是原始完整录制视频(不是裁剪出来的clip)，上面
+        # 那段只同步了clips_*/里的文件，这里额外把DATA_ROOT/$day下的原始
+        # CSV/MP4也同步一份过去，不然ML预标注JSON里的URL会404（同样的
+        # 文件名，同步一次两边都能用，不冲突）
+        if [[ "$ML_PRELABEL" == "1" ]]; then
+            while IFS= read -r -d '' f; do
+                ext="${f##*.}"
+                if [[ "${ext,,}" == "csv" ]]; then
+                    _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
+                else
+                    _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
+                fi
+            done < <(find "$DATA_ROOT/$day" -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+        fi
     done
     echo "  新复制: $n_copied 个，已存在跳过: $n_skip 个"
 fi
