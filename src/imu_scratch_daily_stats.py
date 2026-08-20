@@ -10,7 +10,14 @@ review_to_labelstudio.py里已经验证过的parse_cam()/session_key()，保证
 "IMU几"这个标签在两份脚本之间的含义完全一致。
 
 输入: infer_result_xxx/{day}/_infer/*_infer.json（infer_csv_scratch.py的产出）
-输出: 一份CSV，每行是(日期, IMU)的一天统计量。
+输出: 每天一份CSV，写在 infer_result_xxx/{day}/imu_daily_scratch_stats.csv，
+      每行是这天某个IMU的统计量。按天分开存是为了不互相覆盖——所有天共用
+      root下一个文件的话，跑完8-14再跑8-15就把8-14那份冲掉了。
+
+基线跟输出范围是两回事：--days 只限制"输出哪几天"，基线永远拿root下全部
+已跑过推理的天来算。只读请求那一天的话永远算不出基线（第一次跑8-19就只有
+8-19一天数据）。反过来说，以后补跑了更早的天，把之前的天重跑一次就能拿到
+更新后的、更准的基线。
 
 佩戴时长(valid_wear_hours)按每个session推理窗口的时间跨度近似，同一天同
 一个IMU的多个session累加；不足MIN_GOOD_WEAR_HOURS小时的天标成partial/
@@ -19,14 +26,12 @@ insufficient(data_quality_flag列)——这种天的抓挠次数天然偏低，�
 计入(按数据不足处理，既不重置也不增加连续计数)。
 
 用法:
-  python src/imu_scratch_daily_stats.py \
-    --infer_root infer_result_majority_syn \
-    --output infer_result_majority_syn/imu_daily_scratch_stats.csv
+  # 输出root下所有天，每天各自一份
+  python src/imu_scratch_daily_stats.py --infer_root infer_result_majority_syn
 
-  # 只统计某几天（逗号分隔），默认扫描infer_root下所有天的目录
+  # 只输出某几天（基线仍然用全部天算）
   python src/imu_scratch_daily_stats.py \
-    --infer_root infer_result_majority_syn --days 2026_8_18,2026_8_19 \
-    --output infer_result_majority_syn/imu_daily_scratch_stats.csv
+    --infer_root infer_result_majority_syn --days 2026_8_18,2026_8_19
 """
 import argparse
 import csv
@@ -213,15 +218,24 @@ def _delta_score(current_count, baseline_count, current_dur_min, baseline_dur_mi
 def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
     """返回按(date, imu_label)排序的统计行列表。min_conf/conf_field跟
     ML_PRELABEL那边筛"算不算抓挠"用的是同一个标准，默认conf_mean>=0.8
-    （跟ML_CONF_FIELD/ML_MIN_CONF保持一致，不是conf_max）。"""
+    （跟ML_CONF_FIELD/ML_MIN_CONF保持一致，不是conf_max）。
+
+    days 只筛"输出哪几天"，不限制"读哪几天"——基线是拿这只狗别的日子
+    的数据算中位数，只读请求的那一天的话永远算不出基线（第一次跑8-19
+    就只有8-19一天数据，n_baseline_days恒等于0）。所以不管days传什么，
+    infer_root下所有已经跑过推理的天都要读进来参与基线计算，最后只把
+    请求的那几天的行返回出去。这也意味着：以后补跑了更早的天，之前那
+    几天的基线会自动变准，重跑一次就能拿到更新后的数字。"""
+    day_dirs = []
+    for d in sorted(os.listdir(infer_root)):
+        infer_dir = os.path.join(infer_root, d, "_infer")
+        if os.path.isdir(infer_dir):
+            day_dirs.append((d, infer_dir))
+
     if days:
-        day_dirs = [(d, os.path.join(infer_root, d, "_infer")) for d in days]
-    else:
-        day_dirs = []
-        for d in sorted(os.listdir(infer_root)):
-            infer_dir = os.path.join(infer_root, d, "_infer")
-            if os.path.isdir(infer_dir):
-                day_dirs.append((d, infer_dir))
+        missing = [d for d in days if d not in {day for day, _ in day_dirs}]
+        for d in missing:
+            print(f"[跳过] {os.path.join(infer_root, d, '_infer')} 不存在")
 
     # 先把每个(imu, date)的原始特征都算出来，再统一算基线/持续天数——
     # 基线需要看同一个IMU在别的日子的数据，必须等所有天都读完才能算
@@ -316,6 +330,11 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
                 "persistence_days": persistence_days,
             })
 
+    # 到这里为止全部天都参与了基线计算，现在才按days筛输出
+    if days:
+        wanted = set(days)
+        rows = [r for r in rows if r["date"] in wanted]
+
     rows.sort(key=lambda r: (r["date"], r["imu"]))
     return rows
 
@@ -327,14 +346,19 @@ COLUMNS = [
     "baseline_count", "baseline_duration_min", "n_baseline_days", "persistence_days",
 ]
 
+# 每天一份，落在 {infer_root}/{day}/ 下——不是所有天共用root下的一个文件，
+# 那样跑完一天再跑另一天会直接覆盖掉前一天的结果
+OUTPUT_BASENAME = "imu_daily_scratch_stats.csv"
+
 
 def main():
     parser = argparse.ArgumentParser(description="统计每天每个IMU的抓挠情况，产出C值计算需要的统计量")
     parser.add_argument("--infer_root", required=True,
                         help="推理结果根目录，比如infer_result_majority_syn（下面是{day}/_infer/*_infer.json）")
     parser.add_argument("--days", default="",
-                        help="只统计这几天，逗号分隔，比如2026_8_18,2026_8_19；默认扫描infer_root下所有天")
-    parser.add_argument("--output", required=True, help="输出CSV路径")
+                        help="只输出这几天，逗号分隔，比如2026_8_18,2026_8_19；默认输出infer_root下"
+                             "所有天。注意：不管这里传什么，基线都是拿root下全部已跑过推理的天算的，"
+                             "只是输出被限制在这几天")
     parser.add_argument("--min_conf", type=float, default=0.8,
                         help="只有conf_field>=这个值的抓挠片段才算数（默认0.8，"
                              "跟ML_PRELABEL那边的ML_MIN_CONF保持一致）")
@@ -348,18 +372,29 @@ def main():
 
     if not rows:
         print(f"[警告] 没有统计出任何数据，检查--infer_root/--days是否正确")
+        return
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=COLUMNS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+    # 每天一个文件、落在各自的日期目录下——之前所有天共用root下的一个
+    # 文件，跑完8-14再跑8-15就会把8-14那份直接覆盖掉，只剩最后一次运行
+    # 的结果。按天分开存就不会互相覆盖，各天的统计可以累积下来
+    by_day = {}
+    for row in rows:
+        by_day.setdefault(row["date"], []).append(row)
 
-    days_found = sorted({r["date"] for r in rows})
-    imus_found = sorted({r["imu"] for r in rows})
-    print(f"→ {args.output}  共{len(rows)}行，覆盖{len(days_found)}天({', '.join(days_found)})，"
-          f"{len(imus_found)}个机位({', '.join(imus_found)})")
+    for day in sorted(by_day):
+        day_rows = by_day[day]
+        out_path = os.path.join(args.infer_root, day, OUTPUT_BASENAME)
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=COLUMNS)
+            writer.writeheader()
+            for row in day_rows:
+                writer.writerow(row)
+        imus = sorted({r["imu"] for r in day_rows})
+        n_base = {r["imu"]: r["n_baseline_days"] for r in day_rows}
+        base_note = ("无基线" if all(v == 0 for v in n_base.values())
+                     else f"基线取自{max(n_base.values())}天历史")
+        print(f"→ {out_path}  {len(day_rows)}个机位({', '.join(imus)})，{base_note}")
 
 
 if __name__ == "__main__":

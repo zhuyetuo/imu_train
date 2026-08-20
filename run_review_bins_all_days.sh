@@ -48,9 +48,12 @@
 #                 容易找出漏检但也更容易把噪声算进去，想换回conf_max就显式传这个）
 #   IMU_STATS     传1时，全部天推理完之后额外跑一遍src/imu_scratch_daily_stats.py，
 #                 用ML_MIN_CONF/ML_CONF_FIELD同一套置信度标准筛"算不算抓挠"，统计
-#                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，产出一份
-#                 CSV(RESULT_ROOT/imu_daily_scratch_stats.csv)，供pm_skin_scoring
-#                 网页的「C值计算」标签按日期+IMU读取自动填充（默认0=不生成）
+#                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，每天各产出一份
+#                 CSV(RESULT_ROOT/{day}/imu_daily_scratch_stats.csv)，供pm_skin_scoring
+#                 网页的「C值计算」标签按日期+IMU读取自动填充（默认0=不生成）。
+#                 注意会把RESULT_ROOT下所有已跑过推理的天都重算一遍(不只是这次
+#                 INCLUDE_DAYS的那几天)——基线是拿全部天算的，补跑了新的一天之后
+#                 之前那些天的基线也会跟着变准，顺手一起更新
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
@@ -282,12 +285,11 @@ fi
 if [[ "$IMU_STATS" == "1" ]]; then
     echo ""
     echo "▶ 统计每天每个IMU的抓挠情况（$ML_CONF_FIELD>=$ML_MIN_CONF才算抓挠，供C值计算网页读取）..."
-    stats_csv="$RESULT_ROOT/imu_daily_scratch_stats.csv"
-    days_arg=$(IFS=,; echo "${days[*]}")
+    # 不传--days：本次跑的那几天固然要更新，但基线是拿root下全部天算的，
+    # 补跑了新的一天之后，之前那些天的基线也会跟着变准，顺手一起重算了，
+    # 反正只是读已有的_infer.json，很快
     python src/imu_scratch_daily_stats.py \
         --infer_root "$RESULT_ROOT" \
-        --days "$days_arg" \
-        --output "$stats_csv" \
         --min_conf "$ML_MIN_CONF" \
         --conf_field "$ML_CONF_FIELD"
 fi

@@ -26,6 +26,7 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
     浏览器打开 http://localhost:7860
 """
 import csv
+import glob
 import math
 import os
 import re
@@ -286,7 +287,14 @@ def _c_score_interruption(zn, zd, long_scratch):
 
 
 def compute_c_score(baseline_count, baseline_duration_min, today_count, today_duration_min,
-                    cluster_count, persistence_days, zn, zd, long_scratch):
+                    cluster_count, persistence_days, zn, zd, long_scratch,
+                    has_baseline=True):
+    """has_baseline=False表示这只狗还没有建立个人基线（比如设备刚戴上的
+    第一天、或者之前的天佩戴时长都不达标）。这种情况下"变化幅度"这一项
+    不计分、也不触发红旗——不能把"没有基线"当成"基线是0次"来算：那样
+    今天抓了26次会被算成"相对基线涨了8.67倍"，凭空造出一个>3倍的红旗，
+    直接把这天判成C2，其实根本没有可比的历史数据。其余三项(聚集/持续/
+    中断)本身不依赖基线，照常计分。"""
     # 数字输入框在没填的时候Gradio给的是None，统一按0处理，不报错
     baseline_count = baseline_count or 0
     baseline_duration_min = baseline_duration_min or 0
@@ -297,15 +305,23 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
     zn = zn or 0
     zd = zd or 0
 
-    delta_score, delta_by, delta_ratio = _c_score_delta(
-        baseline_count, baseline_duration_min, today_count, today_duration_min)
-    # 相对基线>3倍直接触发红旗封顶30分——tier表里ratio_min=3.0那档本来就是
-    # 30分，这里再显式判一次是为了在red_flags列表里明确标出"变化幅度"这个
-    # 红旗来源，跟PM文档"红旗信号：4个维度里面标红的最大分值项目"这句话
-    # 对应起来，不是重复计分
-    delta_red_flag = delta_ratio > 3
-    if delta_red_flag:
-        delta_score = 30
+    if has_baseline:
+        delta_score, delta_by, delta_ratio = _c_score_delta(
+            baseline_count, baseline_duration_min, today_count, today_duration_min)
+        # 相对基线>3倍直接触发红旗封顶30分——tier表里ratio_min=3.0那档本来就是
+        # 30分，这里再显式判一次是为了在red_flags列表里明确标出"变化幅度"这个
+        # 红旗来源，跟PM文档"红旗信号：4个维度里面标红的最大分值项目"这句话
+        # 对应起来，不是重复计分
+        delta_red_flag = delta_ratio > 3
+        if delta_red_flag:
+            delta_score = 30
+        delta_note = f"按{delta_by}判定，相对基线比值={delta_ratio:.2f}"
+    else:
+        # 没有基线：这一项不计分也不触发红旗。注意这样算出来的C值会偏低
+        # （最多只剩70分），是"信息不足所以先不下这个结论"，不是"确实没
+        # 涨"——页面上会单独提示，不要拿这天的C值直接跟有基线的天比
+        delta_score, delta_red_flag = 0, False
+        delta_note = "⚠️ 还没有个人基线，这一项暂不计分（不是0分，是没法判定）"
 
     cluster_score, cluster_red_flag = _c_score_cluster(cluster_count)
     persistence_score, persistence_red_flag = _c_score_persistence(persistence_days)
@@ -344,15 +360,21 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
     red_flag_line = (f"\n> 🚩 红旗信号：{'、'.join(red_flags)}，直接判定C2，不看加权总分是否达到50分"
                      if red_flags else "")
 
+    no_baseline_line = ("\n> ⚠️ 这只狗还没有个人基线，「变化幅度」这一项暂不计分，"
+                        "C值上限只有70分，会偏低——这是「信息不足、先不下结论」，"
+                        "不是「确实没变化」，不要直接拿这天的C值跟有基线的天比"
+                        if not has_baseline else "")
+
     breakdown = (
         f"| 打分项 | 得分 | 说明 |\n|---|---|---|\n"
-        f"| 变化幅度(0-30) | {delta_score} | 按{delta_by}判定，相对基线比值={delta_ratio:.2f} |\n"
+        f"| 变化幅度(0-30) | {delta_score} | {delta_note} |\n"
         f"| 聚集程度(0-20) | {cluster_score} | 今日聚集时段数={cluster_count} |\n"
         f"| 持续程度(0-20) | {persistence_score} | 连续天数={persistence_days} |\n"
         f"| 中断影响(0-30) | {interrupt_score} | 普通抓挠ZN={zn}次，打断睡眠ZD={zd}次，"
         f"长时间抓挠={'是' if long_scratch else '否'} |\n"
         f"| **C值合计** | **{total}** | → **{tier}** |\n"
         f"{red_flag_line}"
+        f"{no_baseline_line}"
     )
     return total, tier, breakdown
 
@@ -507,9 +529,10 @@ def export_records_csv():
     return RECORDS_CSV
 
 
-# ── IMU统计数据导入：读每个根目录下的imu_daily_scratch_stats.csv（
+# ── IMU统计数据导入：读 {root}/{day}/imu_daily_scratch_stats.csv（
 # src/imu_scratch_daily_stats.py / run_review_bins_all_days.sh的IMU_STATS=1
-# 产出的那份），供「C值计算」标签按(天,机位)选择自动填充。
+# 产出的那份，每天一份、落在各自的日期目录下），供「C值计算」标签按
+# (天,机位)选择自动填充。
 #
 # 不是现场扫描/现算全部_infer.json——之前那样做会把root下所有已经跑过
 # ML_PRELABEL的天都翻出来，哪怕IMU_STATS=1只对某一天(比如8-19)跑过，
@@ -548,11 +571,15 @@ def _parse_bool(value) -> bool:
 
 
 def scan_imu_roots(roots_str: str):
-    """扫描输入框里逗号分隔的每个根目录，找每个根目录下的
-    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份），只有这份文件
-    里出现过的(天,机位)才会列出来——没跑过统计的天不会被误当成"有数据"。
-    返回(所有行的列表, 下拉选项更新, 状态提示)。目录/文件不存在或读取
-    出错的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过了哪些。"""
+    """扫描输入框里逗号分隔的每个根目录，找里面每个日期目录下的
+    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份，每天一份、
+    落在各自的日期目录里）。只有真的存在这份文件的天才会列出来——
+    没跑过统计的天不会被误当成"有数据"。
+
+    返回(所有行的列表, 下拉选项更新, 状态提示)。目录不存在/一个统计
+    文件都没有的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过
+    了哪些；单个日期的文件读取出错只跳过那一天，不影响同一个root下的
+    其它天。"""
     roots = [r.strip() for r in (roots_str or "").split(",") if r.strip()]
     if not roots:
         return [], gr.update(choices=[], value=None), "❌ 请先填至少一个根目录"
@@ -560,22 +587,27 @@ def scan_imu_roots(roots_str: str):
     all_rows = []
     skipped = []
     for root in roots:
-        stats_csv = os.path.join(root, STATS_CSV_NAME)
-        if not os.path.exists(stats_csv):
-            skipped.append(f"{root}（没有{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
+        if not os.path.isdir(root):
+            skipped.append(f"{root}（目录不存在）")
             continue
-        try:
-            with open(stats_csv, encoding="utf-8-sig", newline="") as f:
-                rows = list(csv.DictReader(f))
-        except Exception as e:
-            skipped.append(f"{root}（读取{STATS_CSV_NAME}出错：{e}）")
+        # 每天一份，在各自的日期目录下——不是root下一个总的文件
+        stats_csvs = sorted(glob.glob(os.path.join(root, "*", STATS_CSV_NAME)))
+        if not stats_csvs:
+            skipped.append(f"{root}（没有找到任何{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
             continue
         root_label = os.path.basename(root.rstrip("/\\")) or root
-        for row in rows:
-            row = dict(row)
-            row["root"] = root
-            row["root_label"] = root_label
-            all_rows.append(row)
+        for stats_csv in stats_csvs:
+            try:
+                with open(stats_csv, encoding="utf-8-sig", newline="") as f:
+                    rows = list(csv.DictReader(f))
+            except Exception as e:
+                skipped.append(f"{stats_csv}（读取出错：{e}）")
+                continue
+            for row in rows:
+                row = dict(row)
+                row["root"] = root
+                row["root_label"] = root_label
+                all_rows.append(row)
 
     if not all_rows:
         msg = "❌ 没有扫描到任何天/机位的数据"
@@ -603,6 +635,19 @@ def preview_stats_row(rows: list, label: str) -> str:
     warn = ("\n\n> ⚠️ 这天佩戴时长不足12小时（数据不完整），抓挠次数天然会偏低，"
             "不建议直接拿这天的数据定C档位"
             if flag and flag != "good" else "")
+
+    # 没有历史基线时不显示"基线0次"这种误导性数字——0次的意思是"基线确实
+    # 是0"，跟"还没有基线"完全是两回事，后者不能拿来算相对倍数
+    n_base = int(float(match.get("n_baseline_days", 0) or 0))
+    if n_base > 0:
+        baseline_cell = (f"{match['baseline_count']}次 / "
+                        f"{match['baseline_duration_min']}分钟（{n_base}天历史）")
+        no_baseline_warn = ""
+    else:
+        baseline_cell = "— 还没有基线"
+        no_baseline_warn = ("\n\n> ⚠️ 这天没有可用的历史基线（第一天，或之前的天佩戴时长"
+                           "都不达标）。应用到「C值计算」时会自动取消勾选「已经有个人"
+                           "基线」，「变化幅度」这一项不计分，C值上限只有70分")
     return (
         f"| 字段 | 值 |\n|---|---|\n"
         f"| 佩戴时长 | {wear}小时（{flag}） |\n"
@@ -613,10 +658,9 @@ def preview_stats_row(rows: list, label: str) -> str:
         f"| 普通抓挠ZN（没打断睡眠的） | {match['zn']}次 |\n"
         f"| 打断睡眠ZD | {match['zd']}次 |\n"
         f"| 长时间抓挠 | {match['long_scratch']} |\n"
-        f"| 基线次数/时长（自动估算，仅供参考） | {match['baseline_count']}次 / "
-        f"{match['baseline_duration_min']}分钟（{match['n_baseline_days']}天历史） |\n"
+        f"| 基线次数/时长（自动估算，仅供参考） | {baseline_cell} |\n"
         f"| 持续天数（自动估算，仅供参考） | {match['persistence_days']} |\n"
-        f"{warn}"
+        f"{warn}{no_baseline_warn}"
     )
 
 
@@ -625,16 +669,27 @@ def apply_stats_to_c_calc(rows: list, label: str):
     这个日期同步进「填写问答」标签的填表日期——用户要求"选了8-19，问答
     那边的日期也自动一起选择"，不用同一个日期在两个标签各选一遍。"""
     if not rows or not label:
-        return (None, None, None, None, None, None, None, None, False,
+        return (None, None, None, None, None, None, None, None, False, True,
                 gr.update(), "❌ 请先扫描根目录，并选好一个(天,机位)")
     match = next((r for r in rows if _row_label(r) == label), None)
     if not match:
-        return (None, None, None, None, None, None, None, None, False,
+        return (None, None, None, None, None, None, None, None, False, True,
                 gr.update(), f"❌ 没找到 {label} 对应的数据")
+
+    # n_baseline_days==0 表示这天没有可用的历史基线（第一天，或者之前的天
+    # 佩戴时长都不达标被排除掉了）——自动帮用户取消「已经有个人基线」的
+    # 勾选，避免把统计脚本填的baseline_count=0当成"基线真的是0次"去算，
+    # 那样会凭空造出一个巨大的相对倍数和假红旗
+    n_baseline_days = int(float(match.get("n_baseline_days", 0) or 0))
+    has_baseline_val = n_baseline_days > 0
 
     iso_date = _to_iso_date(match["date"])
     status = (f"✅ 已把 {match['date']}（{match['imu']}）的统计数据填进「C值计算」标签，"
              f"「填写问答」标签的填表日期已同步为 {iso_date}")
+    if not has_baseline_val:
+        status += ("\n\n⚠️ 这天没有可用的历史基线（第一天，或之前的天佩戴时长都不达标），"
+                  "「已经有个人基线」已自动取消勾选，「变化幅度」这一项不计分——"
+                  "C值上限只有70分，会偏低，别直接拿去跟有基线的天比")
     if match.get("data_quality_flag") and match["data_quality_flag"] != "good":
         status += (f"\n\n⚠️ 注意：这天佩戴时长只有{match.get('valid_wear_hours', '?')}小时"
                   f"（不足12小时），抓挠次数天然会偏低，算出来的C值会低估，"
@@ -644,6 +699,7 @@ def apply_stats_to_c_calc(rows: list, label: str):
         float(match["event_count"]), float(match["total_duration_min"]),
         float(match["cluster_count"]), float(match["persistence_days"]),
         float(match["zn"]), float(match["zd"]), _parse_bool(match["long_scratch"]),
+        has_baseline_val,
         gr.update(value=iso_date), status,
     )
 
@@ -760,12 +816,13 @@ def build_app():
             with gr.Tab("导入IMU统计数据"):
                 gr.Markdown(
                     "# 导入IMU统计数据\n"
-                    "填好推理结果根目录（逗号分隔可以填多个），点\"扫描\"——会去每个根"
-                    "目录下找`imu_daily_scratch_stats.csv`（`run_review_bins_all_days.sh`"
-                    "加`IMU_STATS=1`那次批处理跑完之后产出的那份，或者单独跑"
-                    "`src/imu_scratch_daily_stats.py`），只有这份文件里出现过的(天,机位)"
-                    "才会列进下面的下拉框——没跑过统计的天不会被误当成\"有数据\"。选好一个，"
-                    "点\"应用\"一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "填好推理结果根目录（逗号分隔可以填多个），点「扫描」——会去每个根"
+                    "目录下的**每个日期目录**里找`imu_daily_scratch_stats.csv`"
+                    "（`run_review_bins_all_days.sh`加`IMU_STATS=1`那次批处理跑完之后"
+                    "产出的，每天一份、存在各自的日期目录下，所以跑多天不会互相覆盖；"
+                    "也可以单独跑`src/imu_scratch_daily_stats.py`）。只有真的存在这份"
+                    "文件的天才会列进下面的下拉框——没跑过统计的天不会被误当成「有数据」。"
+                    "选好一个，点「应用」一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
                     "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
@@ -804,7 +861,19 @@ def build_app():
                     "的是结构化统计量输入，不需要接原始抓挠事件时间戳。"
                 )
 
-                gr.Markdown("## 一、变化幅度（0-30分）")
+                gr.Markdown(
+                    "## 一、变化幅度（0-30分）\n"
+                    "这一项是拿今天跟这只狗**自己的历史基线**比，所以第一天/历史"
+                    "数据不够的时候没法算——这种情况把下面的「已经有个人基线」"
+                    "取消勾选，这一项就不计分、也不会触发红旗。\n\n"
+                    "⚠️ 不要把「没有基线」当成「基线是0次」填进去：那样今天抓26次"
+                    "会被算成涨了8.67倍，凭空造出一个>3倍的红旗直接判C2，其实根本"
+                    "没有可比的历史数据。"
+                )
+                has_baseline = gr.Checkbox(
+                    label="已经有个人基线（取消勾选=还没有基线，变化幅度这一项不计分）",
+                    value=True,
+                )
                 with gr.Row():
                     baseline_count = gr.Number(label="基线次数（次/24h）", minimum=0)
                     baseline_duration_min = gr.Number(label="基线总时长（分钟/24h）", minimum=0)
@@ -854,19 +923,22 @@ def build_app():
 
                 c_calc_btn = gr.Button("计算C值", variant="primary")
                 c_inputs = [baseline_count, baseline_duration_min, today_count, today_duration_min,
-                           cluster_count, persistence_days, zn, zd, long_scratch]
+                           cluster_count, persistence_days, zn, zd, long_scratch, has_baseline]
                 c_outputs = [c_score_output, c_tier_output, c_breakdown_md]
                 c_calc_btn.click(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
                 for inp in c_inputs:
                     inp.change(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
 
                 # 「导入IMU统计数据」标签选好(天,机位)后点"应用"，直接把这几个
-                # 输入框填上，同时把「填写问答」标签的填表日期也同步过去
+                # 输入框填上，同时把「填写问答」标签的填表日期也同步过去。
+                # has_baseline也一起带过来——统计CSV里的n_baseline_days==0就
+                # 表示这天没有可用的历史基线，自动帮用户取消勾选，不用他自己
+                # 去判断"这天到底有没有基线"
                 apply_stats_btn.click(
                     fn=apply_stats_to_c_calc,
                     inputs=[stats_rows_state, imu_day_select],
                     outputs=[baseline_count, baseline_duration_min, today_count, today_duration_min,
-                            cluster_count, persistence_days, zn, zd, long_scratch,
+                            cluster_count, persistence_days, zn, zd, long_scratch, has_baseline,
                             fill_date, apply_status_md],
                 )
 
