@@ -58,10 +58,16 @@ def _parse_ts(ts_str):
     return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
 
 
-def _load_day_events(infer_dir):
+def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
     """返回 {imu_label: [(start_dt, end_dt), ...]}，一个session下每个机位
     自己的抓挠片段（跟review_to_labelstudio.py的build_tasks_from_infer_ml
-    分组方式完全一致：按csv_basename里的camN分组）。"""
+    分组方式完全一致：按csv_basename里的camN分组）。
+
+    只保留conf_field(默认conf_mean，跟--ml_conf_field/ML_CONF_FIELD一个
+    语义)>=min_conf的片段才算"抓挠"计入统计——不是模型报出来的每一段
+    都算数，跟ML_PRELABEL那边"只标注高置信度片段"是同一个筛选标准，两边
+    置信度阈值不一致的话，网页上看到的C值统计跟Label Studio里实际标注出
+    来的片段对不上，容易confusing。"""
     infer_jsons = glob.glob(os.path.join(infer_dir, "**", "*_infer.json"), recursive=True)
     infer_jsons += glob.glob(os.path.join(infer_dir, "*_infer.json"))
     infer_jsons = sorted(set(infer_jsons))
@@ -78,6 +84,8 @@ def _load_day_events(infer_dir):
 
         for seg in data.get("scratch_segments", []):
             if not seg.get("start_ts") or not seg.get("end_ts"):
+                continue
+            if seg.get(conf_field, 0.0) < min_conf:
                 continue
             try:
                 start = _parse_ts(seg["start_ts"])
@@ -169,8 +177,10 @@ def _delta_score(current_count, baseline_count, current_dur_min, baseline_dur_mi
     return max(one(current_count, baseline_count, False), one(current_dur_min, baseline_dur_min, True))
 
 
-def compute_stats(infer_root, days=None):
-    """返回按(date, imu_label)排序的统计行列表。"""
+def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
+    """返回按(date, imu_label)排序的统计行列表。min_conf/conf_field跟
+    ML_PRELABEL那边筛"算不算抓挠"用的是同一个标准，默认conf_mean>=0.8
+    （跟ML_CONF_FIELD/ML_MIN_CONF保持一致，不是conf_max）。"""
     if days:
         day_dirs = [(d, os.path.join(infer_root, d, "_infer")) for d in days]
     else:
@@ -187,7 +197,7 @@ def compute_stats(infer_root, days=None):
         if not os.path.isdir(infer_dir):
             print(f"[跳过] {infer_dir} 不存在")
             continue
-        events_by_imu = _load_day_events(infer_dir)
+        events_by_imu = _load_day_events(infer_dir, min_conf=min_conf, conf_field=conf_field)
         for imu_label, events in events_by_imu.items():
             feat = _day_features(events)
             raw.setdefault(imu_label, {})[day] = feat
@@ -269,10 +279,16 @@ def main():
     parser.add_argument("--days", default="",
                         help="只统计这几天，逗号分隔，比如2026_8_18,2026_8_19；默认扫描infer_root下所有天")
     parser.add_argument("--output", required=True, help="输出CSV路径")
+    parser.add_argument("--min_conf", type=float, default=0.8,
+                        help="只有conf_field>=这个值的抓挠片段才算数（默认0.8，"
+                             "跟ML_PRELABEL那边的ML_MIN_CONF保持一致）")
+    parser.add_argument("--conf_field", default="conf_mean", choices=["conf_max", "conf_mean"],
+                        help="用哪个置信度字段判断（默认conf_mean，不是conf_max——"
+                             "跟ML_CONF_FIELD保持一致）")
     args = parser.parse_args()
 
     days = [d.strip() for d in args.days.split(",") if d.strip()] or None
-    rows = compute_stats(args.infer_root, days)
+    rows = compute_stats(args.infer_root, days, min_conf=args.min_conf, conf_field=args.conf_field)
 
     if not rows:
         print(f"[警告] 没有统计出任何数据，检查--infer_root/--days是否正确")
