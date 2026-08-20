@@ -3,11 +3,11 @@
 需要的统计量(次数/时长/聚集时段数/持续天数/中断次数等)，供那边的Web页面
 直接读取、按日期+IMU选择自动填充，不用每次手动一个个数字去数。
 
-跟review_to_labelstudio.py用的是同一套"camN=IMU{N}"命名约定(--ml_full_video
-模式那边，见其build_tasks_from_infer_ml)——不是extract_clips.py那套"cam是
-固定机位、imu是狗自己的编号、两者不对应"的旧约定，这里直接复用
-review_to_labelstudio.py里已经验证过的parse_cam()/session_key()，保证
-"IMU几"这个标签在两份脚本之间的含义完全一致。
+"IMU几"按文件名里的 _imu{N} 取（复用extract_clips.py的extract_imu_label），
+不是按 cam{N} —— 机位号跟狗身上的IMU编号没有对应关系：房间固定就2个机位，
+但可以同时挂4条狗，同一个cam1下面会有 cam1_imu1 / cam1_imu3 / cam1_imu4
+三条不同狗的CSV。按cam分组会把好几条狗的数据合并成一条，佩戴时长和抓挠
+次数都会翻好几倍（实测8-14那天IMU1的佩戴时长算出40.7小时，一天才24小时）。
 
 输入: infer_result_xxx/{day}/_infer/*_infer.json（infer_csv_scratch.py的产出）
 输出: 每天一份CSV，写在 infer_result_xxx/{day}/imu_daily_scratch_stats.csv，
@@ -20,7 +20,8 @@ review_to_labelstudio.py里已经验证过的parse_cam()/session_key()，保证
 更新后的、更准的基线。
 
 佩戴时长(valid_wear_hours)按每个session推理窗口的时间跨度近似，同一天同
-一个IMU的多个session累加；不足MIN_GOOD_WEAR_HOURS小时的天标成partial/
+一个IMU的多个session取区间并集（不是累加——录制时段会重叠，累加会算出
+超过24小时）；不足MIN_GOOD_WEAR_HOURS小时的天标成partial/
 insufficient(data_quality_flag列)——这种天的抓挠次数天然偏低，不是狗不痒
 了，是没多少数据可看，所以这些天不参与基线中位数、当天的"持续天数"也不
 计入(按数据不足处理，既不重置也不增加连续计数)。
@@ -37,13 +38,12 @@ import argparse
 import csv
 import glob
 import os
-import re
 import sys
 from datetime import datetime, timedelta
 from statistics import median
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from review_to_labelstudio import parse_cam, session_key  # noqa: E402
+from extract_clips import extract_imu_label  # noqa: E402
 
 import json
 
@@ -75,9 +75,8 @@ def _parse_ts(ts_str):
 
 
 def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
-    """返回 {imu_label: [(start_dt, end_dt), ...]}，一个session下每个机位
-    自己的抓挠片段（跟review_to_labelstudio.py的build_tasks_from_infer_ml
-    分组方式完全一致：按csv_basename里的camN分组）。
+    """返回 ({imu_label: [(start_dt, end_dt), ...]}, {imu_label: 佩戴秒数})，
+    按csv文件名里的 _imu{N} 分组（不是camN，见模块开头的说明）。
 
     只保留conf_field(默认conf_mean，跟--ml_conf_field/ML_CONF_FIELD一个
     语义)>=min_conf的片段才算"抓挠"计入统计——不是模型报出来的每一段
@@ -89,24 +88,28 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
     infer_jsons = sorted(set(infer_jsons))
 
     events_by_imu = {}
-    wear_seconds_by_imu = {}
+    wear_spans_by_imu = {}
     for path in infer_jsons:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         csv_basename = data.get("csv_basename", os.path.basename(path))
-        cam = parse_cam(csv_basename) or "cam1"
-        m = re.search(r"\d+", cam)
-        cam_num = int(m.group()) if m else 1
-        imu_label = f"IMU{cam_num}"
+        # 按 _imu{N} 取，不是按 cam{N}——同一个机位下会挂多条狗的IMU
+        # (cam1_imu1 / cam1_imu3 / cam1_imu4)，按cam分组会把它们合并成一条
+        imu_label = extract_imu_label(os.path.splitext(csv_basename)[0])
 
         # 佩戴时长：这个session(csv文件)有推理覆盖的时间跨度=第一个窗口到
         # 最后一个窗口的时间差，近似当作这段时间设备实际戴着(每个窗口本身
-        # 只有1-2秒，相对小时级的佩戴时长可以忽略不计)。同一天同一个IMU
-        # 可能有多个session(比如设备重启过)，各自的跨度累加。这不是精确的
-        # "真的贴身佩戴"判断(比如摘下来放在旁边但设备还在采集也会被算进
-        # 去)，只是"这段时间有数据"的近似，跟scratch_burden.py要求外部
-        # 单独传入真实佩戴时长表是同一个概念，这里没有更精确的信号源，
-        # 用推理窗口覆盖范围顶上
+        # 只有1-2秒，相对小时级的佩戴时长可以忽略不计)。这不是精确的"真的
+        # 贴身佩戴"判断(比如摘下来放在旁边但设备还在采集也会被算进去)，
+        # 只是"这段时间有数据"的近似，跟scratch_burden.py要求外部单独传入
+        # 真实佩戴时长表是同一个概念，这里没有更精确的信号源，用推理窗口
+        # 覆盖范围顶上。
+        #
+        # 各session的跨度先收集起来，最后取区间并集再算总时长，不是直接
+        # 累加——同一天同一个IMU的录制时段是会重叠的(实际数据里有
+        # ..._100000446_... 和 ..._100117864_... 这种只差1分钟就又起一段
+        # 录制的情况)，直接累加会把重叠部分重复计算，算出超过24小时的
+        # 佩戴时长
         windows = data.get("windows", [])
         window_ts = []
         for w in windows:
@@ -117,8 +120,7 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
             except ValueError:
                 continue
         if window_ts:
-            span_sec = (max(window_ts) - min(window_ts)).total_seconds()
-            wear_seconds_by_imu[imu_label] = wear_seconds_by_imu.get(imu_label, 0.0) + span_sec
+            wear_spans_by_imu.setdefault(imu_label, []).append((min(window_ts), max(window_ts)))
 
         for seg in data.get("scratch_segments", []):
             if not seg.get("start_ts") or not seg.get("end_ts"):
@@ -132,7 +134,25 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
                 continue
             events_by_imu.setdefault(imu_label, []).append((start, end))
 
+    wear_seconds_by_imu = {imu: _union_seconds(spans)
+                           for imu, spans in wear_spans_by_imu.items()}
     return events_by_imu, wear_seconds_by_imu
+
+
+def _union_seconds(spans):
+    """[(start, end), ...] → 区间并集的总秒数。重叠的录制时段只算一次，
+    不重复计入——同一天同一个IMU经常有重叠的录制片段，直接把各段时长
+    加起来会算出超过24小时的"佩戴时长"。"""
+    if not spans:
+        return 0.0
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return sum((end - start).total_seconds() for start, end in merged)
 
 
 def _cluster_count(starts):
