@@ -325,9 +325,6 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
 
     for sess in sorted(sessions):
         cams_data = sessions[sess]
-        main_cam  = "cam1" if "cam1" in cams_data else next(iter(cams_data))
-        main_data = cams_data[main_cam]
-        main_csv  = main_data["csv_basename"]
 
         cam_nums_present = {int(re.search(r"\d+", c).group()): c for c in cams_data}
         if cam_mode == "auto":
@@ -335,55 +332,71 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         else:
             slot_count = int(cam_mode)
 
-        task_data = {"csv1": csv_url(main_csv, csv_url_prefix)}
+        # video1..videoN 是这个session共享的，跟具体用哪个IMU的CSV无关，
+        # 所以只算一次，下面每个IMU的task都复用同一份
+        video_urls = {}
         for n in range(1, slot_count + 1):
             cam_key = f"cam{n}"
             if cam_key in cams_data:
                 cam_stem = os.path.splitext(cams_data[cam_key]["csv_basename"])[0]
-                task_data[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
+                video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
             else:
-                task_data[f"video{n}"] = ""
+                video_urls[f"video{n}"] = ""
 
-        scratch_segs = main_data.get("scratch_segments", [])
-        # 只保留置信度达标的片段——不是"标出来但打个低分标签"，是这批
-        # 片段压根不出现在标注结果里，跟clips模式的--min_conf是同一个
-        # "额外筛一份高置信度子集"的思路，只是这里作用在整段视频的标注
-        # 内容上，不是文件层面的筛选
-        kept = [seg for seg in scratch_segs
-               if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
-        results = [make_annotation(seg["start_ts"], seg["end_ts"], label_name) for seg in kept]
+        # 每个机位(IMU)自己的CSV、自己的检测结果各生成一个task，不能只用
+        # cam1(或sessions里随便挑的第一个)代表整个session——IMU2/IMU3有
+        # 自己独立的CSV和抓挠检测，混在一起或者被cam1顶掉都会导致复查的
+        # 时候看不到那两路机位的检测结果
+        for cam_num in sorted(cam_nums_present):
+            cam_key = cam_nums_present[cam_num]
+            cam_data = cams_data[cam_key]
+            cam_csv = cam_data["csv_basename"]
+            imu_label = f"IMU{cam_num}"
 
-        # 不管results是不是空都生成task——让复查人能看到全部录制数据，
-        # 用来核查漏检，不是只有命中的才值得导出。但"没有达标片段"跟
-        # "标注了、标注内容是空"是两回事：没检测到就是没有标注，
-        # annotations给空列表(未标注状态)，不能塞一个"result为空的
-        # annotation"进去冒充"已经标注完、判定为无"，那样Label Studio
-        # 里会显示成"已完成"，反而让人误以为这段已经复查过，不会再点
-        # 开看，跟"提醒核查漏检"这个目的正好相反。
-        if results:
-            note = f"模型ML自动检测，{conf_field}>={min_conf}，共{len(results)}段（原始{len(scratch_segs)}段中筛出）"
-            annotations = [{
-                "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
-                "result": results,
-            }]
-        elif scratch_segs:
-            note = (f"模型记录到{len(scratch_segs)}段疑似抓挠，但{conf_field}都低于{min_conf}阈值，"
-                   f"未生成标注，请人工核实是否漏检")
-            annotations = []
-        else:
-            note = "模型ML完全没有检测到抓挠片段，未生成标注，请人工核实是否漏检"
-            annotations = []
-        tasks.append({
-            "id": task_id,
-            "data": task_data,
-            "annotations": annotations,
-            "meta": {
-                "session": sess, "csv_file": main_csv,
-                "labeled_by": "ML",
-                "note": note,
-            }
-        })
-        task_id += 1
+            task_data = {"csv1": csv_url(cam_csv, csv_url_prefix)}
+            task_data.update(video_urls)
+
+            scratch_segs = cam_data.get("scratch_segments", [])
+            # 只保留置信度达标的片段——不是"标出来但打个低分标签"，是这批
+            # 片段压根不出现在标注结果里，跟clips模式的--min_conf是同一个
+            # "额外筛一份高置信度子集"的思路，只是这里作用在整段视频的标注
+            # 内容上，不是文件层面的筛选
+            kept = [seg for seg in scratch_segs
+                   if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
+            results = [make_annotation(seg["start_ts"], seg["end_ts"], label_name) for seg in kept]
+
+            # 不管results是不是空都生成task——让复查人能看到全部录制数据，
+            # 用来核查漏检，不是只有命中的才值得导出。但"没有达标片段"跟
+            # "标注了、标注内容是空"是两回事：没检测到就是没有标注，
+            # annotations给空列表(未标注状态)，不能塞一个"result为空的
+            # annotation"进去冒充"已经标注完、判定为无"，那样Label Studio
+            # 里会显示成"已完成"，反而让人误以为这段已经复查过，不会再点
+            # 开看，跟"提醒核查漏检"这个目的正好相反。
+            if results:
+                note = f"模型ML自动检测，{conf_field}>={min_conf}，共{len(results)}段（原始{len(scratch_segs)}段中筛出）"
+                annotations = [{
+                    "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
+                    "result": results,
+                }]
+            elif scratch_segs:
+                note = (f"模型记录到{len(scratch_segs)}段疑似抓挠，但{conf_field}都低于{min_conf}阈值，"
+                       f"未生成标注，请人工核实是否漏检")
+                annotations = []
+            else:
+                note = "模型ML完全没有检测到抓挠片段，未生成标注，请人工核实是否漏检"
+                annotations = []
+            tasks.append({
+                "id": task_id,
+                "data": task_data,
+                "annotations": annotations,
+                "meta": {
+                    "session": sess, "csv_file": cam_csv,
+                    "imu_label": imu_label,
+                    "labeled_by": "ML",
+                    "note": note,
+                }
+            })
+            task_id += 1
 
     return tasks
 
@@ -470,12 +483,20 @@ def main():
         base, ext = os.path.splitext(args.output)
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
-        out_path = f"{base}_full_ml{ext}"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(ml_tasks, f, ensure_ascii=False, indent=2)
-        n_hit = sum(1 for t in ml_tasks if t["annotations"])
-        print(f"  → {out_path}  （{len(ml_tasks)} 个任务，其中{n_hit}个有达标片段、"
-              f"{len(ml_tasks) - n_hit}个模型未检出，含全部录制数据供核查漏检）")
+        # 按imu_label拆成多个文件——每个IMU自己的CSV/检测结果各自一份，
+        # 不要混在一个文件里互相顶掉
+        by_imu = {}
+        for t in ml_tasks:
+            by_imu.setdefault(t["meta"]["imu_label"], []).append(t)
+
+        for imu_label in sorted(by_imu):
+            sub_tasks = by_imu[imu_label]
+            out_path = f"{base}_full_ml_{imu_label}{ext}"
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(sub_tasks, f, ensure_ascii=False, indent=2)
+            n_hit = sum(1 for t in sub_tasks if t["annotations"])
+            print(f"  → {out_path}  （{len(sub_tasks)} 个任务，其中{n_hit}个有达标片段、"
+                  f"{len(sub_tasks) - n_hit}个模型未检出，含全部录制数据供核查漏检）")
         return
 
     if args.use_clips:
