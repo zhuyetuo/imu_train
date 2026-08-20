@@ -293,6 +293,114 @@ def build_tasks_from_infer(infer_jsons, csv_url_prefix, video_url_prefix,
     return tasks
 
 
+# ── 模式 3：全录制文件 + 高置信度自动预标注(标注人=ML) ───────────────────────
+
+def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, label_name,
+                              min_conf=0.8, conf_field="conf_max", cam_mode="auto"):
+    """
+    在原始完整录制视频上直接生成"模型预标注"任务，不裁剪clip：
+      - 只保留置信度(conf_field，默认conf_max)>=min_conf的抓挠片段，其余
+        片段不出现在结果里(不是标成"低置信度"，是直接不标注)
+      - 机位处理跟build_tasks_from_clips一样支持cam_mode(auto/2/3)
+      - 每个session一个task，"result"复用跟其他模式相同的
+        timeserieslabels格式，具体挂在predictions还是annotations字段
+        由调用方决定(见_as_predictions/_as_annotations)，这个函数只
+        负责算出"这个session有哪些高置信度片段"，不关心最终要以哪种
+        身份导入Label Studio
+    """
+    sessions = {}
+    for infer_path in sorted(infer_jsons):
+        with open(infer_path, encoding="utf-8") as f:
+            data = json.load(f)
+        csv_basename = data["csv_basename"]
+        sess = session_key(csv_basename)
+        cam  = parse_cam(csv_basename) or "cam1"
+        sessions.setdefault(sess, {})[cam] = data
+
+    tasks = []
+    task_id = 1
+
+    for sess in sorted(sessions):
+        cams_data = sessions[sess]
+        main_cam  = "cam1" if "cam1" in cams_data else next(iter(cams_data))
+        main_data = cams_data[main_cam]
+        main_csv  = main_data["csv_basename"]
+
+        cam_nums_present = {int(re.search(r"\d+", c).group()): c for c in cams_data}
+        slot_count = max(cam_nums_present) if cam_mode == "auto" else int(cam_mode)
+        if cam_mode == "auto":
+            slot_count = max(cam_nums_present) if cam_nums_present else 1
+
+        task_data = {"csv1": csv_url(main_csv, csv_url_prefix)}
+        for n in range(1, slot_count + 1):
+            cam_key = f"cam{n}"
+            if cam_key in cams_data:
+                cam_stem = os.path.splitext(cams_data[cam_key]["csv_basename"])[0]
+                task_data[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
+            else:
+                task_data[f"video{n}"] = ""
+
+        scratch_segs = main_data.get("scratch_segments", [])
+        # 只保留置信度达标的片段——不是"标出来但打个低分标签"，是这批
+        # 片段压根不出现在标注结果里，跟clips模式的--min_conf是同一个
+        # "额外筛一份高置信度子集"的思路，只是这里作用在整段视频的标注
+        # 内容上，不是文件层面的筛选
+        kept = [seg for seg in scratch_segs
+               if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
+        results = [make_annotation(seg["start_ts"], seg["end_ts"], label_name) for seg in kept]
+
+        if not results:
+            continue
+
+        tasks.append({
+            "id": task_id,
+            "data": task_data,
+            "_results": results,  # 由_as_predictions/_as_annotations接手，转成最终字段
+            "meta": {
+                "session": sess, "csv_file": main_csv,
+                "labeled_by": "ML",
+                "note": f"模型ML自动检测，{conf_field}>={min_conf}，共{len(results)}段（原始{len(scratch_segs)}段中筛出）",
+            }
+        })
+        task_id += 1
+
+    return tasks
+
+
+def _as_predictions(tasks: list) -> list:
+    """把_results包成Label Studio的predictions字段——官方支持的"模型
+    预测"机制，model_version标"ML"，语义上最准确(这就是模型输出，不是
+    人工标注)，导入不挑Label Studio版本/用户配置，最保险。缺点：任务
+    列表里不算"已完成标注"，需要人工点开确认(Accept)才会转成正式标注。
+    """
+    out = []
+    for t in tasks:
+        t2 = {k: v for k, v in t.items() if k != "_results"}
+        t2["predictions"] = [{"model_version": "ML", "result": t["_results"]}]
+        t2["annotations"] = []
+        out.append(t2)
+    return out
+
+
+def _as_annotations(tasks: list) -> list:
+    """把_results包成annotations字段，completed_by标成"ML"这个身份——
+    效果是任务列表直接显示"已标注"，标注人一栏能看到ML。风险：
+    completed_by的具体JSON结构(email/first_name这种对象形式，还是纯
+    整数user_id)认不认，跟目标Label Studio实例的版本/配置有关，需要
+    实际导入验证一次；如果对象形式不认，可能需要改成一个已存在的ML
+    专用账号的整数user_id。
+    """
+    out = []
+    for t in tasks:
+        t2 = {k: v for k, v in t.items() if k != "_results"}
+        t2["annotations"] = [{
+            "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
+            "result": t["_results"],
+        }]
+        out.append(t2)
+    return out
+
+
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -339,9 +447,60 @@ def main():
                              "阈值，逗号分隔，比如'0.7,0.9'会各自生成一份。仅"
                              "--use_clips模式生效（bin这个字段只有clips模式的task"
                              "才有）")
+    parser.add_argument("--ml_full_video", action="store_true",
+                        help="独立的第三种模式(跟--use_clips/默认全录制模式不冲突，"
+                             "会额外生成两份文件，不影响另外两种模式的输出)：在原始"
+                             "完整录制视频上直接标注模型检测到的高置信度抓挠片段，"
+                             "不裁剪clip，标注人标成'ML'，用来区分这批是模型自动"
+                             "预标注的，不是人工标的。--infer_dir要指向包含"
+                             "*_infer.json的目录(通常是out_dir/_infer)。因为"
+                             "Label Studio的'标注人是ML'具体用predictions字段还是"
+                             "annotations字段实现，效果因版本/配置而异(还没验证过)，"
+                             "会同时生成{output去掉.json}_full_ml_predictions.json"
+                             "(model_version=ML，官方模型预测机制，最保险但任务列表"
+                             "不算'已标注')和{output去掉.json}_full_ml_annotations.json"
+                             "(completed_by=ML，任务列表直接显示已标注，但completed_by"
+                             "这个字段的具体格式认不认要实际导入验证)两份，自己试哪个"
+                             "在你的Label Studio实例上显示「标注人=ML」符合预期就用哪个")
+    parser.add_argument("--ml_min_conf", type=float, default=0.8,
+                        help="--ml_full_video模式下，只标注置信度>=这个值的抓挠片段"
+                             "（默认0.8，跟--min_conf是两回事：--min_conf是给clips"
+                             "模式按bin下界筛选任务文件用的，这个是给--ml_full_video"
+                             "模式筛选具体标注哪些片段用的）")
+    parser.add_argument("--ml_conf_field", default="conf_max", choices=["conf_max", "conf_mean"],
+                        help="--ml_full_video模式下用哪个置信度字段判断，默认conf_max")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
+
+    if args.ml_full_video:
+        infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
+        infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
+        infer_jsons = sorted(set(infer_jsons))
+        if not infer_jsons:
+            print(f"[错误] {args.infer_dir} 下没有找到 *_infer.json")
+            return
+        print(f"模式: 全录制文件+ML自动预标注，找到 {len(infer_jsons)} 个推理结果，"
+              f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
+        ml_tasks = build_tasks_from_infer_ml(
+            infer_jsons, args.csv_url_prefix, video_prefix, args.label,
+            min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
+
+        base, ext = os.path.splitext(args.output)
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+        pred_path = f"{base}_full_ml_predictions{ext}"
+        with open(pred_path, "w", encoding="utf-8") as f:
+            json.dump(_as_predictions(ml_tasks), f, ensure_ascii=False, indent=2)
+        print(f"  → {pred_path}  ({len(ml_tasks)} 个任务，predictions形式)")
+
+        ann_path = f"{base}_full_ml_annotations{ext}"
+        with open(ann_path, "w", encoding="utf-8") as f:
+            json.dump(_as_annotations(ml_tasks), f, ensure_ascii=False, indent=2)
+        print(f"  → {ann_path}  ({len(ml_tasks)} 个任务，annotations形式)")
+        print(f"\n两份文件效果不一样，导入Label Studio实际看一下哪份能正确显示"
+              f"\"标注人=ML\"，确认后长期只用那一份就行")
+        return
 
     if args.use_clips:
         print("模式: clips 裁剪片段")
