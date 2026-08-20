@@ -12,6 +12,12 @@ review_to_labelstudio.py里已经验证过的parse_cam()/session_key()，保证
 输入: infer_result_xxx/{day}/_infer/*_infer.json（infer_csv_scratch.py的产出）
 输出: 一份CSV，每行是(日期, IMU)的一天统计量。
 
+佩戴时长(valid_wear_hours)按每个session推理窗口的时间跨度近似，同一天同
+一个IMU的多个session累加；不足MIN_GOOD_WEAR_HOURS小时的天标成partial/
+insufficient(data_quality_flag列)——这种天的抓挠次数天然偏低，不是狗不痒
+了，是没多少数据可看，所以这些天不参与基线中位数、当天的"持续天数"也不
+计入(按数据不足处理，既不重置也不增加连续计数)。
+
 用法:
   python src/imu_scratch_daily_stats.py \
     --infer_root infer_result_majority_syn \
@@ -41,6 +47,11 @@ NIGHT_END_HOUR = 6
 CLUSTER_EVENTS_PER_HOUR = 5        # 跟scratch_burden.py的CLUSTER_EVENTS_PER_HOUR一致
 INTERRUPT_MERGE_GAP_MINUTES = 5    # 跟scratch_burden.py的INTERRUPT_MERGE_GAP_MINUTES一致
 LONG_SCRATCH_RED_FLAG_SEC = 60     # 跟scratch_burden.py/pm_skin_scoring的常量一致
+MIN_GOOD_WEAR_HOURS = 12           # 跟scratch_burden.py的daily_features()同一个阈值：
+                                    # 有效佩戴<12小时的天标成"partial"/"insufficient"，
+                                    # 不是"抓挠次数少"，是"根本没多少数据可看"，两者不能
+                                    # 混为一谈——佩戴不到的天次数天然就少，不代表狗真的
+                                    # 不痒了
 
 # 基线基本比对用的简化档位——只用来估"这天算不算持续变化幅度大"（delta_score>=10），
 # 不是最终C值计算本身，最终C值由pm_skin_scoring网页那边用PM的原始规则重新算，
@@ -73,6 +84,7 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
     infer_jsons = sorted(set(infer_jsons))
 
     events_by_imu = {}
+    wear_seconds_by_imu = {}
     for path in infer_jsons:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -81,6 +93,27 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
         m = re.search(r"\d+", cam)
         cam_num = int(m.group()) if m else 1
         imu_label = f"IMU{cam_num}"
+
+        # 佩戴时长：这个session(csv文件)有推理覆盖的时间跨度=第一个窗口到
+        # 最后一个窗口的时间差，近似当作这段时间设备实际戴着(每个窗口本身
+        # 只有1-2秒，相对小时级的佩戴时长可以忽略不计)。同一天同一个IMU
+        # 可能有多个session(比如设备重启过)，各自的跨度累加。这不是精确的
+        # "真的贴身佩戴"判断(比如摘下来放在旁边但设备还在采集也会被算进
+        # 去)，只是"这段时间有数据"的近似，跟scratch_burden.py要求外部
+        # 单独传入真实佩戴时长表是同一个概念，这里没有更精确的信号源，
+        # 用推理窗口覆盖范围顶上
+        windows = data.get("windows", [])
+        window_ts = []
+        for w in windows:
+            if not w.get("ts"):
+                continue
+            try:
+                window_ts.append(_parse_ts(w["ts"]))
+            except ValueError:
+                continue
+        if window_ts:
+            span_sec = (max(window_ts) - min(window_ts)).total_seconds()
+            wear_seconds_by_imu[imu_label] = wear_seconds_by_imu.get(imu_label, 0.0) + span_sec
 
         for seg in data.get("scratch_segments", []):
             if not seg.get("start_ts") or not seg.get("end_ts"):
@@ -94,7 +127,7 @@ def _load_day_events(infer_dir, min_conf=0.8, conf_field="conf_mean"):
                 continue
             events_by_imu.setdefault(imu_label, []).append((start, end))
 
-    return events_by_imu
+    return events_by_imu, wear_seconds_by_imu
 
 
 def _cluster_count(starts):
@@ -197,9 +230,21 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
         if not os.path.isdir(infer_dir):
             print(f"[跳过] {infer_dir} 不存在")
             continue
-        events_by_imu = _load_day_events(infer_dir, min_conf=min_conf, conf_field=conf_field)
-        for imu_label, events in events_by_imu.items():
+        events_by_imu, wear_seconds_by_imu = _load_day_events(
+            infer_dir, min_conf=min_conf, conf_field=conf_field)
+        # 佩戴时长按当天出现过的全部IMU算(不只是有抓挠事件的那些)——一个
+        # IMU这天佩戴时长有数据、但一次抓挠都没有检测到，也得出现在统计里，
+        # 不然"这天佩戴够但没抓挠"跟"这天数据不足看不出来"这两种情况又会
+        # 混在一起分不清
+        for imu_label in set(events_by_imu) | set(wear_seconds_by_imu):
+            events = events_by_imu.get(imu_label, [])
             feat = _day_features(events)
+            wear_hours = round(wear_seconds_by_imu.get(imu_label, 0.0) / 3600, 2)
+            feat["valid_wear_hours"] = wear_hours
+            feat["data_quality_flag"] = (
+                "good" if wear_hours >= MIN_GOOD_WEAR_HOURS
+                else ("partial" if wear_hours > 0 else "insufficient")
+            )
             raw.setdefault(imu_label, {})[day] = feat
 
     rows = []
@@ -213,7 +258,12 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
         # 用户在C值计算标签里仍然可以手动覆盖这两个数字
         delta_history = []  # 按日期顺序，跟这个IMU的dates_sorted对齐
         for date in dates_sorted:
-            other_dates = [d for d in dates_sorted if d != date]
+            # 基线只用佩戴时长达标(good)的天——佩戴不足的天次数天然偏低，
+            # 拿进来算中位数会把基线压低，反过来让别的天看着"涨得特别多"，
+            # 跟scratch_burden.py的compute_baseline只取data_quality_flag
+            # =="good"的天是同一个道理
+            other_dates = [d for d in dates_sorted
+                          if d != date and by_date[d]["data_quality_flag"] == "good"]
             if other_dates:
                 baseline_count = median(by_date[d]["event_count"] for d in other_dates)
                 baseline_duration_min = median(by_date[d]["total_duration_min"] for d in other_dates)
@@ -224,9 +274,12 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
                 n_baseline_days = 0
 
             feat = by_date[date]
+            # 当天佩戴不足时delta给None(数据不足)，不是给0分——0分的语义是
+            # "看过了，确实没怎么涨"，None是"这天压根没足够数据下结论"，
+            # 两者在下面算持续天数时的处理方式完全不同(None不重置也不计入)
             delta = (_delta_score(feat["event_count"], baseline_count,
                                   feat["total_duration_min"], baseline_duration_min)
-                    if n_baseline_days else None)
+                    if n_baseline_days and feat["data_quality_flag"] == "good" else None)
             delta_history.append(delta)
 
             # 持续天数：往前数连续几天(含今天)delta_score>=10，None(基线不足)
@@ -248,6 +301,8 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
 
             rows.append({
                 "date": date, "imu": imu_label,
+                "valid_wear_hours": feat["valid_wear_hours"],
+                "data_quality_flag": feat["data_quality_flag"],
                 "event_count": feat["event_count"],
                 "total_duration_min": feat["total_duration_min"],
                 "max_event_duration_sec": feat["max_event_duration_sec"],
@@ -266,7 +321,8 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
 
 
 COLUMNS = [
-    "date", "imu", "event_count", "total_duration_min", "max_event_duration_sec",
+    "date", "imu", "valid_wear_hours", "data_quality_flag",
+    "event_count", "total_duration_min", "max_event_duration_sec",
     "cluster_count", "night_event_count", "zn", "zd", "long_scratch",
     "baseline_count", "baseline_duration_min", "n_baseline_days", "persistence_days",
 ]

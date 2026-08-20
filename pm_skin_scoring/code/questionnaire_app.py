@@ -595,8 +595,16 @@ def preview_stats_row(rows: list, label: str) -> str:
     match = next((r for r in rows if _row_label(r) == label), None)
     if not match:
         return ""
+    flag = match.get("data_quality_flag", "")
+    wear = match.get("valid_wear_hours", "")
+    # 佩戴不足的天单独警示——这种天抓挠次数天然偏低，不是狗不痒了，是没
+    # 多少数据可看，直接拿来定C档位会低估
+    warn = ("\n\n> ⚠️ 这天佩戴时长不足12小时（数据不完整），抓挠次数天然会偏低，"
+            "不建议直接拿这天的数据定C档位"
+            if flag and flag != "good" else "")
     return (
         f"| 字段 | 值 |\n|---|---|\n"
+        f"| 佩戴时长 | {wear}小时（{flag}） |\n"
         f"| 今日次数/时长 | {match['event_count']}次 / {match['total_duration_min']}分钟 |\n"
         f"| 最长单次抓挠 | {match['max_event_duration_sec']}秒 |\n"
         f"| 聚集时段数 | {match['cluster_count']} |\n"
@@ -606,6 +614,7 @@ def preview_stats_row(rows: list, label: str) -> str:
         f"| 基线次数/时长（自动估算，仅供参考） | {match['baseline_count']}次 / "
         f"{match['baseline_duration_min']}分钟（{match['n_baseline_days']}天历史） |\n"
         f"| 持续天数（自动估算，仅供参考） | {match['persistence_days']} |\n"
+        f"{warn}"
     )
 
 
@@ -624,6 +633,10 @@ def apply_stats_to_c_calc(rows: list, label: str):
     iso_date = _to_iso_date(match["date"])
     status = (f"✅ 已把 {match['date']}（{match['imu']}）的统计数据填进「C值计算」标签，"
              f"「填写问答」标签的填表日期已同步为 {iso_date}")
+    if match.get("data_quality_flag") and match["data_quality_flag"] != "good":
+        status += (f"\n\n⚠️ 注意：这天佩戴时长只有{match.get('valid_wear_hours', '?')}小时"
+                  f"（不足12小时），抓挠次数天然会偏低，算出来的C值会低估，"
+                  f"不建议直接拿这天定档")
     return (
         float(match["baseline_count"]), float(match["baseline_duration_min"]),
         float(match["event_count"]), float(match["total_duration_min"]),
