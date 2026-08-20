@@ -30,7 +30,6 @@ import math
 import os
 import re
 import socket
-import sys
 from datetime import datetime
 
 import gradio as gr
@@ -507,17 +506,17 @@ def export_records_csv():
     return RECORDS_CSV
 
 
-# ── IMU统计数据导入：直接扫描infer_result_xxx/{day}/_infer/*_infer.json，
-# 现算每天每个机位的统计量，供「C值计算」标签按(天,机位)选择自动填充——
-# 不需要用户先手动跑src/imu_scratch_daily_stats.py另存一份CSV再填路径，
-# 页面自己调用同一套统计逻辑（复用compute_stats，规则不会跟命令行版本
-# 走两条不同的路），选好根目录就能看到哪些天哪些机位有数据可用。一份
-# CSV/一次扫描里天然就覆盖全部机位（用"imu"这一列区分），不用每个机位
-# 单独一份文件。
-SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
-from imu_scratch_daily_stats import compute_stats as _compute_imu_daily_stats  # noqa: E402
+# ── IMU统计数据导入：读每个根目录下的imu_daily_scratch_stats.csv（
+# src/imu_scratch_daily_stats.py / run_review_bins_all_days.sh的IMU_STATS=1
+# 产出的那份），供「C值计算」标签按(天,机位)选择自动填充。
+#
+# 不是现场扫描/现算全部_infer.json——之前那样做会把root下所有已经跑过
+# ML_PRELABEL的天都翻出来，哪怕IMU_STATS=1只对某一天(比如8-19)跑过，
+# 别的天(比如8-18之前那些)照样会被扫出来显示成"有数据"，其实那些天根本
+# 没跑过统计，容易误导。改成只认imu_daily_scratch_stats.csv这份文件——
+# 这份文件本身就是"用户明确跑过IMU_STATS=1的天才会出现在里面"，没跑过
+# 统计的天不会出现在下拉框里，不会看着像有数据。
+STATS_CSV_NAME = "imu_daily_scratch_stats.csv"
 
 # 常见的两个推理结果根目录（不同模型跑出来的），预填在输入框里，用户可以
 # 改成自己实际用的路径——不写死绝对路径，因为不同机器上的repo根目录
@@ -541,12 +540,18 @@ def _row_label(row: dict) -> str:
     return f"{row['date']}-{row['imu']} [{row['root_label']}]"
 
 
+def _parse_bool(value) -> bool:
+    """CSV里读出来的都是字符串，"False"这种非空字符串直接bool()会误判成
+    True，要按内容判断。"""
+    return str(value).strip().lower() in ("true", "1", "是")
+
+
 def scan_imu_roots(roots_str: str):
-    """扫描输入框里逗号分隔的每个根目录，找里面所有{day}/_infer/*_infer.json
-    存在的天，现算每天每个机位的统计量（复用imu_scratch_daily_stats.py的
-    compute_stats，不是重新写一套统计逻辑）。返回(所有行的列表, 下拉选项
-    更新, 状态提示)。目录不存在/读取出错的根目录会跳过，不影响其它根
-    目录正常扫描，状态提示里会写清楚跳过了哪些。"""
+    """扫描输入框里逗号分隔的每个根目录，找每个根目录下的
+    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份），只有这份文件
+    里出现过的(天,机位)才会列出来——没跑过统计的天不会被误当成"有数据"。
+    返回(所有行的列表, 下拉选项更新, 状态提示)。目录/文件不存在或读取
+    出错的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过了哪些。"""
     roots = [r.strip() for r in (roots_str or "").split(",") if r.strip()]
     if not roots:
         return [], gr.update(choices=[], value=None), "❌ 请先填至少一个根目录"
@@ -554,13 +559,15 @@ def scan_imu_roots(roots_str: str):
     all_rows = []
     skipped = []
     for root in roots:
-        if not os.path.isdir(root):
-            skipped.append(f"{root}（目录不存在）")
+        stats_csv = os.path.join(root, STATS_CSV_NAME)
+        if not os.path.exists(stats_csv):
+            skipped.append(f"{root}（没有{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
             continue
         try:
-            rows = _compute_imu_daily_stats(root)
+            with open(stats_csv, encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
         except Exception as e:
-            skipped.append(f"{root}（读取出错：{e}）")
+            skipped.append(f"{root}（读取{STATS_CSV_NAME}出错：{e}）")
             continue
         root_label = os.path.basename(root.rstrip("/\\")) or root
         for row in rows:
@@ -621,7 +628,7 @@ def apply_stats_to_c_calc(rows: list, label: str):
         float(match["baseline_count"]), float(match["baseline_duration_min"]),
         float(match["event_count"]), float(match["total_duration_min"]),
         float(match["cluster_count"]), float(match["persistence_days"]),
-        float(match["zn"]), float(match["zd"]), bool(match["long_scratch"]),
+        float(match["zn"]), float(match["zd"]), _parse_bool(match["long_scratch"]),
         gr.update(value=iso_date), status,
     )
 
@@ -738,11 +745,12 @@ def build_app():
             with gr.Tab("导入IMU统计数据"):
                 gr.Markdown(
                     "# 导入IMU统计数据\n"
-                    "填好推理结果根目录（逗号分隔可以填多个），点\"扫描\"——会自动去每个根"
-                    "目录下找`{天}/_infer/*_infer.json`，现算每天每个机位的抓挠统计量"
-                    "（不需要提前手动跑`src/imu_scratch_daily_stats.py`另存CSV），扫到的"
-                    "每个(天,机位)组合都会出现在下面的下拉框里，选好一个，点\"应用\"一键"
-                    "填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "填好推理结果根目录（逗号分隔可以填多个），点\"扫描\"——会去每个根"
+                    "目录下找`imu_daily_scratch_stats.csv`（`run_review_bins_all_days.sh`"
+                    "加`IMU_STATS=1`那次批处理跑完之后产出的那份，或者单独跑"
+                    "`src/imu_scratch_daily_stats.py`），只有这份文件里出现过的(天,机位)"
+                    "才会列进下面的下拉框——没跑过统计的天不会被误当成\"有数据\"。选好一个，"
+                    "点\"应用\"一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
                     "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
