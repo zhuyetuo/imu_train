@@ -57,6 +57,28 @@ def parse_imu_label(basename: str) -> str:
     return m.group(1) if m else ""
 
 
+def parse_imu_num(stem: str):
+    """从CSV的stem里取狗身上IMU的编号，比如
+    multicam_20260814_000000560_cam1_imu3_raw → 3。取不到返回None。
+
+    注意这跟机位号(camN)是两回事：房间固定就2个机位，但可以同时挂4条狗，
+    同一个cam1下面会有 cam1_imu1 / cam1_imu3 / cam1_imu4 三条不同狗的CSV
+    （见extract_clips.py的session_prefix注释）。按cam号当IMU号用的话，
+    同一个cam下的多条狗会互相覆盖。"""
+    m = re.search(r"_imu(\d+)(?:_|$)", stem, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def camera_video_stem_of(stem: str, cam_num: int) -> str:
+    """把任意一条这个session的CSV stem，换算成第cam_num个机位的视频文件
+    stem。机位视频的文件名后缀固定是 camN_imuN（cam1_imu1/cam2_imu2/...，
+    见extract_clips.camera_video_stem），不管这个session实际挂了几条狗，
+    所以把末尾的 _cam*_imu* 替换掉就行。替换不了(文件名不是这个格式)时
+    原样返回，行为不会比以前更差。"""
+    new_stem, n = re.subn(r"_cam\d+_imu\d+", f"_cam{cam_num}_imu{cam_num}", stem, count=1)
+    return new_stem if n else stem
+
+
 def session_key(basename: str) -> str:
     """提取会话前缀（cam_tag 之前的部分）"""
     stem = os.path.splitext(basename)[0]
@@ -311,52 +333,69 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
       - 机位处理跟build_tasks_from_clips一样支持cam_mode(auto/2/3)
       - 标注人固定标成"ML"（completed_by），跟人工标注区分开
     """
+    # 一个session里：每条狗(IMU)有自己的CSV，机位(cam)有自己的视频，两者
+    # 不是一回事——房间固定就2个机位，但可以同时挂4条狗，文件名会出现
+    # cam1_imu1 / cam1_imu3 / cam1_imu4 / cam2_imu2 这样的组合。所以要
+    # 分开收集：imus_data按IMU编号存各自的CSV和检测结果，cam_stems按机位
+    # 编号存视频文件名。之前这里按cam分组当IMU用，同一个cam下的多条狗
+    # 会互相覆盖，只剩最后读到的那一条。
     sessions = {}
     for infer_path in sorted(infer_jsons):
         with open(infer_path, encoding="utf-8") as f:
             data = json.load(f)
         csv_basename = data["csv_basename"]
         sess = session_key(csv_basename)
-        cam  = parse_cam(csv_basename) or "cam1"
-        sessions.setdefault(sess, {})[cam] = data
+        stem = os.path.splitext(csv_basename)[0]
+
+        entry = sessions.setdefault(sess, {"imus": {}, "cam_stems": {}})
+
+        imu_num = parse_imu_num(stem)
+        if imu_num is not None:
+            entry["imus"][imu_num] = data
+
+        cam = parse_cam(csv_basename)
+        if cam:
+            cam_num = int(re.search(r"\d+", cam).group())
+            # 同一个机位会被多条狗的CSV重复提到(cam1_imu1/cam1_imu3都指向
+            # cam1这一路视频)，视频文件名只认camN_imuN那一份——这是机位
+            # 视频文件本身固定的命名(见extract_clips.camera_video_stem)
+            if cam_num == imu_num or cam_num not in entry["cam_stems"]:
+                entry["cam_stems"][cam_num] = stem
 
     tasks = []
     task_id = 1
 
     for sess in sorted(sessions):
-        cams_data = sessions[sess]
+        imus_data = sessions[sess]["imus"]
+        cam_stems = sessions[sess]["cam_stems"]
 
-        cam_nums_present = {int(re.search(r"\d+", c).group()): c for c in cams_data}
         if cam_mode == "auto":
-            slot_count = max(cam_nums_present) if cam_nums_present else 1
+            slot_count = max(cam_stems) if cam_stems else 1
         else:
             slot_count = int(cam_mode)
 
-        # video1..videoN 是这个session共享的，跟具体用哪个IMU的CSV无关，
+        # video1..videoN 是这个session共享的，跟具体用哪条狗的CSV无关，
         # 所以只算一次，下面每个IMU的task都复用同一份
         video_urls = {}
         for n in range(1, slot_count + 1):
-            cam_key = f"cam{n}"
-            if cam_key in cams_data:
-                cam_stem = os.path.splitext(cams_data[cam_key]["csv_basename"])[0]
+            if n in cam_stems:
+                cam_stem = camera_video_stem_of(cam_stems[n], n)
                 video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
             else:
                 video_urls[f"video{n}"] = ""
 
-        # 每个机位(IMU)自己的CSV、自己的检测结果各生成一个task，不能只用
-        # cam1(或sessions里随便挑的第一个)代表整个session——IMU2/IMU3有
-        # 自己独立的CSV和抓挠检测，混在一起或者被cam1顶掉都会导致复查的
-        # 时候看不到那两路机位的检测结果
-        for cam_num in sorted(cam_nums_present):
-            cam_key = cam_nums_present[cam_num]
-            cam_data = cams_data[cam_key]
-            cam_csv = cam_data["csv_basename"]
-            imu_label = f"IMU{cam_num}"
+        # 每条狗(IMU)自己的CSV、自己的检测结果各生成一个task——它们各有
+        # 独立的CSV和抓挠检测，混在一起或者互相顶掉都会导致复查的时候
+        # 看不到某条狗的检测结果
+        for imu_num in sorted(imus_data):
+            imu_data = imus_data[imu_num]
+            cam_csv = imu_data["csv_basename"]
+            imu_label = f"IMU{imu_num}"
 
             task_data = {"csv1": csv_url(cam_csv, csv_url_prefix)}
             task_data.update(video_urls)
 
-            scratch_segs = cam_data.get("scratch_segments", [])
+            scratch_segs = imu_data.get("scratch_segments", [])
             # 只保留置信度达标的片段——不是"标出来但打个低分标签"，是这批
             # 片段压根不出现在标注结果里，跟clips模式的--min_conf是同一个
             # "额外筛一份高置信度子集"的思路，只是这里作用在整段视频的标注
