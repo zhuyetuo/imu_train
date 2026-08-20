@@ -32,7 +32,8 @@
 #                 下界>=阈值的任务，完整版JSON照常生成，筛选版是额外多出来的，
 #                 不是替代（默认空=不筛）
 #   ML_PRELABEL   传1时，额外生成一份"全录制视频+ML自动预标注"的Label Studio
-#                 任务(labelstudio_review_full_ml.json)，不裁剪clip，标注人标成
+#                 任务，每个机位(IMU)一个文件(labelstudio_review_full_ml_IMU1.json,
+#                 _IMU2.json, _IMU3.json)，各自用自己的CSV和检测结果，不裁剪clip，标注人标成
 #                 ML，跟clips那一套完全独立、互不影响（默认0=不生成）。每个录制
 #                 场次不管有没有检测到达标片段都会生成task(没检测到的标注结果
 #                 为空)，让复查的人能看到全部录制数据，方便顺便核查模型有没有
@@ -260,7 +261,7 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
             --ml_min_conf "$ML_MIN_CONF" \
             --cam_mode "$CAM_MODE" \
             --label "抓挠"
-        echo "  $day → ${ls_json%.json}_full_ml.json"
+        echo "  $day → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done
 fi
 
