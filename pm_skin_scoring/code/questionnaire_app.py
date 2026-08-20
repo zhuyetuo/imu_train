@@ -30,6 +30,7 @@ import math
 import os
 import re
 import socket
+import sys
 from datetime import datetime
 
 import gradio as gr
@@ -506,21 +507,29 @@ def export_records_csv():
     return RECORDS_CSV
 
 
-# ── IMU统计数据导入：读取src/imu_scratch_daily_stats.py产出的CSV，供
-# 「C值计算」标签按日期+机位选择自动填充，不用每次手动一个个数字去数──
+# ── IMU统计数据导入：直接扫描infer_result_xxx/{day}/_infer/*_infer.json，
+# 现算每天每个机位的统计量，供「C值计算」标签按(天,机位)选择自动填充——
+# 不需要用户先手动跑src/imu_scratch_daily_stats.py另存一份CSV再填路径，
+# 页面自己调用同一套统计逻辑（复用compute_stats，规则不会跟命令行版本
+# 走两条不同的路），选好根目录就能看到哪些天哪些机位有数据可用。一份
+# CSV/一次扫描里天然就覆盖全部机位（用"imu"这一列区分），不用每个机位
+# 单独一份文件。
+SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+from imu_scratch_daily_stats import compute_stats as _compute_imu_daily_stats  # noqa: E402
 
-STATS_COLUMNS = [
-    "date", "imu", "event_count", "total_duration_min", "max_event_duration_sec",
-    "cluster_count", "night_event_count", "zn", "zd", "long_scratch",
-    "baseline_count", "baseline_duration_min", "n_baseline_days", "persistence_days",
-]
+# 常见的两个推理结果根目录（不同模型跑出来的），预填在输入框里，用户可以
+# 改成自己实际用的路径——不写死绝对路径，因为不同机器上的repo根目录
+# 不一样，这里给的是相对当前工作目录的常见默认值
+DEFAULT_IMU_STATS_ROOTS = "infer_result_majority_syn, infer_result_majority"
 
 
 def _to_iso_date(day_str: str) -> str:
     """"2026_8_19" → "2026-08-19"，用来填进gr.DateTime(type="string")的
-    填表日期组件——那边存的是标准"YYYY-MM-DD"格式，统计脚本产出的目录名
-    格式不一样，这里转一下。转不了就原样返回，不报错，让用户自己在
-    「填写问答」标签核对/改一下日期就好。"""
+    填表日期组件——那边存的是标准"YYYY-MM-DD"格式，目录名格式不一样，
+    这里转一下。转不了就原样返回，不报错，让用户自己在「填写问答」标签
+    核对/改一下日期就好。"""
     m = re.match(r"^(\d{4})_(\d{1,2})_(\d{1,2})$", day_str or "")
     if not m:
         return day_str or ""
@@ -528,38 +537,57 @@ def _to_iso_date(day_str: str) -> str:
     return f"{y}-{int(mo):02d}-{int(d):02d}"
 
 
-def load_stats_csv(path: str):
-    """读统计CSV，返回(rows, 日期下拉选项更新, 状态提示)。文件不存在/格式
-    不对时rows给空列表，日期下拉清空，状态提示里写清楚原因——不抛异常，
-    避免整个页面崩掉。"""
-    path = (path or "").strip()
-    if not path:
-        return [], gr.update(choices=[], value=None), "❌ 请先填统计CSV的路径"
-    if not os.path.exists(path):
-        return [], gr.update(choices=[], value=None), f"❌ 文件不存在：{path}"
-    try:
-        with open(path, encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.DictReader(f))
-    except Exception as e:
-        return [], gr.update(choices=[], value=None), f"❌ 读取失败：{e}"
-    if not rows:
-        return [], gr.update(choices=[], value=None), "⚠️ 文件是空的，没有统计数据"
-
-    dates = sorted({r["date"] for r in rows})
-    return rows, gr.update(choices=dates, value=dates[-1]), f"✅ 已加载{len(rows)}行，覆盖{len(dates)}天"
+def _row_label(row: dict) -> str:
+    return f"{row['date']}-{row['imu']} [{row['root_label']}]"
 
 
-def update_imu_choices(rows: list, date: str):
-    imus = sorted({r["imu"] for r in rows if r["date"] == date})
-    return gr.update(choices=imus, value=imus[0] if imus else None)
+def scan_imu_roots(roots_str: str):
+    """扫描输入框里逗号分隔的每个根目录，找里面所有{day}/_infer/*_infer.json
+    存在的天，现算每天每个机位的统计量（复用imu_scratch_daily_stats.py的
+    compute_stats，不是重新写一套统计逻辑）。返回(所有行的列表, 下拉选项
+    更新, 状态提示)。目录不存在/读取出错的根目录会跳过，不影响其它根
+    目录正常扫描，状态提示里会写清楚跳过了哪些。"""
+    roots = [r.strip() for r in (roots_str or "").split(",") if r.strip()]
+    if not roots:
+        return [], gr.update(choices=[], value=None), "❌ 请先填至少一个根目录"
+
+    all_rows = []
+    skipped = []
+    for root in roots:
+        if not os.path.isdir(root):
+            skipped.append(f"{root}（目录不存在）")
+            continue
+        try:
+            rows = _compute_imu_daily_stats(root)
+        except Exception as e:
+            skipped.append(f"{root}（读取出错：{e}）")
+            continue
+        root_label = os.path.basename(root.rstrip("/\\")) or root
+        for row in rows:
+            row = dict(row)
+            row["root"] = root
+            row["root_label"] = root_label
+            all_rows.append(row)
+
+    if not all_rows:
+        msg = "❌ 没有扫描到任何天/机位的数据"
+        if skipped:
+            msg += "；" + "、".join(skipped)
+        return [], gr.update(choices=[], value=None), msg
+
+    labels = sorted({_row_label(r) for r in all_rows})
+    status = f"✅ 扫描到{len(all_rows)}条(天,机位)数据，共{len(labels)}个可选项"
+    if skipped:
+        status += "；跳过：" + "、".join(skipped)
+    return all_rows, gr.update(choices=labels, value=labels[-1]), status
 
 
-def preview_stats_row(rows: list, date: str, imu: str) -> str:
-    if not rows or not date or not imu:
+def preview_stats_row(rows: list, label: str) -> str:
+    if not rows or not label:
         return ""
-    match = next((r for r in rows if r["date"] == date and r["imu"] == imu), None)
+    match = next((r for r in rows if _row_label(r) == label), None)
     if not match:
-        return "（这天这个机位没有统计数据）"
+        return ""
     return (
         f"| 字段 | 值 |\n|---|---|\n"
         f"| 今日次数/时长 | {match['event_count']}次 / {match['total_duration_min']}分钟 |\n"
@@ -574,26 +602,26 @@ def preview_stats_row(rows: list, date: str, imu: str) -> str:
     )
 
 
-def apply_stats_to_c_calc(rows: list, date: str, imu: str):
-    """把选中(date, imu)的统计行填进「C值计算」标签的各个输入框，同时把
+def apply_stats_to_c_calc(rows: list, label: str):
+    """把选中的(天,机位)统计行填进「C值计算」标签的各个输入框，同时把
     这个日期同步进「填写问答」标签的填表日期——用户要求"选了8-19，问答
     那边的日期也自动一起选择"，不用同一个日期在两个标签各选一遍。"""
-    if not rows or not date or not imu:
+    if not rows or not label:
         return (None, None, None, None, None, None, None, None, False,
-                gr.update(), "❌ 请先加载统计CSV，并选好日期和机位")
-    match = next((r for r in rows if r["date"] == date and r["imu"] == imu), None)
+                gr.update(), "❌ 请先扫描根目录，并选好一个(天,机位)")
+    match = next((r for r in rows if _row_label(r) == label), None)
     if not match:
         return (None, None, None, None, None, None, None, None, False,
-                gr.update(), f"❌ {date} 的 {imu} 没有统计数据")
+                gr.update(), f"❌ 没找到 {label} 对应的数据")
 
-    long_scratch_val = str(match["long_scratch"]).strip().lower() in ("true", "1", "是")
-    iso_date = _to_iso_date(date)
-    status = f"✅ 已把 {date}（{imu}）的统计数据填进「C值计算」标签，「填写问答」标签的填表日期已同步为 {iso_date}"
+    iso_date = _to_iso_date(match["date"])
+    status = (f"✅ 已把 {match['date']}（{match['imu']}）的统计数据填进「C值计算」标签，"
+             f"「填写问答」标签的填表日期已同步为 {iso_date}")
     return (
         float(match["baseline_count"]), float(match["baseline_duration_min"]),
         float(match["event_count"]), float(match["total_duration_min"]),
         float(match["cluster_count"]), float(match["persistence_days"]),
-        float(match["zn"]), float(match["zd"]), long_scratch_val,
+        float(match["zn"]), float(match["zd"]), bool(match["long_scratch"]),
         gr.update(value=iso_date), status,
     )
 
@@ -710,44 +738,39 @@ def build_app():
             with gr.Tab("导入IMU统计数据"):
                 gr.Markdown(
                     "# 导入IMU统计数据\n"
-                    "读取`src/imu_scratch_daily_stats.py`统计出来的CSV（每天每个机位一行），"
-                    "选好日期和机位后一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
-                    "统计CSV怎么来：`ML_PRELABEL`那批推理跑完之后，加`IMU_STATS=1`再跑一遍"
-                    "`run_review_bins_all_days.sh`（或者单独跑`src/imu_scratch_daily_stats.py`），"
-                    "产出`{RESULT_ROOT}/imu_daily_scratch_stats.csv`。\n\n"
-                    "⚠️ 基线次数/时长、持续天数这两组是脚本自动估算的参考值（用同一个机位"
+                    "填好推理结果根目录（逗号分隔可以填多个），点\"扫描\"——会自动去每个根"
+                    "目录下找`{天}/_infer/*_infer.json`，现算每天每个机位的抓挠统计量"
+                    "（不需要提前手动跑`src/imu_scratch_daily_stats.py`另存CSV），扫到的"
+                    "每个(天,机位)组合都会出现在下面的下拉框里，选好一个，点\"应用\"一键"
+                    "填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
                 )
                 with gr.Row():
-                    stats_path = gr.Textbox(
-                        label="统计CSV路径",
-                        placeholder="比如 infer_result_majority_syn/imu_daily_scratch_stats.csv",
+                    imu_stats_roots = gr.Textbox(
+                        label="推理结果根目录（逗号分隔可填多个）",
+                        value=DEFAULT_IMU_STATS_ROOTS,
+                        placeholder="比如 infer_result_majority_syn, infer_result_majority",
                     )
-                    load_stats_btn = gr.Button("加载")
-                load_status_md = gr.Markdown()
+                    scan_stats_btn = gr.Button("扫描")
+                scan_status_md = gr.Markdown()
                 stats_rows_state = gr.State(value=[])
 
-                with gr.Row():
-                    stats_date = gr.Dropdown(label="日期", interactive=True)
-                    stats_imu = gr.Dropdown(label="机位（IMU）", interactive=True)
+                imu_day_select = gr.Dropdown(label="选择(天, 机位)", interactive=True)
                 stats_preview_md = gr.Markdown()
 
                 apply_stats_btn = gr.Button("应用到「C值计算」标签", variant="primary")
                 apply_status_md = gr.Markdown()
 
-                load_stats_btn.click(
-                    fn=load_stats_csv, inputs=[stats_path],
-                    outputs=[stats_rows_state, stats_date, load_status_md],
+                scan_stats_btn.click(
+                    fn=scan_imu_roots, inputs=[imu_stats_roots],
+                    outputs=[stats_rows_state, imu_day_select, scan_status_md],
                 )
-                stats_date.change(
-                    fn=update_imu_choices, inputs=[stats_rows_state, stats_date], outputs=[stats_imu],
+                imu_day_select.change(
+                    fn=preview_stats_row, inputs=[stats_rows_state, imu_day_select],
+                    outputs=[stats_preview_md],
                 )
-                for trig in (stats_date, stats_imu):
-                    trig.change(
-                        fn=preview_stats_row, inputs=[stats_rows_state, stats_date, stats_imu],
-                        outputs=[stats_preview_md],
-                    )
 
             with gr.Tab("C值计算"):
                 gr.Markdown(
@@ -798,11 +821,11 @@ def build_app():
                 for inp in c_inputs:
                     inp.change(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
 
-                # 「导入IMU统计数据」标签选好日期+机位后点"应用"，直接把这几个
+                # 「导入IMU统计数据」标签选好(天,机位)后点"应用"，直接把这几个
                 # 输入框填上，同时把「填写问答」标签的填表日期也同步过去
                 apply_stats_btn.click(
                     fn=apply_stats_to_c_calc,
-                    inputs=[stats_rows_state, stats_date, stats_imu],
+                    inputs=[stats_rows_state, imu_day_select],
                     outputs=[baseline_count, baseline_duration_min, today_count, today_duration_min,
                             cluster_count, persistence_days, zn, zd, long_scratch,
                             fill_date, apply_status_md],
