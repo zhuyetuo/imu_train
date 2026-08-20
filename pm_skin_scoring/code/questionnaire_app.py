@@ -349,7 +349,8 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
         f"| 变化幅度(0-30) | {delta_score} | 按{delta_by}判定，相对基线比值={delta_ratio:.2f} |\n"
         f"| 聚集程度(0-20) | {cluster_score} | 今日聚集时段数={cluster_count} |\n"
         f"| 持续程度(0-20) | {persistence_score} | 连续天数={persistence_days} |\n"
-        f"| 中断影响(0-30) | {interrupt_score} | ZN={zn}，ZD={zd}，长时间抓挠={'是' if long_scratch else '否'} |\n"
+        f"| 中断影响(0-30) | {interrupt_score} | 普通抓挠ZN={zn}次，打断睡眠ZD={zd}次，"
+        f"长时间抓挠={'是' if long_scratch else '否'} |\n"
         f"| **C值合计** | **{total}** | → **{tier}** |\n"
         f"{red_flag_line}"
     )
@@ -609,7 +610,8 @@ def preview_stats_row(rows: list, label: str) -> str:
         f"| 最长单次抓挠 | {match['max_event_duration_sec']}秒 |\n"
         f"| 聚集时段数 | {match['cluster_count']} |\n"
         f"| 夜间事件数 | {match['night_event_count']} |\n"
-        f"| ZN/ZD | {match['zn']} / {match['zd']} |\n"
+        f"| 普通抓挠ZN（没打断睡眠的） | {match['zn']}次 |\n"
+        f"| 打断睡眠ZD | {match['zd']}次 |\n"
         f"| 长时间抓挠 | {match['long_scratch']} |\n"
         f"| 基线次数/时长（自动估算，仅供参考） | {match['baseline_count']}次 / "
         f"{match['baseline_duration_min']}分钟（{match['n_baseline_days']}天历史） |\n"
@@ -822,10 +824,26 @@ def build_app():
                     info="过去7天内，变化幅度分连续≥10分的天数（0/1/2/3+）", minimum=0,
                 )
 
-                gr.Markdown("## 四、正常行为影响/中断（0-30分）")
+                gr.Markdown(
+                    "## 四、正常行为影响/中断（0-30分）\n"
+                    "这一项看的是「抓挠有没有影响到狗的正常作息」，不只是抓了多少次。\n\n"
+                    "打分规则（从重到轻依次判，命中就不看后面的）：\n"
+                    "- `ZD≥2` **或** 有单次抓挠≥60秒 → **30分（红旗，直接判C2）**\n"
+                    "- `ZD==1` → 20分\n"
+                    "- `ZN>5` → 10分\n"
+                    "- 都不满足 → 0分\n\n"
+                    "⚠️ 注意ZD优先级高于ZN：只要ZD≥1，不管ZN是5还是50都不影响得分。"
+                )
                 with gr.Row():
-                    zn = gr.Number(label="ZN（不含中断的日间抓挠次数）", minimum=0)
-                    zd = gr.Number(label="ZD（抓挠导致的睡眠/活动中断次数）", minimum=0)
+                    zn = gr.Number(
+                        label="ZN：普通抓挠次数（没打断睡眠的）", minimum=0,
+                        info="当天总抓挠次数 减去 ZD。只在ZD==0时才影响得分（>5给10分）",
+                    )
+                    zd = gr.Number(
+                        label="ZD：打断睡眠的抓挠次数", minimum=0,
+                        info="夜间(22:00-06:00)抓挠打断睡眠的次数；相邻两次间隔<5分钟"
+                             "算同一次没重新睡着，合并成1次",
+                    )
                 long_scratch = gr.Checkbox(label="今日是否出现长时间抓挠事件（连续/高聚集抓挠达到60秒）")
 
                 gr.Markdown("## 结果")
