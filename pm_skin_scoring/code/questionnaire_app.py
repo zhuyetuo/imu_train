@@ -96,6 +96,15 @@ def _score_of(choice: str, options: list) -> int:
     return 0
 
 
+# PM原表按大类分组加权：皮肤状态(皮肤颜色+体味+皮损)组内原始分相加后
+# 乘以35%权重；毛发状态(秃毛部位+秃毛面积+整体毛质)组内原始分相加后
+# 乘以25%权重，两组加权分相加得到最终问答分数——不是6道题原始分直接
+# 相加，PM原表里这两组权重加起来是60%，还有别的类别(比如抓挠行为)
+# 占剩下的40%，但这份问答表不涉及那部分，这里只按这两组算。
+SKIN_GROUP_WEIGHT = 0.35
+HAIR_GROUP_WEIGHT = 0.25
+
+
 def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
     """前置问题选"否"时，秃毛分布/秃毛面积这两题不需要回答，按0分计（不是
     "扣分"，是这两题在这只狗身上根本不适用，PM原表里这种情况也是记0分，
@@ -112,16 +121,22 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
         s_spot = 0
         s_diameter = 0
 
-    total = s_color + s_odor + s_lesion + s_spot + s_diameter + s_coat
+    skin_group_raw = s_color + s_odor + s_lesion
+    hair_group_raw = s_spot + s_diameter + s_coat
+    skin_group_score = skin_group_raw * SKIN_GROUP_WEIGHT
+    hair_group_score = hair_group_raw * HAIR_GROUP_WEIGHT
+    total = round(skin_group_score + hair_group_score, 1)
 
     breakdown = (
-        f"| 题目 | 得分 |\n|---|---|\n"
+        f"| 题目 | 原始分 |\n|---|---|\n"
         f"| 皮肤颜色 | {s_color} |\n"
         f"| 体味 | {s_odor} |\n"
         f"| 皮损 | {s_lesion} |\n"
+        f"| **皮肤状态组小计 × {SKIN_GROUP_WEIGHT:.0%}** | **{skin_group_raw} × {SKIN_GROUP_WEIGHT:.0%} = {skin_group_score:.1f}** |\n"
         f"| 秃毛分布 | {s_spot}{'（未评估，计0分）' if has_hair_loss != '是' else ''} |\n"
         f"| 秃毛面积 | {s_diameter}{'（未评估，计0分）' if has_hair_loss != '是' else ''} |\n"
         f"| 整体毛质 | {s_coat} |\n"
+        f"| **毛发状态组小计 × {HAIR_GROUP_WEIGHT:.0%}** | **{hair_group_raw} × {HAIR_GROUP_WEIGHT:.0%} = {hair_group_score:.1f}** |\n"
         f"| **问答分数合计** | **{total}** |\n"
     )
     return total, breakdown
@@ -322,7 +337,7 @@ def build_app():
 
                 gr.Markdown("## 结果")
                 with gr.Row():
-                    total_score = gr.Number(label="问答分数", precision=0)
+                    total_score = gr.Number(label="问答分数", precision=1)
                 breakdown_md = gr.Markdown()
 
                 calc_btn = gr.Button("计算分数", variant="primary")
