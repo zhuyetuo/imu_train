@@ -41,6 +41,10 @@
 #   ML_MIN_CONF   ML_PRELABEL=1时，只标注置信度>=这个值的抓挠片段（默认0.8，
 #                 跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件用的，
 #                 这个是给ML预标注模式筛具体标哪些片段用的）
+#   IMU_STATS     传1时，全部天推理完之后额外跑一遍src/imu_scratch_daily_stats.py，
+#                 统计每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，产出一份
+#                 CSV(RESULT_ROOT/imu_daily_scratch_stats.csv)，供pm_skin_scoring
+#                 网页的「C值计算」标签按日期+IMU读取自动填充（默认0=不生成）
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
 #                 cuda（h264_nvenc GPU硬编码，明显更快，但历史上部分浏览器/Label Studio
 #                 播放有兼容性问题，不确定现在还有没有——想试就传 ENCODER=cuda，裁完先在
@@ -263,6 +267,18 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
             --label "抓挠"
         echo "  $day → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done
+fi
+
+# ── 每天每个IMU的抓挠统计（给pm_skin_scoring网页的C值计算用）──────────
+if [[ "$IMU_STATS" == "1" ]]; then
+    echo ""
+    echo "▶ 统计每天每个IMU的抓挠情况（供C值计算网页读取）..."
+    stats_csv="$RESULT_ROOT/imu_daily_scratch_stats.csv"
+    days_arg=$(IFS=,; echo "${days[*]}")
+    python src/imu_scratch_daily_stats.py \
+        --infer_root "$RESULT_ROOT" \
+        --days "$days_arg" \
+        --output "$stats_csv"
 fi
 
 # ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
