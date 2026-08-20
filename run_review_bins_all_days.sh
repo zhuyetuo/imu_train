@@ -38,11 +38,17 @@
 #                 场次不管有没有检测到达标片段都会生成task(没检测到的标注结果
 #                 为空)，让复查的人能看到全部录制数据，方便顺便核查模型有没有
 #                 漏检，不是只导出命中的部分
-#   ML_MIN_CONF   ML_PRELABEL=1时，只标注置信度>=这个值的抓挠片段（默认0.8，
-#                 跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件用的，
-#                 这个是给ML预标注模式筛具体标哪些片段用的）
+#   ML_MIN_CONF   ML_PRELABEL=1或IMU_STATS=1时，只有置信度>=这个值的抓挠片段才算数
+#                 （默认0.8，跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件
+#                 用的，这个是给ML预标注/IMU统计筛"算不算抓挠"用的，两处共用同一个
+#                 阈值和字段，保证网页上看到的C值统计跟Label Studio里实际标注出来
+#                 的片段是同一批，不会对不上）
+#   ML_CONF_FIELD ML_PRELABEL=1或IMU_STATS=1时，用conf_max还是conf_mean判断置信度
+#                 达没达标（默认conf_mean——比conf_max更稳，误报更少；conf_max更
+#                 容易找出漏检但也更容易把噪声算进去，想换回conf_max就显式传这个）
 #   IMU_STATS     传1时，全部天推理完之后额外跑一遍src/imu_scratch_daily_stats.py，
-#                 统计每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，产出一份
+#                 用ML_MIN_CONF/ML_CONF_FIELD同一套置信度标准筛"算不算抓挠"，统计
+#                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，产出一份
 #                 CSV(RESULT_ROOT/imu_daily_scratch_stats.csv)，供pm_skin_scoring
 #                 网页的「C值计算」标签按日期+IMU读取自动填充（默认0=不生成）
 #   ENCODER       裁剪片段用的编码器: cpu（默认，libx264软编码，兼容性最好）或
@@ -87,6 +93,8 @@ SPLIT_BY_IMU="${SPLIT_BY_IMU:-0}"
 MIN_CONF="${MIN_CONF:-}"
 ML_PRELABEL="${ML_PRELABEL:-0}"
 ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
+ML_CONF_FIELD="${ML_CONF_FIELD:-conf_mean}"
+IMU_STATS="${IMU_STATS:-0}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
                                         # 3s会导致约一半真实事件被错误合并，1s已能消除碎片化且合并更少）
@@ -252,7 +260,7 @@ done
 # extract_clips.py的输出，只标注高置信度片段，标注人标成ML
 if [[ "$ML_PRELABEL" == "1" ]]; then
     echo ""
-    echo "▶ 生成 ML 自动预标注任务（全录制视频，置信度>=$ML_MIN_CONF）..."
+    echo "▶ 生成 ML 自动预标注任务（全录制视频，$ML_CONF_FIELD>=$ML_MIN_CONF）..."
     for day in "${days[@]}"; do
         out_dir="$RESULT_ROOT/$day"
         ls_json="$out_dir/labelstudio_review.json"
@@ -263,6 +271,7 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
             $video_prefix_arg \
             --ml_full_video \
             --ml_min_conf "$ML_MIN_CONF" \
+            --ml_conf_field "$ML_CONF_FIELD" \
             --cam_mode "$CAM_MODE" \
             --label "抓挠"
         echo "  $day → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
@@ -272,13 +281,15 @@ fi
 # ── 每天每个IMU的抓挠统计（给pm_skin_scoring网页的C值计算用）──────────
 if [[ "$IMU_STATS" == "1" ]]; then
     echo ""
-    echo "▶ 统计每天每个IMU的抓挠情况（供C值计算网页读取）..."
+    echo "▶ 统计每天每个IMU的抓挠情况（$ML_CONF_FIELD>=$ML_MIN_CONF才算抓挠，供C值计算网页读取）..."
     stats_csv="$RESULT_ROOT/imu_daily_scratch_stats.csv"
     days_arg=$(IFS=,; echo "${days[*]}")
     python src/imu_scratch_daily_stats.py \
         --infer_root "$RESULT_ROOT" \
         --days "$days_arg" \
-        --output "$stats_csv"
+        --output "$stats_csv" \
+        --min_conf "$ML_MIN_CONF" \
+        --conf_field "$ML_CONF_FIELD"
 fi
 
 # ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
