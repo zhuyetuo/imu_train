@@ -48,9 +48,9 @@ def _round_half_up(value: float, ndigits: int) -> float:
 DOG_NAME_OPTIONS = ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"]
 
 # IMU编号→狗狗名字的默认对应关系，给「导入IMU统计数据」标签用——选好机位
-# 后自动带出这个默认值，省得每次手动选。但这只是默认值，不是写死的规则：
-# 尤其IMU1，历史数据里对应过的狗不是固定的（早期可能是金毛-巴利，不一定
-# 一直是比熊-BB），所以这里选的下拉框必须保持可编辑，不能锁死。
+# 后自动带出这个默认值，省得每次手动选。但这只是默认值，不是写死的规则，
+# 下拉框始终保持可编辑，不能锁死——尤其IMU1，历史数据里对应过的狗不一定
+# 一直是同一只，选完务必核对一下再点应用。
 IMU_DOG_DEFAULT_MAP = {
     "IMU1": "比熊-BB",
     "IMU2": "金毛-巴利",
@@ -651,12 +651,10 @@ def update_imu_choices(rows: list, date_label: str):
 
 def default_dog_for_imu(imu: str):
     """机位选好后，「对应狗狗」自动带出IMU_DOG_DEFAULT_MAP里的默认值——
-    只是省得每次手动选，不是权威对应关系，尤其IMU1历史上对应过不同的狗，
-    映射表里查不到或者是IMU1时都不强行给个可能错的默认值，留空让用户自己
-    选，比给错一个更安全。"""
-    if imu == "IMU1" or imu not in IMU_DOG_DEFAULT_MAP:
-        return gr.update(value=None)
-    return gr.update(value=IMU_DOG_DEFAULT_MAP[imu])
+    只是省得每次手动选，不是权威对应关系，下拉框本身随时可以手动改
+    （IMU1历史上对应过不同的狗，尤其要留意核对一下默认值对不对）。
+    映射表里查不到就留空，不强行猜一个。"""
+    return gr.update(value=IMU_DOG_DEFAULT_MAP.get(imu))
 
 
 def preview_stats_row(rows: list, date_label: str, imu: str) -> str:
