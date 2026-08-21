@@ -564,6 +564,13 @@ def _row_label(row: dict) -> str:
     return f"{row['date']}-{row['imu']} [{row['root_label']}]"
 
 
+def _date_label(row: dict) -> str:
+    """日期下拉框用的选项文案——带上root，因为同一天可能在不同根目录
+    (majority/majority_syn)下都有数据，不带root会分不清选的是哪个模型
+    跑出来的结果。"""
+    return f"{row['date']} [{row['root_label']}]"
+
+
 def _parse_bool(value) -> bool:
     """CSV里读出来的都是字符串，"False"这种非空字符串直接bool()会误判成
     True，要按内容判断。"""
@@ -615,17 +622,24 @@ def scan_imu_roots(roots_str: str):
             msg += "；" + "、".join(skipped)
         return [], gr.update(choices=[], value=None), msg
 
-    labels = sorted({_row_label(r) for r in all_rows})
-    status = f"✅ 扫描到{len(all_rows)}条(天,机位)数据，共{len(labels)}个可选项"
+    date_labels = sorted({_date_label(r) for r in all_rows})
+    status = f"✅ 扫描到{len(all_rows)}条(天,机位)数据，共{len(date_labels)}个日期"
     if skipped:
         status += "；跳过：" + "、".join(skipped)
-    return all_rows, gr.update(choices=labels, value=labels[-1]), status
+    return all_rows, gr.update(choices=date_labels, value=date_labels[-1]), status
 
 
-def preview_stats_row(rows: list, label: str) -> str:
-    if not rows or not label:
+def update_imu_choices(rows: list, date_label: str):
+    """日期下拉框选好之后，机位下拉框只列这天实际有数据的机位——不用
+    在几十个"日期-机位"组合里翻，先缩小到一天，再挑机位。"""
+    imus = sorted({r["imu"] for r in rows if _date_label(r) == date_label})
+    return gr.update(choices=imus, value=imus[0] if imus else None)
+
+
+def preview_stats_row(rows: list, date_label: str, imu: str) -> str:
+    if not rows or not date_label or not imu:
         return ""
-    match = next((r for r in rows if _row_label(r) == label), None)
+    match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
     if not match:
         return ""
     flag = match.get("data_quality_flag", "")
@@ -664,17 +678,17 @@ def preview_stats_row(rows: list, label: str) -> str:
     )
 
 
-def apply_stats_to_c_calc(rows: list, label: str):
+def apply_stats_to_c_calc(rows: list, date_label: str, imu: str):
     """把选中的(天,机位)统计行填进「C值计算」标签的各个输入框，同时把
     这个日期同步进「填写问答」标签的填表日期——用户要求"选了8-19，问答
     那边的日期也自动一起选择"，不用同一个日期在两个标签各选一遍。"""
-    if not rows or not label:
+    if not rows or not date_label or not imu:
         return (None, None, None, None, None, None, None, None, False, True,
-                gr.update(), "❌ 请先扫描根目录，并选好一个(天,机位)")
-    match = next((r for r in rows if _row_label(r) == label), None)
+                gr.update(), "❌ 请先扫描根目录，并选好日期和机位")
+    match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
     if not match:
         return (None, None, None, None, None, None, None, None, False, True,
-                gr.update(), f"❌ 没找到 {label} 对应的数据")
+                gr.update(), f"❌ 没找到 {date_label}-{imu} 对应的数据")
 
     # n_baseline_days==0 表示这天没有可用的历史基线（第一天，或者之前的天
     # 佩戴时长都不达标被排除掉了）——自动帮用户取消「已经有个人基线」的
@@ -821,8 +835,9 @@ def build_app():
                     "（`run_review_bins_all_days.sh`加`IMU_STATS=1`那次批处理跑完之后"
                     "产出的，每天一份、存在各自的日期目录下，所以跑多天不会互相覆盖；"
                     "也可以单独跑`src/imu_scratch_daily_stats.py`）。只有真的存在这份"
-                    "文件的天才会列进下面的下拉框——没跑过统计的天不会被误当成「有数据」。"
-                    "选好一个，点「应用」一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "文件的天才会列进「日期」下拉框——没跑过统计的天不会被误当成「有数据」。"
+                    "先选日期，「机位」下拉框会自动只列这天实际有数据的机位，选好之后点"
+                    "「应用」一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
                     "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
@@ -837,7 +852,9 @@ def build_app():
                 scan_status_md = gr.Markdown()
                 stats_rows_state = gr.State(value=[])
 
-                imu_day_select = gr.Dropdown(label="选择(天, 机位)", interactive=True)
+                with gr.Row():
+                    stats_date_select = gr.Dropdown(label="日期", interactive=True)
+                    stats_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
                 stats_preview_md = gr.Markdown()
 
                 apply_stats_btn = gr.Button("应用到「C值计算」标签", variant="primary")
@@ -845,12 +862,20 @@ def build_app():
 
                 scan_stats_btn.click(
                     fn=scan_imu_roots, inputs=[imu_stats_roots],
-                    outputs=[stats_rows_state, imu_day_select, scan_status_md],
+                    outputs=[stats_rows_state, stats_date_select, scan_status_md],
                 )
-                imu_day_select.change(
-                    fn=preview_stats_row, inputs=[stats_rows_state, imu_day_select],
-                    outputs=[stats_preview_md],
+                # 选好日期之后，机位下拉框只列这天实际有数据的机位——先按天
+                # 缩小范围，不用在"日期-机位"的长列表里翻几十条
+                stats_date_select.change(
+                    fn=update_imu_choices, inputs=[stats_rows_state, stats_date_select],
+                    outputs=[stats_imu_select],
                 )
+                for trig in (stats_date_select, stats_imu_select):
+                    trig.change(
+                        fn=preview_stats_row,
+                        inputs=[stats_rows_state, stats_date_select, stats_imu_select],
+                        outputs=[stats_preview_md],
+                    )
 
             with gr.Tab("C值计算"):
                 gr.Markdown(
@@ -936,7 +961,7 @@ def build_app():
                 # 去判断"这天到底有没有基线"
                 apply_stats_btn.click(
                     fn=apply_stats_to_c_calc,
-                    inputs=[stats_rows_state, imu_day_select],
+                    inputs=[stats_rows_state, stats_date_select, stats_imu_select],
                     outputs=[baseline_count, baseline_duration_min, today_count, today_duration_min,
                             cluster_count, persistence_days, zn, zd, long_scratch, has_baseline,
                             fill_date, apply_status_md],
