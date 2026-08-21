@@ -45,6 +45,19 @@ def _round_half_up(value: float, ndigits: int) -> float:
     return math.floor(value * factor + 0.5) / factor
 
 
+DOG_NAME_OPTIONS = ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"]
+
+# IMU编号→狗狗名字的默认对应关系，给「导入IMU统计数据」标签用——选好机位
+# 后自动带出这个默认值，省得每次手动选。但这只是默认值，不是写死的规则：
+# 尤其IMU1，历史数据里对应过的狗不是固定的（早期可能是金毛-巴利，不一定
+# 一直是比熊-BB），所以这里选的下拉框必须保持可编辑，不能锁死。
+IMU_DOG_DEFAULT_MAP = {
+    "IMU1": "比熊-BB",
+    "IMU2": "金毛-巴利",
+    "IMU3": "中华田园犬-露露",
+    "IMU5": "马尔济斯-小满",
+}
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 RECORDS_CSV = os.path.join(DATA_DIR, "records.csv")
 RECORD_COLUMNS = [
@@ -636,6 +649,16 @@ def update_imu_choices(rows: list, date_label: str):
     return gr.update(choices=imus, value=imus[0] if imus else None)
 
 
+def default_dog_for_imu(imu: str):
+    """机位选好后，「对应狗狗」自动带出IMU_DOG_DEFAULT_MAP里的默认值——
+    只是省得每次手动选，不是权威对应关系，尤其IMU1历史上对应过不同的狗，
+    映射表里查不到或者是IMU1时都不强行给个可能错的默认值，留空让用户自己
+    选，比给错一个更安全。"""
+    if imu == "IMU1" or imu not in IMU_DOG_DEFAULT_MAP:
+        return gr.update(value=None)
+    return gr.update(value=IMU_DOG_DEFAULT_MAP[imu])
+
+
 def preview_stats_row(rows: list, date_label: str, imu: str) -> str:
     if not rows or not date_label or not imu:
         return ""
@@ -678,17 +701,21 @@ def preview_stats_row(rows: list, date_label: str, imu: str) -> str:
     )
 
 
-def apply_stats_to_c_calc(rows: list, date_label: str, imu: str):
+def apply_stats_to_c_calc(rows: list, date_label: str, imu: str, dog_name_val: str):
     """把选中的(天,机位)统计行填进「C值计算」标签的各个输入框，同时把
     这个日期同步进「填写问答」标签的填表日期——用户要求"选了8-19，问答
-    那边的日期也自动一起选择"，不用同一个日期在两个标签各选一遍。"""
+    那边的日期也自动一起选择"，不用同一个日期在两个标签各选一遍。
+
+    dog_name_val是「导入IMU统计数据」标签里「对应狗狗」下拉框当前选的值
+    （默认来自IMU_DOG_DEFAULT_MAP，但用户可能已经手动改过，尤其IMU1），
+    一起同步进「填写问答」标签的狗狗名字，不用再手动选一遍。"""
     if not rows or not date_label or not imu:
         return (None, None, None, None, None, None, None, None, False, True,
-                gr.update(), "❌ 请先扫描根目录，并选好日期和机位")
+                gr.update(), gr.update(), "❌ 请先扫描根目录，并选好日期和机位")
     match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
     if not match:
         return (None, None, None, None, None, None, None, None, False, True,
-                gr.update(), f"❌ 没找到 {date_label}-{imu} 对应的数据")
+                gr.update(), gr.update(), f"❌ 没找到 {date_label}-{imu} 对应的数据")
 
     # n_baseline_days==0 表示这天没有可用的历史基线（第一天，或者之前的天
     # 佩戴时长都不达标被排除掉了）——自动帮用户取消「已经有个人基线」的
@@ -698,8 +725,9 @@ def apply_stats_to_c_calc(rows: list, date_label: str, imu: str):
     has_baseline_val = n_baseline_days > 0
 
     iso_date = _to_iso_date(match["date"])
+    dog_note = f"，狗狗名字已同步为「{dog_name_val}」" if dog_name_val else "（未选「对应狗狗」，狗狗名字没有同步，麻烦去「填写问答」标签手动选一下）"
     status = (f"✅ 已把 {match['date']}（{match['imu']}）的统计数据填进「C值计算」标签，"
-             f"「填写问答」标签的填表日期已同步为 {iso_date}")
+             f"「填写问答」标签的填表日期已同步为 {iso_date}{dog_note}")
     if not has_baseline_val:
         status += ("\n\n⚠️ 这天没有可用的历史基线（第一天，或之前的天佩戴时长都不达标），"
                   "「已经有个人基线」已自动取消勾选，「变化幅度」这一项不计分——"
@@ -708,13 +736,14 @@ def apply_stats_to_c_calc(rows: list, date_label: str, imu: str):
         status += (f"\n\n⚠️ 注意：这天佩戴时长只有{match.get('valid_wear_hours', '?')}小时"
                   f"（不足12小时），抓挠次数天然会偏低，算出来的C值会低估，"
                   f"不建议直接拿这天定档")
+    dog_update = gr.update(value=dog_name_val) if dog_name_val else gr.update()
     return (
         float(match["baseline_count"]), float(match["baseline_duration_min"]),
         float(match["event_count"]), float(match["total_duration_min"]),
         float(match["cluster_count"]), float(match["persistence_days"]),
         float(match["zn"]), float(match["zd"]), _parse_bool(match["long_scratch"]),
         has_baseline_val,
-        gr.update(value=iso_date), status,
+        gr.update(value=iso_date), dog_update, status,
     )
 
 
@@ -745,7 +774,7 @@ def build_app():
                     # 选不了)，不显式声明的话下拉框会变成只读的，之前"选不了"
                     # 就是这个问题
                     dog_name = gr.Dropdown(
-                        ["比熊-BB", "金毛-巴利", "中华田园犬-露露", "马尔济斯-小满"],
+                        DOG_NAME_OPTIONS,
                         label="狗狗名字", interactive=True,
                     )
                     fill_date = gr.DateTime(label="填表日期", include_time=False, type="string",
@@ -836,8 +865,14 @@ def build_app():
                     "产出的，每天一份、存在各自的日期目录下，所以跑多天不会互相覆盖；"
                     "也可以单独跑`src/imu_scratch_daily_stats.py`）。只有真的存在这份"
                     "文件的天才会列进「日期」下拉框——没跑过统计的天不会被误当成「有数据」。"
-                    "先选日期，「机位」下拉框会自动只列这天实际有数据的机位，选好之后点"
-                    "「应用」一键填进「C值计算」标签，不用自己一个个数字去数。\n\n"
+                    "先选日期，「机位」下拉框会自动只列这天实际有数据的机位，机位选好后"
+                    "「对应狗狗」会带出一个默认值（IMU1→比熊-BB、IMU2→金毛-巴利、"
+                    "IMU3→中华田园犬-露露、IMU5→马尔济斯-小满），**这只是默认值，"
+                    "不是写死的规则**——尤其IMU1，历史数据里对应的狗不一定一直是"
+                    "同一只（早期可能是金毛-巴利），不确定的话务必手动核对/改一下"
+                    "再点「应用」。选好之后点「应用」，「C值计算」标签的统计数字、"
+                    "「填写问答」标签的填表日期和狗狗名字会一起自动填上，不用自己"
+                    "一个个数字去数、也不用来回切标签选两遍。\n\n"
                     "⚠️ 基线次数/时长、持续天数这两组是自动估算的参考值（用同一个机位"
                     "别的日子的数据粗略估的，不是PM文档要求的严格21天基线），选好之后先去"
                     "「C值计算」标签核对/调整这两组数字，再看最终C值。"
@@ -855,6 +890,10 @@ def build_app():
                 with gr.Row():
                     stats_date_select = gr.Dropdown(label="日期", interactive=True)
                     stats_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
+                    stats_dog_select = gr.Dropdown(
+                        DOG_NAME_OPTIONS, label="对应狗狗", interactive=True,
+                        info="自动带出默认值，不确定就手动核对/改一下（尤其IMU1）",
+                    )
                 stats_preview_md = gr.Markdown()
 
                 apply_stats_btn = gr.Button("应用到「C值计算」标签", variant="primary")
@@ -876,6 +915,11 @@ def build_app():
                         inputs=[stats_rows_state, stats_date_select, stats_imu_select],
                         outputs=[stats_preview_md],
                     )
+                # 机位选好后，「对应狗狗」自动带出默认映射——只是默认值，用户
+                # 选好之后仍然可以自己改（尤其IMU1历史上对应过不同的狗）
+                stats_imu_select.change(
+                    fn=default_dog_for_imu, inputs=[stats_imu_select], outputs=[stats_dog_select],
+                )
 
             with gr.Tab("C值计算"):
                 gr.Markdown(
@@ -961,10 +1005,10 @@ def build_app():
                 # 去判断"这天到底有没有基线"
                 apply_stats_btn.click(
                     fn=apply_stats_to_c_calc,
-                    inputs=[stats_rows_state, stats_date_select, stats_imu_select],
+                    inputs=[stats_rows_state, stats_date_select, stats_imu_select, stats_dog_select],
                     outputs=[baseline_count, baseline_duration_min, today_count, today_duration_min,
                             cluster_count, persistence_days, zn, zd, long_scratch, has_baseline,
-                            fill_date, apply_status_md],
+                            fill_date, dog_name, apply_status_md],
                 )
 
             with gr.Tab("S总分"):
