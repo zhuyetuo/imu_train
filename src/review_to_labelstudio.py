@@ -336,9 +336,10 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
     # 一个session里：每条狗(IMU)有自己的CSV，机位(cam)有自己的视频，两者
     # 不是一回事——房间固定就2个机位，但可以同时挂4条狗，文件名会出现
     # cam1_imu1 / cam1_imu3 / cam1_imu4 / cam2_imu2 这样的组合。所以要
-    # 分开收集：imus_data按IMU编号存各自的CSV和检测结果，cam_stems按机位
-    # 编号存视频文件名。之前这里按cam分组当IMU用，同一个cam下的多条狗
-    # 会互相覆盖，只剩最后读到的那一条。
+    # 分开收集：imus按IMU编号存各自的CSV和检测结果，cam_nums_seen只是
+    # 记录这个session里出现过哪些机位编号(给cam_mode=auto估机位数用)。
+    # 之前这里按cam分组当IMU用，同一个cam下的多条狗会互相覆盖，只剩最后
+    # 读到的那一条。
     sessions = {}
     for infer_path in sorted(infer_jsons):
         with open(infer_path, encoding="utf-8") as f:
@@ -347,7 +348,7 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         sess = session_key(csv_basename)
         stem = os.path.splitext(csv_basename)[0]
 
-        entry = sessions.setdefault(sess, {"imus": {}, "cam_stems": {}})
+        entry = sessions.setdefault(sess, {"imus": {}, "cam_nums_seen": set(), "any_stem": stem})
 
         imu_num = parse_imu_num(stem)
         if imu_num is not None:
@@ -355,34 +356,36 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
 
         cam = parse_cam(csv_basename)
         if cam:
-            cam_num = int(re.search(r"\d+", cam).group())
-            # 同一个机位会被多条狗的CSV重复提到(cam1_imu1/cam1_imu3都指向
-            # cam1这一路视频)，视频文件名只认camN_imuN那一份——这是机位
-            # 视频文件本身固定的命名(见extract_clips.camera_video_stem)
-            if cam_num == imu_num or cam_num not in entry["cam_stems"]:
-                entry["cam_stems"][cam_num] = stem
+            entry["cam_nums_seen"].add(int(re.search(r"\d+", cam).group()))
 
     tasks = []
     task_id = 1
 
     for sess in sorted(sessions):
         imus_data = sessions[sess]["imus"]
-        cam_stems = sessions[sess]["cam_stems"]
+        cam_nums_seen = sessions[sess]["cam_nums_seen"]
+        any_stem = sessions[sess]["any_stem"]
 
         if cam_mode == "auto":
-            slot_count = max(cam_stems) if cam_stems else 1
+            slot_count = max(cam_nums_seen) if cam_nums_seen else 1
         else:
             slot_count = int(cam_mode)
 
         # video1..videoN 是这个session共享的，跟具体用哪条狗的CSV无关，
-        # 所以只算一次，下面每个IMU的task都复用同一份
+        # 所以只算一次，下面每个IMU的task都复用同一份。机位视频的文件名
+        # 固定是camN_imuN(见extract_clips.camera_video_stem)，这个规律
+        # 跟"这个session里camN自己的CSV/推理数据有没有成功读到"完全无关——
+        # 用any_stem(这个session里随便哪个IMU的CSV都行，前缀+后缀是共享
+        # 的)推算出每个camN的视频文件名，不要求camN自己的数据必须存在。
+        # 之前按"cam_num是否在cam_stems里"决定要不要生成video{n}，
+        # 如果那个机位designated的IMU(比如cam2的imu2)这次推理没跑出结果
+        # (文件损坏/为空之类)，即使摄像头本身正常录了像，也会导致
+        # video2被漏填成空字符串——摄像头视频存不存在，跟某一路IMU
+        # 传感器数据完不完整，是两件不该混在一起判断的事。
         video_urls = {}
         for n in range(1, slot_count + 1):
-            if n in cam_stems:
-                cam_stem = camera_video_stem_of(cam_stems[n], n)
-                video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
-            else:
-                video_urls[f"video{n}"] = ""
+            cam_stem = camera_video_stem_of(any_stem, n)
+            video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
 
         # 每条狗(IMU)自己的CSV、自己的检测结果各生成一个task——它们各有
         # 独立的CSV和抓挠检测，混在一起或者互相顶掉都会导致复查的时候
