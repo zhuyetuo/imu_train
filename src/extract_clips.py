@@ -28,6 +28,20 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 from timestamp_utils import pc_ms_value_to_ts_string  # noqa: E402
 
+
+def _cam_mode_type(value: str) -> str:
+    """--cam_mode的取值校验："auto"或任意正整数字符串（"2"/"3"/"4"/...）。
+    之前用choices=["auto","2","3"]写死只认2或3，机位数以后涨到4个的话
+    就得先改代码——机位数量本来就是会变的东西（cam3是这次会话里才新增
+    的），这里的校验逻辑不该跟着写死，改成"auto或任意正整数"就不用再为
+    新增机位改这个文件了。跟review_to_labelstudio.py的同名函数逻辑一致
+    （两边独立各写一份，不引入跨文件依赖）。"""
+    if value == "auto":
+        return value
+    if value.isdigit() and int(value) >= 1:
+        return value
+    raise argparse.ArgumentTypeError(f'必须是 "auto" 或正整数（比如 "2"/"3"/"4"），收到: {value!r}')
+
 BINS = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
 
 # 跟 infer_csv_scratch.py 保持一致（那边是 TS_KEYWORDS），pc_ms 是 witmotion_imu
@@ -158,15 +172,13 @@ def detect_session_cams(session: str, suffix: str, video_dir: str, cam_mode: str
     cam_mode="auto"（默认）：cam1/cam2固定包含，cam3起只在video_dir下真的
       找到对应视频文件时才加进来，找不到就当这天只有2个机位，不会在日志
       里凭空出现一个不存在的cam3⚠️。
-    cam_mode="2" / "3"：不做探测，直接固定返回[1,2]或[1,2,3]——跟
+    cam_mode="2"/"3"/"4"/...任意正整数：不做探测，直接固定返回[1..N]——跟
       review_to_labelstudio.py的--cam_mode是同一个语义，保证同一批任务
-      的机位数量是固定的（哪怕某天cam3视频真的缺失，也要在状态输出里
-      显示cam3⚠️，而不是这天的日志行里少一列，跟别的天格式对不上）。
+      的机位数量是固定的（哪怕某天某个机位视频真的缺失，也要在状态输出里
+      显示对应的⚠️，而不是这天的日志行里少一列，跟别的天格式对不上）。
     """
-    if cam_mode == "2":
-        return [1, 2]
-    if cam_mode == "3":
-        return [1, 2, 3]
+    if cam_mode != "auto":
+        return list(range(1, int(cam_mode) + 1))
     cams = list(BASE_CAM_NUMS)
     for cam_num in range(BASE_CAM_NUMS[-1] + 1, MAX_OPTIONAL_CAM_NUM + 1):
         stem = camera_video_stem(session, cam_num, suffix)
@@ -533,13 +545,14 @@ def main():
                              "Nginx媒体目录时后一次会静默覆盖前一次，导致Label Studio里"
                              "复查任务链接的文件名对不上实际内容。留空则不加（跟以前"
                              "行为一致），多次运行结果会共用同一个媒体目录时强烈建议传")
-    parser.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
+    parser.add_argument("--cam_mode", default="auto", type=_cam_mode_type,
                         help="固定处理几个机位: auto（默认）=按每个场次实际探测到的"
                              "机位视频文件走，只有2个机位的天不会凭空出现cam3；"
-                             "传2或3强制固定机位数量，哪怕某天缺某个机位的视频文件，"
-                             "状态输出里也会显示对应的cam2/cam3⚠️（而不是那天的日志"
-                             "行缺一列），保证同一批天数处理下来日志格式一致。"
-                             "要跟review_to_labelstudio.py的--cam_mode传一样的值")
+                             "传2/3/4/...任意正整数强制固定机位数量，哪怕某天缺某个"
+                             "机位的视频文件，状态输出里也会显示对应的cam2/cam3/cam4⚠️"
+                             "（而不是那天的日志行缺一列），保证同一批天数处理下来"
+                             "日志格式一致。要跟review_to_labelstudio.py的--cam_mode"
+                             "传一样的值")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
