@@ -39,6 +39,19 @@ import os
 import re
 
 
+def _cam_mode_type(value: str) -> str:
+    """--cam_mode的取值校验："auto"或任意正整数字符串（"2"/"3"/"4"/...）。
+    之前用choices=["auto","2","3"]写死只认2或3，机位数以后涨到4个的话
+    就得先改代码——机位数量本来就是会变的东西（cam3是这次会话里才新增
+    的），这里的校验逻辑不该跟着写死，改成"auto或任意正整数"就不用再为
+    新增机位改这个文件了。"""
+    if value == "auto":
+        return value
+    if value.isdigit() and int(value) >= 1:
+        return value
+    raise argparse.ArgumentTypeError(f'必须是 "auto" 或正整数（比如 "2"/"3"/"4"），收到: {value!r}')
+
+
 # ── 文件名解析 ────────────────────────────────────────────────────────────────
 
 def parse_cam(basename: str) -> str:
@@ -336,10 +349,14 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
     # 一个session里：每条狗(IMU)有自己的CSV，机位(cam)有自己的视频，两者
     # 不是一回事——房间固定就2个机位，但可以同时挂4条狗，文件名会出现
     # cam1_imu1 / cam1_imu3 / cam1_imu4 / cam2_imu2 这样的组合。所以要
-    # 分开收集：imus_data按IMU编号存各自的CSV和检测结果，cam_stems按机位
-    # 编号存视频文件名。之前这里按cam分组当IMU用，同一个cam下的多条狗
-    # 会互相覆盖，只剩最后读到的那一条。
+    # 分开收集：imus按IMU编号存各自的CSV和检测结果，cam_nums_seen只是
+    # 记录这个session里出现过哪些机位编号(给cam_mode=auto估机位数用)。
+    # 之前这里按cam分组当IMU用，同一个cam下的多条狗会互相覆盖，只剩最后
+    # 读到的那一条。
     sessions = {}
+    all_cam_nums_seen = set()  # 整个数据集里出现过的机位号，不分session——
+                               # 用来判断某个机位是"结构性根本不存在"还是
+                               # "只是这个session凑巧数据缺失"，见下面的说明
     for infer_path in sorted(infer_jsons):
         with open(infer_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -347,7 +364,7 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         sess = session_key(csv_basename)
         stem = os.path.splitext(csv_basename)[0]
 
-        entry = sessions.setdefault(sess, {"imus": {}, "cam_stems": {}})
+        entry = sessions.setdefault(sess, {"imus": {}, "cam_nums_seen": set(), "any_stem": stem})
 
         imu_num = parse_imu_num(stem)
         if imu_num is not None:
@@ -356,30 +373,43 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         cam = parse_cam(csv_basename)
         if cam:
             cam_num = int(re.search(r"\d+", cam).group())
-            # 同一个机位会被多条狗的CSV重复提到(cam1_imu1/cam1_imu3都指向
-            # cam1这一路视频)，视频文件名只认camN_imuN那一份——这是机位
-            # 视频文件本身固定的命名(见extract_clips.camera_video_stem)
-            if cam_num == imu_num or cam_num not in entry["cam_stems"]:
-                entry["cam_stems"][cam_num] = stem
+            entry["cam_nums_seen"].add(cam_num)
+            all_cam_nums_seen.add(cam_num)
 
     tasks = []
     task_id = 1
 
     for sess in sorted(sessions):
         imus_data = sessions[sess]["imus"]
-        cam_stems = sessions[sess]["cam_stems"]
+        any_stem = sessions[sess]["any_stem"]
 
         if cam_mode == "auto":
-            slot_count = max(cam_stems) if cam_stems else 1
+            slot_count = max(sessions[sess]["cam_nums_seen"]) if sessions[sess]["cam_nums_seen"] else 1
         else:
             slot_count = int(cam_mode)
 
         # video1..videoN 是这个session共享的，跟具体用哪条狗的CSV无关，
-        # 所以只算一次，下面每个IMU的task都复用同一份
+        # 所以只算一次，下面每个IMU的task都复用同一份。机位视频的文件名
+        # 固定是camN_imuN(见extract_clips.camera_video_stem)，用any_stem
+        # (这个session里随便哪个IMU的CSV都行，前缀+后缀是共享的)就能推算
+        # 出来，不要求camN自己这个session的数据必须存在——之前按"cam_num
+        # 是否在这个session读到的数据里"决定要不要生成video{n}，如果那个
+        # 机位designated的IMU(比如cam2的imu2)这次推理没跑出结果(文件
+        # 损坏/为空之类)，即使摄像头本身正常录了像，也会导致video2被漏填
+        # 成空字符串——摄像头视频存不存在，跟某一路IMU传感器数据完不完整，
+        # 是两件不该混在一起判断的事。
+        #
+        # 但"这个session缺数据"和"这个机位整个数据集里压根不存在"也要分开：
+        # 用all_cam_nums_seen(整个数据集，不分session)判断——camN只要在
+        # 别的session出现过，就说明这个机位真实存在，这个session虽然缺数据
+        # 也照样按规律推算视频名(上面那种情况)；但如果camN在整个数据集里
+        # 一次都没出现过(比如CAM_MODE传的机位数比实际录制的机位数还多，
+        # 这次只有3个机位却传了CAM_MODE=4)，说明这个机位是"从来就不存在"，
+        # 那就该照老规矩给空字符串占位，不能瞎猜一个大概率404的URL出来
         video_urls = {}
         for n in range(1, slot_count + 1):
-            if n in cam_stems:
-                cam_stem = camera_video_stem_of(cam_stems[n], n)
+            if n in all_cam_nums_seen:
+                cam_stem = camera_video_stem_of(any_stem, n)
                 video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
             else:
                 video_urls[f"video{n}"] = ""
@@ -454,15 +484,17 @@ def main():
                         help="MP4 文件 URL 前缀（默认 csv_url_prefix/transcoded）")
     parser.add_argument("--use_clips",  action="store_true",
                         help="扫描 clips_*/ 目录（推荐），而非 _infer.json")
-    parser.add_argument("--cam_mode", default="auto", choices=["auto", "2", "3"],
-                        help="每个任务固定生成几个videoN字段（仅--use_clips模式生效）。"
-                             "auto（默认）=按每个clip组实际探测到的机位数量走，不同"
-                             "组之间字段数量可能不一样；传2或3可以强制固定字段数量"
-                             "（要跟Label Studio项目里配置的Video组件个数一致，否则"
-                             "导入会报错缺字段）——比如项目按3机位配置好了，但某天"
-                             "原始视频只拍了2个视角，传--cam_mode 3能保证那天的任务"
-                             "也带上video3字段（值是空字符串占位，不是拿别的机位画面"
-                             "顶替），不会导致那天的任务导入失败")
+    parser.add_argument("--cam_mode", default="auto", type=_cam_mode_type,
+                        help="每个任务固定生成几个videoN字段（--use_clips和--ml_full_video"
+                             "两种模式都吃这个参数）。auto（默认）=按每个session/clip组"
+                             "实际探测到的机位数量走，不同组之间字段数量可能不一样；传"
+                             "2/3/4/...任意正整数可以强制固定字段数量（要跟Label Studio"
+                             "项目里配置的Video组件个数一致，否则导入会报错缺字段）——"
+                             "比如项目按3机位配置好了，但某天原始视频只拍了2个视角，传"
+                             "--cam_mode 3能保证那天的任务也带上video3字段（值是空字符串"
+                             "占位，不是拿别的机位画面顶替），不会导致那天的任务导入失败。"
+                             "机位数以后增加时（比如4机位）直接传--cam_mode 4就行，不需要"
+                             "改代码")
     parser.add_argument("--mode", default="scratch_only",
                         choices=["scratch_only", "uncertain", "all"])
     parser.add_argument("--low_threshold",  type=float, default=0.3)
