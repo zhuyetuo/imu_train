@@ -844,14 +844,23 @@ def ml_predict_c(rows, date_label, imu, dog_name_val):
     不是一次性把C/S都算完：用户可能只想看C档位就够了，不一定每次都要
     去填问答、等模型B；分开之后也能让"要不要填问答"这个决定发生在看到
     C档位结果之后，符合用户描述的"先模型A看结果，再决定填不填问答"这个
-    使用顺序。"""
+    使用顺序。
+
+    是个生成器函数——先yield一行"预测中"，再yield真正的结果。Gradio对
+    生成器函数的处理是每次yield都推一次界面更新，用户点完按钮到真正
+    算完之间那几秒(读模型、算多天历史特征)不会是"页面看着没反应"，
+    先看到"⏳ 模型A预测中..."这行字，不会以为卡住了。"""
+    yield "⏳ 模型A预测中……（读取多天历史数据、计算特征）"
+
     match, breed, err = _ml_resolve(rows, date_label, imu, dog_name_val)
     if err:
-        return err
+        yield err
+        return
     a_avail, _ = rf_infer.models_available()
     if not a_avail:
-        return ("❌ 模型A文件不存在，先在skin_health/code/下跑：\n\n"
-               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n```")
+        yield ("❌ 模型A文件不存在，先在skin_health/code/下跑：\n\n"
+              "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n```")
+        return
 
     import datetime as _dt
     target_date = _dt.date.fromisoformat(match["date"])
@@ -860,7 +869,8 @@ def ml_predict_c(rows, date_label, imu, dog_name_val):
 
     c_res = rf_infer.predict_c(model_a, events, wear, imu, breed, target_date)
     if not c_res["available"]:
-        return f"❌ 模型A无法预测：{c_res['reason']}"
+        yield f"❌ 模型A无法预测：{c_res['reason']}"
+        return
 
     lines = [
         "## 模型A —— IMU行为严重度（C档位）",
@@ -869,7 +879,7 @@ def ml_predict_c(rows, date_label, imu, dog_name_val):
         _proba_table(c_res["proba"], c_res["tier"]),
         _ML_CAVEAT,
     ]
-    return "\n".join(lines)
+    yield "\n".join(lines)
 
 
 def ml_goto_questionnaire(rows, date_label, imu, dog_name_val):
@@ -878,14 +888,15 @@ def ml_goto_questionnaire(rows, date_label, imu, dog_name_val):
     切换到那个标签。跳转回来不需要额外处理：Gradio的Tab只是同一个页面
     里的显示/隐藏切换，不是分开的页面，「填写问答」标签里选的问答答案
     本来就是实时共享状态，切回"ML版对比"标签点"预测S档位"按钮时能直接
-    读到，不用专门做"返回时自动带回结果"这一步。"""
+    读到，不用专门做"返回时自动带回结果"这一步。
+
+    「填写问答」标签同时服务PM版(S总分)和ML版(模型B)两条路径，容易分不清
+    "填完该回哪"——所以那边放了两个分开的"回去"按钮(回PM版S总分/回ML版
+    模型B)，不是只有一个含糊的"去S总分"。"""
     match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None) \
         if rows and date_label and imu else None
     date_update = gr.update(value=match["date"]) if match else gr.update()
     dog_update = gr.update(value=dog_name_val) if dog_name_val else gr.update()
-    # 「填写问答」标签是Tabs里定义的第一个Tab，Gradio没显式给id时按定义
-    # 顺序从0开始编号，selected=0就是切过去那个标签，不用额外给每个Tab
-    # 手动设id
     return date_update, dog_update, gr.Tabs(selected=0)
 
 
@@ -902,16 +913,23 @@ def ml_predict_s(rows, date_label, imu, dog_name_val,
     概率当stacking特征，两次调用之间没有跨请求缓存，重新算一遍开销很小
     (就是读文件+算特征+两次predict_proba)，比维护一份"上次C预测结果"的
     跨按钮状态简单可靠，不会出现"C按钮跟S按钮点的不是同一份数据"这种
-    因为状态没同步好导致的不一致。"""
+    因为状态没同步好导致的不一致。
+
+    也是生成器函数，先yield"预测中"，理由跟ml_predict_c()一样——这一步
+    比模型A还多算一次模型B的推理，等待时间更该有个提示。"""
+    yield "⏳ 模型B预测中……（读取多天历史数据、计算特征）"
+
     match, breed, err = _ml_resolve(rows, date_label, imu, dog_name_val)
     if err:
-        return err
+        yield err
+        return
     a_avail, b_avail = rf_infer.models_available()
     if not (a_avail and b_avail):
-        return ("❌ 模型文件不存在，先在skin_health/code/下跑：\n\n"
-               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
-               "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
-               "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
+        yield ("❌ 模型文件不存在，先在skin_health/code/下跑：\n\n"
+              "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
+              "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
+              "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
+        return
 
     import datetime as _dt
     target_date = _dt.date.fromisoformat(match["date"])
@@ -922,7 +940,8 @@ def ml_predict_s(rows, date_label, imu, dog_name_val,
     ordinals = _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, coat)
     s_res = rf_infer.predict_s(model_a, model_b, events, wear, imu, breed, target_date, ordinals)
     if not s_res["available"]:
-        return f"## 模型B —— 综合严重度（S档位）\n⚠️ {s_res['reason']}{_ML_CAVEAT}"
+        yield f"## 模型B —— 综合严重度（S档位）\n⚠️ {s_res['reason']}{_ML_CAVEAT}"
+        return
 
     lines = [
         "## 模型B —— 综合严重度（S档位）",
@@ -938,7 +957,7 @@ def ml_predict_s(rows, date_label, imu, dog_name_val,
                      f"问答暂缺，模型原生支持缺失值，不影响预测能不能跑，只是这几个特征"
                      f"这次没提供信息量）")
     lines.append(_ML_CAVEAT)
-    return "\n".join(lines)
+    yield "\n".join(lines)
 
 
 def _to_iso_date(day_str: str) -> str:
@@ -1225,8 +1244,17 @@ def build_app():
                     fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
                 )
 
-                goto_s_from_q_btn = gr.Button("问答填完了，去「S总分」标签看最终结果")
-                goto_s_from_q_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
+                gr.Markdown(
+                    "填完了要去哪儿看结果，取决于你是从哪边过来的——这个标签"
+                    "同时服务PM版(S总分)和ML版(模型B)两条路径，选错了会读到"
+                    "同一份问答答案但走的是不同的计算方式，两个按钮分开点，"
+                    "不用猜。"
+                )
+                with gr.Row():
+                    goto_s_pm_btn = gr.Button("问答填完了，回PM版「S总分」看结果（固定加权公式）")
+                    goto_s_ml_btn = gr.Button("问答填完了，回「ML版对比」用模型B预测（学出来的权重）")
+                goto_s_pm_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
+                goto_s_ml_btn.click(fn=lambda: gr.Tabs(selected=4), outputs=[main_tabs])
 
                 gr.Markdown("## 保存")
                 confirm_overwrite = gr.Checkbox(
@@ -1488,6 +1516,10 @@ def build_app():
                         DOG_NAME_OPTIONS, label="对应狗狗", interactive=True,
                         info="自动带出默认值，不确定就手动核对/改一下（尤其IMU1）",
                     )
+                # 选好之后会自动刷新一次预览，但选项一多、切换比较快的时候
+                # 不一定每次都留意到——多给一个明确的按钮，点了立刻看这天的
+                # 原始统计，不用纠结"是不是要重新选一下选项才会刷新"
+                ml_preview_btn = gr.Button("查看这天的统计数据")
                 ml_preview_md = gr.Markdown()
 
                 gr.Markdown("### ① 先用模型A预测C档位")
@@ -1527,6 +1559,10 @@ def build_app():
                         fn=ml_preview, inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
                         outputs=[ml_preview_md],
                     )
+                ml_preview_btn.click(
+                    fn=ml_preview, inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
+                    outputs=[ml_preview_md],
+                )
                 ml_predict_c_btn.click(
                     fn=ml_predict_c,
                     inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
