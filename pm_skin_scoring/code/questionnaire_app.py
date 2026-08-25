@@ -252,12 +252,21 @@ C_DELTA_TIERS = [
 
 
 def _c_delta_score_one(current, baseline, use_duration: bool):
+    """PM表格里"次数/时长最小绝对增加"这一栏写的是"≥"(下限含)，但"相对倍数"
+    这一栏写的是"1.3倍 < 相对倍数 ≤ 1.5倍"这种——下限用`<`(不含)、上限用`≤`
+    (含)，只有最高档"相对倍数 > 3倍"没有上限、纯大于。两栏的边界含义不一样，
+    不能统一用>=判断：之前两个条件都用>=，导致倍数刚好等于某一档下限时
+    (比如正好3.00倍、正好1.5倍)会被错误地算进上一档——比如倍数=3.00时，
+    PM表格里"2倍<相对倍数≤3倍"这档(20分)才是倍数=3.00该落的档，因为上限
+    3倍是"含"的，"相对倍数>3倍"那档(30分/红旗)要求严格大于3，3.00不满足；
+    但之前用>=3.0判断的话3.00会被误判成命中最高档，多算10分还多触发一个
+    不该有的红旗。"""
     denom = max(baseline, C_BASELINE_DENOM_FLOOR)
     ratio = current / denom
     abs_increase = current - baseline
     for score, abs_min_count, abs_min_dur_min, ratio_min in C_DELTA_TIERS:
         abs_min = abs_min_dur_min if use_duration else abs_min_count
-        if abs_increase >= abs_min and ratio >= ratio_min:
+        if abs_increase >= abs_min and ratio > ratio_min:
             return score, ratio
     return 0, ratio
 
