@@ -1216,6 +1216,9 @@ def build_app():
                     fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
                 )
 
+                goto_s_from_q_btn = gr.Button("问答填完了，去「S总分」标签看最终结果")
+                goto_s_from_q_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
+
                 gr.Markdown("## 保存")
                 confirm_overwrite = gr.Checkbox(
                     label="确认覆盖已有的同名记录",
@@ -1368,6 +1371,22 @@ def build_app():
                 c_calc_btn.click(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
                 for inp in c_inputs:
                     inp.change(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
+
+                gr.Markdown(
+                    "## 下一步\n"
+                    "C值算完了，S总分还需要问答部分——去填一下问答能让S总分更准；"
+                    "不想填也可以跳过，直接去看S总分（问答部分按0分算，PM的固定"
+                    "公式没有问答就没法给出真实分数，跳过≠模型能补全，这点跟"
+                    "「ML版对比」标签里模型B能在没问答时照样预测不一样）。"
+                )
+                with gr.Row():
+                    goto_questionnaire_from_c_btn = gr.Button("去「填写问答」标签填问卷")
+                    goto_s_skip_q_btn = gr.Button("跳过问答，直接看「S总分」")
+                # 「填写问答」是Tabs里定义的第一个Tab，「S总分」是第四个，
+                # Gradio没显式给id时按定义顺序从0开始编号——跟ML版对比标签
+                # 的ml_goto_questionnaire()是同一个"selected=数字下标"用法
+                goto_questionnaire_from_c_btn.click(fn=lambda: gr.Tabs(selected=0), outputs=[main_tabs])
+                goto_s_skip_q_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
 
                 # 「导入IMU统计数据」标签选好(天,机位)后点"应用"，直接把这几个
                 # 输入框填上，同时把「填写问答」标签的填表日期也同步过去。
