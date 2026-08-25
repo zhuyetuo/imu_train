@@ -3,12 +3,16 @@
 # 只用传PROJECT_ID，不用再手动分两步敲导出命令、再敲remap_completed_by.py命令。
 #
 # 用法:
-#   LS_HOST=http://192.168.2.140:8181 LS_PAT="<原实例的Personal Access Token>" \
-#     ./export_and_remap_project.sh 91 155 203
+#   ./export_and_remap_project.sh 91 155 203
 #
-# 环境变量:
-#   LS_HOST        原实例(要导出数据的那个)地址，包含端口，不带末尾斜杠（必填）
-#   LS_PAT         原实例的Personal Access Token（必填）
+# LS_HOST/LS_PAT都写死在下面的默认值里——这个仓库是私有的，只有内网能访问
+# 这台Label Studio，按用户的判断这个token写进git历史可以接受，不用每次
+# 传参数。这个PAT过期/被revoke之后要换新的，直接改下面DEFAULT_LS_PAT这行
+# 就行，不用去改调用方式。
+#
+# 环境变量（可以临时覆盖下面的默认值，比如给不同的原实例跑）:
+#   LS_HOST        原实例(要导出数据的那个)地址，包含端口，不带末尾斜杠
+#   LS_PAT         原实例的Personal Access Token
 #   COMPLETED_BY_MAP  "原ID=目标ID"的映射，逗号分隔多个，默认"5=5,6=6"——这是
 #                  目前raven@hiccpet.com(两边都是5)和zyt290386779@gmail.com
 #                  (两边都是6)这两位的映射，换了别的project如果标注人不一样，
@@ -22,13 +26,14 @@
 
 set -euo pipefail
 
-if [[ $# -eq 0 ]]; then
-    echo "用法: LS_HOST=... LS_PAT=... $0 <project_id> [project_id2] ..." >&2
-    exit 1
-fi
+DEFAULT_LS_HOST="http://192.168.2.140:8181"
+DEFAULT_LS_PAT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6ODA4OTQ2Njk2OSwiaWF0IjoxNzgyMjY2OTY5LCJqdGkiOiI2MGI4ZmI2MTUyZmY0OGJmODZlMTViZDhjMTEwMDgzNSIsInVzZXJfaWQiOiIxIn0.N5mD05XdF9RImY703henvvI9r5mKvmrF_IO0Sv_VrNY"
 
-if [[ -z "${LS_HOST:-}" || -z "${LS_PAT:-}" ]]; then
-    echo "[错误] 请先设置 LS_HOST 和 LS_PAT 环境变量" >&2
+LS_HOST="${LS_HOST:-$DEFAULT_LS_HOST}"
+LS_PAT="${LS_PAT:-$DEFAULT_LS_PAT}"
+
+if [[ $# -eq 0 ]]; then
+    echo "用法: $0 <project_id> [project_id2] ..." >&2
     exit 1
 fi
 
