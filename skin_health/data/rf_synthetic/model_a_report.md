@@ -2,18 +2,18 @@
 
 训练表：2857行，86个场景狗
 
-交叉验证(5折，按场景狗分组)宏F1：均值=0.930 标准差=0.008
+交叉验证(5折，按场景狗分组)宏F1：均值=0.926 标准差=0.016
 
 ## 特征重要性(permutation importance，全量数据)
 
 | 特征 | 重要性均值 | 标准差 |
 |---|---|---|
-| sleep_disruption_count | 0.2850 | 0.0039 |
-| baseline_ratio_count_excl_recent14 | 0.1281 | 0.0050 |
-| total_duration_min | 0.0395 | 0.0026 |
-| night_ratio | 0.0125 | 0.0021 |
-| rolling_mean_3d | 0.0045 | 0.0008 |
-| interval_mean | 0.0013 | 0.0008 |
+| sleep_disruption_count | 0.2838 | 0.0036 |
+| baseline_ratio_count_excl_recent14 | 0.1242 | 0.0048 |
+| total_duration_min | 0.0431 | 0.0022 |
+| night_ratio | 0.0127 | 0.0017 |
+| rolling_mean_3d | 0.0052 | 0.0010 |
+| interval_mean | 0.0009 | 0.0008 |
 | event_rate_per_wear_hour | 0.0001 | 0.0001 |
 | duration_median | 0.0000 | 0.0000 |
 | event_count | 0.0000 | 0.0000 |
