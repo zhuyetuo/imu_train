@@ -10,11 +10,16 @@
 # 即可，不用额外拷贝一份媒体文件。
 #
 # 用法:
-#   cd label_studio_secondary
-#   docker compose up -d
-#   浏览器打开 http://<服务器IP>:8081，首次访问会引导注册第一个账号
-#   （这个账号会成为这套实例的管理员），后续在Django admin或Label Studio
-#   自己的用户管理页面(Organization > Members)邀请其他人
+#   1. 改下面environment里的LABEL_STUDIO_USERNAME/LABEL_STUDIO_PASSWORD
+#      成你自己要用的邮箱和密码（不能用默认占位值，必须改）
+#   2. cd label_studio_secondary && docker compose up -d
+#   3. 浏览器打开 http://<服务器IP>:8081，用上面设置的邮箱+密码登录——
+#      DISABLE_SIGNUP_WITHOUT_LINK=true关掉了自助注册，页面只会显示登录，
+#      不会显示注册，第一个管理员账号必须靠LABEL_STUDIO_USERNAME/PASSWORD
+#      这两个环境变量在启动时自动建好，不是在网页上"首次访问自动引导注册"
+#      （如果只设了DISABLE_SIGNUP_WITHOUT_LINK没设这两个，会出现"一个账号
+#      都没有、但又进不去注册页"的死锁，登录页显示"账号密码不匹配"）
+#   4. 登进去之后，在右上角 Organization > Members 邀请其他外部标注员
 #
 #   停止:   docker compose down
 #   看日志: docker compose logs -f
@@ -32,6 +37,11 @@ services:
       # 关掉"允许任何人自助注册"，避免陌生人自己注册账号就能看到project——
       # 只应该由管理员在后台手动邀请指定的外部标注员
       - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
+      # 第一个管理员账号，启动时自动创建——必须改成你自己的邮箱和密码，
+      # 不要用下面这两个占位值。用户名必须是邮箱格式（Label Studio的账号
+      # 系统按邮箱识别）
+      - LABEL_STUDIO_USERNAME=change-me@example.com
+      - LABEL_STUDIO_PASSWORD=change-me-to-a-real-password
     volumes:
       # 独立的数据目录（数据库、上传文件等），不跟主实例共用，保证project
       # 和用户数据完全隔离——这就是"真隔离"这个效果的来源
