@@ -179,6 +179,17 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
     hair_group_score = g["hair_group_raw"] * HAIR_GROUP_WEIGHT
     total = _round_half_up(skin_group_score + hair_group_score, 2)
 
+    # 红旗提示——纯信息展示，不影响total这个数字本身，"填写问答"标签的
+    # 计算逻辑/输出签名不变。体味/皮损/秃毛分布/秃毛面积/整体毛质这5题
+    # 满分都是20(皮肤颜色满分只有15，够不到)，选中满分选项时提前告诉
+    # 填表人"这题去S总分标签会直接判S2"，不用等填完切到S总分标签才发现
+    red_flag_titles = {"odor": "体味", "lesion": "皮损", "spot": "秃毛分布",
+                       "diameter": "秃毛面积", "coat": "整体毛质"}
+    red_flag_hit = [title for key, title in red_flag_titles.items() if g[key] == 20]
+    red_flag_line = (f"\n> 🚩 「{'、'.join(red_flag_hit)}」选中了满分选项——这几题只要"
+                     f"有一题是满分，去「S总分」标签算的时候会不看加权总分、直接判S2"
+                     if red_flag_hit else "")
+
     breakdown = (
         f"| 题目 | 原始分 |\n|---|---|\n"
         f"| 皮肤颜色 | {g['color']} |\n"
@@ -190,6 +201,7 @@ def compute_score(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, 
         f"| 整体毛质 | {g['coat']} |\n"
         f"| **毛发状态组小计 × {HAIR_GROUP_WEIGHT:.0%}** | **{g['hair_group_raw']} × {HAIR_GROUP_WEIGHT:.0%} = {hair_group_score:.2f}** |\n"
         f"| **问答分数合计** | **{total}** |\n"
+        f"{red_flag_line}"
     )
     return total, breakdown
 
@@ -252,12 +264,21 @@ C_DELTA_TIERS = [
 
 
 def _c_delta_score_one(current, baseline, use_duration: bool):
+    """PM表格里"次数/时长最小绝对增加"这一栏写的是"≥"(下限含)，但"相对倍数"
+    这一栏写的是"1.3倍 < 相对倍数 ≤ 1.5倍"这种——下限用`<`(不含)、上限用`≤`
+    (含)，只有最高档"相对倍数 > 3倍"没有上限、纯大于。两栏的边界含义不一样，
+    不能统一用>=判断：之前两个条件都用>=，导致倍数刚好等于某一档下限时
+    (比如正好3.00倍、正好1.5倍)会被错误地算进上一档——比如倍数=3.00时，
+    PM表格里"2倍<相对倍数≤3倍"这档(20分)才是倍数=3.00该落的档，因为上限
+    3倍是"含"的，"相对倍数>3倍"那档(30分/红旗)要求严格大于3，3.00不满足；
+    但之前用>=3.0判断的话3.00会被误判成命中最高档，多算10分还多触发一个
+    不该有的红旗。"""
     denom = max(baseline, C_BASELINE_DENOM_FLOOR)
     ratio = current / denom
     abs_increase = current - baseline
     for score, abs_min_count, abs_min_dur_min, ratio_min in C_DELTA_TIERS:
         abs_min = abs_min_dur_min if use_duration else abs_min_count
-        if abs_increase >= abs_min and ratio >= ratio_min:
+        if abs_increase >= abs_min and ratio > ratio_min:
             return score, ratio
     return 0, ratio
 
