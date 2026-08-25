@@ -805,40 +805,47 @@ def _proba_table(proba: dict, predicted_tier: str) -> str:
     return "\n".join(lines)
 
 
-def ml_predict(rows, date_label, imu, dog_name_val,
-               has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
-    """真正调用rf_infer跑一遍预测——events/wear_hours每次都重新扫描/重新
-    算特征，不缓存，保证拿到的是当前_infer.json目录下最新的数据（这些
-    目录内容可能在用户操作过程中被新的推理结果更新，缓存的话容易过期）。
+_ML_CAVEAT = (
+    "\n---\n⚠️ 这两个模型目前只在合成数据上训练过，没有真实兽医标签校准过，"
+    "预测结果不代表真实准确率，只能看个大概方向、跟PM版的C值计算/S总分"
+    "对照看两套方案在同一天差多少，不能当成真实诊断依据。"
+)
 
-    模型B(S档位)不强制要求问答——"填写问答"标签没填就把问答那7个特征
-    当缺失值喂给模型，HistGradientBoostingClassifier原生支持缺失值，
-    照样能出一个预测（置信度可能会因为少了问答这部分信号更不确定，
-    具体信不信看下面显示的概率分布自己判断）。这跟PM版"S总分必须先有
-    C值+问答"的强制要求不一样：PM那套是固定公式，公式里没数字就没法算；
-    这边是训练出来的模型，缺问答不等于没法预测。"""
+
+def _ml_resolve(rows, date_label, imu, dog_name_val):
+    """三个ML函数(预测C/预测S/去填问答)共用的"选好了没有"校验+定位当前
+    (root,imu,date,breed)——抽成一个函数，三处保持完全一致的校验逻辑和
+    报错文案，不是各自重复写一遍容易改漏。返回(match, breed, error_msg)，
+    error_msg非空时前两个是None，调用方直接返回error_msg。"""
     if rf_infer is None:
-        return f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
-    a_avail, b_avail = rf_infer.models_available()
-    if not (a_avail and b_avail):
-        return ("❌ 模型文件不存在，先在skin_health/code/下跑：\n\n"
-               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
-               "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
-               "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
-
+        return None, None, f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
     if not rows or not date_label or not imu:
-        return "❌ 请先扫描根目录，并选好日期和机位"
+        return None, None, "❌ 请先扫描根目录，并选好日期和机位"
     match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
     if not match:
-        return f"❌ 没找到 {date_label}-{imu} 对应的数据"
-
+        return None, None, f"❌ 没找到 {date_label}-{imu} 对应的数据"
     breed = _dog_breed(dog_name_val)
     if not breed:
-        return "❌ 请先选好「对应狗狗」（用来对应品种，机位选好后会自动带出默认值）"
+        return None, None, "❌ 请先选好「对应狗狗」（用来对应品种，机位选好后会自动带出默认值）"
+    return match, breed, ""
+
+
+def ml_predict_c(rows, date_label, imu, dog_name_val):
+    """第①步——只跑模型A，出C档位。跟模型B分开成两个按钮/两次调用，
+    不是一次性把C/S都算完：用户可能只想看C档位就够了，不一定每次都要
+    去填问答、等模型B；分开之后也能让"要不要填问答"这个决定发生在看到
+    C档位结果之后，符合用户描述的"先模型A看结果，再决定填不填问答"这个
+    使用顺序。"""
+    match, breed, err = _ml_resolve(rows, date_label, imu, dog_name_val)
+    if err:
+        return err
+    a_avail, _ = rf_infer.models_available()
+    if not a_avail:
+        return ("❌ 模型A文件不存在，先在skin_health/code/下跑：\n\n"
+               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n```")
 
     import datetime as _dt
     target_date = _dt.date.fromisoformat(match["date"])
-
     events, wear = rf_infer.load_events_and_wear(match["root"], imu)
     model_a = rf_infer.load_model_a()
 
@@ -851,31 +858,77 @@ def ml_predict(rows, date_label, imu, dog_name_val,
         "*权重是从合成数据训练出来的，不是PM那套固定加权公式*\n",
         f"### 预测：**{c_res['tier']}**\n",
         _proba_table(c_res["proba"], c_res["tier"]),
-        "",
+        _ML_CAVEAT,
     ]
+    return "\n".join(lines)
+
+
+def ml_goto_questionnaire(rows, date_label, imu, dog_name_val):
+    """"去「填写问答」标签"按钮——把ML标签当前选好的日期/狗狗同步进
+    「填写问答」标签的填表日期/狗狗名字(不用两个标签分别选一遍)，然后
+    切换到那个标签。跳转回来不需要额外处理：Gradio的Tab只是同一个页面
+    里的显示/隐藏切换，不是分开的页面，「填写问答」标签里选的问答答案
+    本来就是实时共享状态，切回"ML版对比"标签点"预测S档位"按钮时能直接
+    读到，不用专门做"返回时自动带回结果"这一步。"""
+    match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None) \
+        if rows and date_label and imu else None
+    date_update = gr.update(value=match["date"]) if match else gr.update()
+    dog_update = gr.update(value=dog_name_val) if dog_name_val else gr.update()
+    # 「填写问答」标签是Tabs里定义的第一个Tab，Gradio没显式给id时按定义
+    # 顺序从0开始编号，selected=0就是切过去那个标签，不用额外给每个Tab
+    # 手动设id
+    return date_update, dog_update, gr.Tabs(selected=0)
+
+
+def ml_predict_s(rows, date_label, imu, dog_name_val,
+                 has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+    """第③步——跑模型B，出S档位。问答是可选的：「填写问答」标签没填就把
+    问答那7个特征当缺失值喂给模型，HistGradientBoostingClassifier原生
+    支持缺失值，照样能出一个预测（置信度可能会因为少了问答这部分信号
+    更不确定，具体信不信看下面显示的概率分布自己判断）。这跟PM版"S总分
+    必须先有C值+问答"的强制要求不一样：PM那套是固定公式，公式里没数字
+    就没法算；这边是训练出来的模型，缺问答不等于没法预测。
+
+    重新跑一次模型A(不复用ml_predict_c的结果)——模型B需要模型A的预测
+    概率当stacking特征，两次调用之间没有跨请求缓存，重新算一遍开销很小
+    (就是读文件+算特征+两次predict_proba)，比维护一份"上次C预测结果"的
+    跨按钮状态简单可靠，不会出现"C按钮跟S按钮点的不是同一份数据"这种
+    因为状态没同步好导致的不一致。"""
+    match, breed, err = _ml_resolve(rows, date_label, imu, dog_name_val)
+    if err:
+        return err
+    a_avail, b_avail = rf_infer.models_available()
+    if not (a_avail and b_avail):
+        return ("❌ 模型文件不存在，先在skin_health/code/下跑：\n\n"
+               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
+               "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
+               "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
+
+    import datetime as _dt
+    target_date = _dt.date.fromisoformat(match["date"])
+    events, wear = rf_infer.load_events_and_wear(match["root"], imu)
+    model_a = rf_infer.load_model_a()
+    model_b = rf_infer.load_model_b()
 
     ordinals = _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, coat)
-    model_b = rf_infer.load_model_b()
     s_res = rf_infer.predict_s(model_a, model_b, events, wear, imu, breed, target_date, ordinals)
     if not s_res["available"]:
-        lines.append(f"## 模型B —— 综合严重度（S档位）\n⚠️ {s_res['reason']}")
-    else:
-        lines.append("## 模型B —— 综合严重度（S档位）")
-        lines.append("*模型A的特征+输出概率 + 问答特征（如果有）→ S0/S1/S2*\n")
-        q_note = ("（用了「填写问答」标签的答案）" if s_res["used_questionnaire"]
-                  else "（**没有问答数据**，只用IMU特征预测，置信度可能因此更不确定）")
-        lines.append(f"### 预测：**{s_res['tier']}** {q_note}\n")
-        lines.append(_proba_table(s_res["proba"], s_res["tier"]))
-        if s_res.get("missing_features"):
-            lines.append(f"\n（另有{len(s_res['missing_features'])}个特征因历史数据不够/没填对应"
-                         f"问答暂缺，模型原生支持缺失值，不影响预测能不能跑，只是这几个特征"
-                         f"这次没提供信息量）")
+        return f"## 模型B —— 综合严重度（S档位）\n⚠️ {s_res['reason']}{_ML_CAVEAT}"
 
-    lines.append(
-        "\n---\n⚠️ 这两个模型目前只在合成数据上训练过，没有真实兽医标签校准过，"
-        "预测结果不代表真实准确率，只能看个大概方向、跟PM版的C值计算/S总分"
-        "对照看两套方案在同一天差多少，不能当成真实诊断依据。"
-    )
+    lines = [
+        "## 模型B —— 综合严重度（S档位）",
+        "*模型A的特征+输出概率 + 问答特征（如果有）→ S0/S1/S2*\n",
+    ]
+    q_note = ("（用了「填写问答」标签的答案）" if s_res["used_questionnaire"]
+             else "（**没有问答数据**，只用IMU特征预测，置信度可能因此更不确定，"
+                  "想更准就去「填写问答」标签填一下再回来点这个按钮）")
+    lines.append(f"### 预测：**{s_res['tier']}** {q_note}\n")
+    lines.append(_proba_table(s_res["proba"], s_res["tier"]))
+    if s_res.get("missing_features"):
+        lines.append(f"\n（另有{len(s_res['missing_features'])}个特征因历史数据不够/没填对应"
+                     f"问答暂缺，模型原生支持缺失值，不影响预测能不能跑，只是这几个特征"
+                     f"这次没提供信息量）")
+    lines.append(_ML_CAVEAT)
     return "\n".join(lines)
 
 
@@ -1076,7 +1129,7 @@ def delete_record(row_idx):
 
 def build_app():
     with gr.Blocks(title="狗狗皮肤问答（PM原版打分）") as demo:
-        with gr.Tabs():
+        with gr.Tabs() as main_tabs:
             with gr.Tab("填写问答"):
                 gr.Markdown(
                     "# 狗狗皮肤问答表\n"
@@ -1162,6 +1215,9 @@ def build_app():
                 has_hair_loss.change(
                     fn=toggle_hair_questions, inputs=[has_hair_loss], outputs=[hair_spot, hair_diameter],
                 )
+
+                goto_s_from_q_btn = gr.Button("问答填完了，去「S总分」标签看最终结果")
+                goto_s_from_q_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
 
                 gr.Markdown("## 保存")
                 confirm_overwrite = gr.Checkbox(
@@ -1316,6 +1372,22 @@ def build_app():
                 for inp in c_inputs:
                     inp.change(fn=compute_c_score, inputs=c_inputs, outputs=c_outputs)
 
+                gr.Markdown(
+                    "## 下一步\n"
+                    "C值算完了，S总分还需要问答部分——去填一下问答能让S总分更准；"
+                    "不想填也可以跳过，直接去看S总分（问答部分按0分算，PM的固定"
+                    "公式没有问答就没法给出真实分数，跳过≠模型能补全，这点跟"
+                    "「ML版对比」标签里模型B能在没问答时照样预测不一样）。"
+                )
+                with gr.Row():
+                    goto_questionnaire_from_c_btn = gr.Button("去「填写问答」标签填问卷")
+                    goto_s_skip_q_btn = gr.Button("跳过问答，直接看「S总分」")
+                # 「填写问答」是Tabs里定义的第一个Tab，「S总分」是第四个，
+                # Gradio没显式给id时按定义顺序从0开始编号——跟ML版对比标签
+                # 的ml_goto_questionnaire()是同一个"selected=数字下标"用法
+                goto_questionnaire_from_c_btn.click(fn=lambda: gr.Tabs(selected=0), outputs=[main_tabs])
+                goto_s_skip_q_btn.click(fn=lambda: gr.Tabs(selected=3), outputs=[main_tabs])
+
                 # 「导入IMU统计数据」标签选好(天,机位)后点"应用"，直接把这几个
                 # 输入框填上，同时把「填写问答」标签的填表日期也同步过去。
                 # has_baseline也一起带过来——统计CSV里的n_baseline_days==0就
@@ -1409,14 +1481,21 @@ def build_app():
                     )
                 ml_preview_md = gr.Markdown()
 
+                gr.Markdown("### ① 先用模型A预测C档位")
+                ml_predict_c_btn = gr.Button("预测C档位（模型A）", variant="primary")
+                ml_c_result_md = gr.Markdown()
+
                 gr.Markdown(
-                    "点「预测」会先跑模型A出C档位；S档位是可选的——「填写问答」"
-                    "标签填好了就带上问答特征一起预测，没填也照样能出S档位"
-                    "（模型原生支持缺失特征，不强制要求先有问答答案，只是"
-                    "置信度可能因为少了这部分信号更不确定）。"
+                    "### ② 问答（可选）\n"
+                    "看完C档位，想让S档位预测更准的话，可以去「填写问答」标签填一下——"
+                    "点下面这个按钮会自动把当前选的日期/狗狗名字带过去，不用重新选。"
+                    "不想填也可以直接跳到第③步，模型B没有问答照样能预测。"
                 )
-                ml_predict_btn = gr.Button("预测", variant="primary")
-                ml_result_md = gr.Markdown()
+                ml_goto_q_btn = gr.Button("去「填写问答」标签填问卷（可选）")
+
+                gr.Markdown("### ③ 用模型B预测S档位（问答填不填都能跑）")
+                ml_predict_s_btn = gr.Button("预测S档位（模型B）", variant="primary")
+                ml_s_result_md = gr.Markdown()
 
                 ml_scan_btn.click(
                     fn=ml_scan_roots, inputs=[ml_roots],
@@ -1439,11 +1518,21 @@ def build_app():
                         fn=ml_preview, inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
                         outputs=[ml_preview_md],
                     )
-                ml_predict_btn.click(
-                    fn=ml_predict,
+                ml_predict_c_btn.click(
+                    fn=ml_predict_c,
+                    inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
+                    outputs=[ml_c_result_md],
+                )
+                ml_goto_q_btn.click(
+                    fn=ml_goto_questionnaire,
+                    inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
+                    outputs=[fill_date, dog_name, main_tabs],
+                )
+                ml_predict_s_btn.click(
+                    fn=ml_predict_s,
                     inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select,
                            has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat],
-                    outputs=[ml_result_md],
+                    outputs=[ml_s_result_md],
                 )
 
             with gr.Tab("历史记录"):
