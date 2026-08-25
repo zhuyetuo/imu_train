@@ -187,10 +187,16 @@ def predict_s(model_a_bundle, model_b_bundle, events, wear_hours, pet_id, breed,
     QUESTIONNAIRE_FEATURE_COLUMNS一致(skin_redness_level/skin_pigment_
     abnormal/skin_lesion_severity/odor_level/hair_loss_spot_count_level/
     hair_loss_max_diameter_level/coat_quality_level)，值是对应的有序整数
-    (含义见questionnaire_features.py顶部注释)。传None表示没有问答数据——
-    two_stage_rf_architecture.md里模型B设计就是"只在触发问答且用户回答了
-    才有输入"，没有问答就没法调模型B，返回not available，不是硬凑一个假
-    答案预测出来。
+    (含义见questionnaire_features.py顶部注释)。
+
+    问答是可选的，不是必须的——传None/空dict时，问答那7个特征全部当NaN
+    喂给模型B，HistGradientBoostingClassifier原生支持缺失值，照样能出一个
+    预测，不是拒绝预测。跟PM版"S总分必须有C值+问答"的强制要求不一样：
+    PM那套是固定公式，公式里没有问答这几项数字就没法算；这边是训练出来的
+    模型，训练时NaN也是一种"合法"取值(模型自己学怎么处理确实值)，缺问答
+    不等于没法预测，只是这几个特征这次没提供信息，预测出来的置信度可能
+    会因为缺了这部分信号而更不确定——具体信不信这个预测，看返回的
+    used_questionnaire字段和置信度自己判断，不是页面代码替用户下判断。
 
     模型B需要模型A的预测概率当"stacking"特征(见train_rf_model_b.py)，
     这里直接复用predict_c()算出来的概率，不重新训一个模型——两步预测
@@ -199,11 +205,8 @@ def predict_s(model_a_bundle, model_b_bundle, events, wear_hours, pet_id, breed,
     if not c_result["available"]:
         return {"available": False, "reason": c_result["reason"], "c_result": c_result}
 
-    if not questionnaire_ordinals:
-        return {"available": False,
-                "reason": "没有问答数据——模型B需要问答答案才能预测S档位，"
-                          "跟PM版「S总分需要C值+问答」的设计思路一致",
-                "c_result": c_result}
+    used_questionnaire = bool(questionnaire_ordinals)
+    questionnaire_ordinals = questionnaire_ordinals or {}
 
     model_b = model_b_bundle["model"]
     feature_cols = model_b_bundle["feature_cols"]
@@ -229,4 +232,5 @@ def predict_s(model_a_bundle, model_b_bundle, events, wear_hours, pet_id, breed,
     tier = classes[proba.argmax()]
 
     return {"available": True, "tier": tier, "proba": proba_dict,
-            "c_result": c_result, "missing_features": missing, "reason": ""}
+            "c_result": c_result, "missing_features": missing,
+            "used_questionnaire": used_questionnaire, "reason": ""}

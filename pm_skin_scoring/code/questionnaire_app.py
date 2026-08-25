@@ -689,11 +689,17 @@ def _dog_breed(dog_name_val):
 
 
 def ml_scan_roots(roots_str: str):
-    """扫描逗号分隔的推理结果根目录，找每个根目录下出现过的IMU标签——
-    直接扫{root}/*/_infer/*_infer.json文件名(不需要imu_daily_scratch_
-    stats.csv这份预生成的统计文件，RF这边要的是原始事件明细，不是聚合
-    过的统计量)，用rf_infer.load_events_and_wear同样的extract_imu_label
-    取法保证跟别处"IMU几"的含义一致。"""
+    """扫描逗号分隔的推理结果根目录，找每个根目录下每个IMU、每一天的真实
+    佩戴数据——直接扫{root}/*/_infer/*_infer.json文件名(不需要
+    imu_daily_scratch_stats.csv这份预生成的统计文件，RF这边要的是多天
+    历史事件明细，不是聚合过的单日统计量)，用extract_imu_label()取法
+    保证跟别处"IMU几"的含义一致。
+
+    返回的rows结构故意跟scan_imu_roots()（"导入IMU统计数据"标签用的那个）
+    保持一样的字段名(date/imu/root/root_label)，这样_date_label()/
+    update_imu_choices()/default_dog_for_imu()这几个函数可以直接复用，
+    两个标签的"先选日期、再选机位、机位带出默认狗狗"这套交互是同一套
+    代码，不是照着外观抄一遍再重新实现一遍逻辑。"""
     if rf_infer is None:
         return [], gr.update(choices=[], value=None), f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
 
@@ -703,7 +709,7 @@ def ml_scan_roots(roots_str: str):
 
     from extract_clips import extract_imu_label  # noqa: E402（skin_health/code已在sys.path里）
 
-    combos = []  # (root, imu_label)
+    all_rows = []
     skipped = []
     for root in roots:
         if not os.path.isdir(root):
@@ -722,46 +728,95 @@ def ml_scan_roots(roots_str: str):
         if not imus_seen:
             skipped.append(f"{root}（没有找到任何_infer.json）")
             continue
-        for imu in sorted(imus_seen):
-            combos.append((root, imu))
 
-    if not combos:
-        msg = "❌ 没有扫描到任何IMU"
+        root_label = os.path.basename(root.rstrip("/\\")) or root
+        for imu in sorted(imus_seen):
+            _, wear = rf_infer.load_events_and_wear(root, imu)
+            for d in sorted(wear["date"].astype(str).tolist()):
+                all_rows.append({"date": d, "imu": imu, "root": root, "root_label": root_label})
+
+    if not all_rows:
+        msg = "❌ 没有扫描到任何天/机位的佩戴数据"
         if skipped:
             msg += "；" + "、".join(skipped)
         return [], gr.update(choices=[], value=None), msg
 
-    labels = [f"{imu} [{os.path.basename(r.rstrip('/'))}]" for r, imu in combos]
-    status = f"✅ 扫描到{len(combos)}个(根目录,IMU)组合"
+    date_labels = sorted({_date_label(r) for r in all_rows})
+    status = f"✅ 扫描到{len(all_rows)}条(天,机位)真实数据，共{len(date_labels)}个日期"
     if skipped:
         status += "；跳过：" + "、".join(skipped)
-    combos_with_labels = [(r, imu, lbl) for (r, imu), lbl in zip(combos, labels)]
-    return combos_with_labels, gr.update(choices=labels, value=labels[-1] if labels else None), status
+    return all_rows, gr.update(choices=date_labels, value=date_labels[-1]), status
 
 
-def _find_combo(combos, label):
-    return next(((r, imu) for r, imu, lbl in combos if lbl == label), (None, None))
+def ml_preview(rows, date_label, imu, dog_name_val):
+    """选好日期+机位+狗狗后，先把这一天算出来的原始统计量列出来——跟
+    「导入IMU统计数据」标签的预览表格是同一个用途：让人在看模型预测结果
+    之前，先确认喂给模型的这份数据本身对不对（次数/时长这些看着眼熟，
+    才有必要往下看模型给的档位；这天数据本身就不对，模型给什么档位都
+    没意义）。"""
+    if rf_infer is None or not rows or not date_label or not imu:
+        return ""
+    match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
+    if not match:
+        return ""
+
+    import datetime as _dt
+    import pandas as pd  # noqa: E402（只在这个函数里用一次，就近导入）
+    from rf_features import compute_rf_features  # noqa: E402（skin_health/code已在sys.path里）
+
+    breed = _dog_breed(dog_name_val)
+    events, wear = rf_infer.load_events_and_wear(match["root"], imu)
+    breed_map = {imu: breed or "未知"}
+    target_date = _dt.date.fromisoformat(match["date"])
+    feats = compute_rf_features(events, wear, breed_map)
+    row = feats[(feats["pet_id"] == imu) & (feats["date"] == target_date)]
+    if row.empty:
+        return "（这天没有可用的佩戴数据）"
+    r = row.iloc[0]
+
+    def _fmt(v, suffix="", nd=1):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "—"
+        return f"{v:.{nd}f}{suffix}" if isinstance(v, float) else f"{v}{suffix}"
+
+    return (
+        f"| 字段 | 值 |\n|---|---|\n"
+        f"| 佩戴时长 | {_fmt(r['valid_wear_hours'], '小时')}（{r['data_quality_flag']}） |\n"
+        f"| 今日次数/时长 | {r['event_count']}次 / {_fmt(r['total_duration_min'], '分钟', 2)} |\n"
+        f"| 最长单次抓挠 | {_fmt(r['max_event_duration_sec'], '秒')} |\n"
+        f"| 聚集时段数 | {r['cluster_count']} |\n"
+        f"| 夜间占比 | {_fmt(r['night_ratio']*100 if pd.notna(r['night_ratio']) else None, '%', 0)} |\n"
+        f"| 睡眠中断次数 | {r['sleep_disruption_count']} |\n"
+        f"| 历史天数（这个IMU目前累计多少天数据） | {r['history_days_available']} |\n"
+        f"| 是否已建立基线（8组候选窗口任意一组） | {'是' if r['has_any_baseline'] else '否'} |\n"
+        f"| 相对自身历史的z分数 | {_fmt(r['z_score_vs_self'], nd=2)} |\n"
+        f"| 连续偏高天数 | {r['consecutive_days_above_baseline']} |\n"
+    )
 
 
-def ml_get_dates(combos, label):
-    """选好(根目录,IMU)之后，扫这个IMU全部历史算出佩戴时长表，日期下拉框
-    只列真的有佩戴数据的天——跟"C值计算"C的输入不同，这里不需要用户自己
-    选基线，RF模型自己从多天历史里学基线，选好一天就能直接预测。"""
-    root, imu = _find_combo(combos, label)
-    if not root:
-        return gr.update(choices=[], value=None), ""
-    events, wear = rf_infer.load_events_and_wear(root, imu)
-    if wear.empty:
-        return gr.update(choices=[], value=None), "这个IMU没有可用的佩戴数据"
-    dates = sorted(wear["date"].astype(str).tolist())
-    return gr.update(choices=dates, value=dates[-1]), f"共{len(dates)}天历史数据"
+def _proba_table(proba: dict, predicted_tier: str) -> str:
+    """概率分布渲染成表格，预测出来的那一档加粗标出来，不是塞进一行内联
+    文字——用户反馈"最好给出结果说明置信度"，表格比一行"C0=0%、C1=74%、
+    C2=26%"这种更容易一眼看出模型到底有多确定。"""
+    lines = ["| 档位 | 模型给出的概率 |", "|---|---|"]
+    for k, v in sorted(proba.items()):
+        mark = "**" if k == predicted_tier else ""
+        lines.append(f"| {mark}{k}{mark} | {mark}{v:.1%}{mark} |")
+    return "\n".join(lines)
 
 
-def ml_predict(combos, label, date_str, dog_name_val,
+def ml_predict(rows, date_label, imu, dog_name_val,
                has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
     """真正调用rf_infer跑一遍预测——events/wear_hours每次都重新扫描/重新
     算特征，不缓存，保证拿到的是当前_infer.json目录下最新的数据（这些
-    目录内容可能在用户操作过程中被新的推理结果更新，缓存的话容易过期）。"""
+    目录内容可能在用户操作过程中被新的推理结果更新，缓存的话容易过期）。
+
+    模型B(S档位)不强制要求问答——"填写问答"标签没填就把问答那7个特征
+    当缺失值喂给模型，HistGradientBoostingClassifier原生支持缺失值，
+    照样能出一个预测（置信度可能会因为少了问答这部分信号更不确定，
+    具体信不信看下面显示的概率分布自己判断）。这跟PM版"S总分必须先有
+    C值+问答"的强制要求不一样：PM那套是固定公式，公式里没数字就没法算；
+    这边是训练出来的模型，缺问答不等于没法预测。"""
     if rf_infer is None:
         return f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
     a_avail, b_avail = rf_infer.models_available()
@@ -771,50 +826,50 @@ def ml_predict(combos, label, date_str, dog_name_val,
                "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
                "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
 
-    root, imu = _find_combo(combos, label)
-    if not root:
-        return "❌ 请先扫描根目录，并选好一个IMU"
-    if not date_str:
-        return "❌ 请选一个日期"
+    if not rows or not date_label or not imu:
+        return "❌ 请先扫描根目录，并选好日期和机位"
+    match = next((r for r in rows if _date_label(r) == date_label and r["imu"] == imu), None)
+    if not match:
+        return f"❌ 没找到 {date_label}-{imu} 对应的数据"
 
     breed = _dog_breed(dog_name_val)
     if not breed:
-        return "❌ 请先在「填写问答」标签选好狗狗名字（用来对应品种）"
+        return "❌ 请先选好「对应狗狗」（用来对应品种，机位选好后会自动带出默认值）"
 
     import datetime as _dt
-    target_date = _dt.date.fromisoformat(date_str)
+    target_date = _dt.date.fromisoformat(match["date"])
 
-    events, wear = rf_infer.load_events_and_wear(root, imu)
+    events, wear = rf_infer.load_events_and_wear(match["root"], imu)
     model_a = rf_infer.load_model_a()
 
     c_res = rf_infer.predict_c(model_a, events, wear, imu, breed, target_date)
     if not c_res["available"]:
         return f"❌ 模型A无法预测：{c_res['reason']}"
 
-    c_proba_line = "、".join(f"{k}={v:.1%}" for k, v in sorted(c_res["proba"].items()))
     lines = [
-        "## 模型A（IMU行为严重度，学习出来的权重，不是PM固定公式）",
-        f"**C档位：{c_res['tier']}**　（{c_proba_line}）",
+        "## 模型A —— IMU行为严重度（C档位）",
+        "*权重是从合成数据训练出来的，不是PM那套固定加权公式*\n",
+        f"### 预测：**{c_res['tier']}**\n",
+        _proba_table(c_res["proba"], c_res["tier"]),
         "",
     ]
 
     ordinals = _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, coat)
-    if len(ordinals) < 2:  # 至少要有皮肤颜色那一组(占2个key)才算填了问答
-        lines.append("## 模型B（综合严重度）\n⚠️ 「填写问答」标签还没填，只能出C档位，出不了S档位"
-                     "（模型B需要问答答案，跟PM版「S总分需要C值+问答」是同一个设计思路）")
+    model_b = rf_infer.load_model_b()
+    s_res = rf_infer.predict_s(model_a, model_b, events, wear, imu, breed, target_date, ordinals)
+    if not s_res["available"]:
+        lines.append(f"## 模型B —— 综合严重度（S档位）\n⚠️ {s_res['reason']}")
     else:
-        model_b = rf_infer.load_model_b()
-        s_res = rf_infer.predict_s(model_a, model_b, events, wear, imu, breed, target_date, ordinals)
-        if not s_res["available"]:
-            lines.append(f"## 模型B（综合严重度）\n⚠️ {s_res['reason']}")
-        else:
-            s_proba_line = "、".join(f"{k}={v:.1%}" for k, v in sorted(s_res["proba"].items()))
-            lines.append("## 模型B（综合严重度，学习出来的权重+问答特征）")
-            lines.append(f"**S档位：{s_res['tier']}**　（{s_proba_line}）")
-            if s_res.get("missing_features"):
-                lines.append(f"\n（{len(s_res['missing_features'])}个特征因历史数据不够/没有"
-                             f"对应问答暂缺，模型原生支持缺失值，不影响预测能不能跑，"
-                             f"只是这几个特征这次没提供信息）")
+        lines.append("## 模型B —— 综合严重度（S档位）")
+        lines.append("*模型A的特征+输出概率 + 问答特征（如果有）→ S0/S1/S2*\n")
+        q_note = ("（用了「填写问答」标签的答案）" if s_res["used_questionnaire"]
+                  else "（**没有问答数据**，只用IMU特征预测，置信度可能因此更不确定）")
+        lines.append(f"### 预测：**{s_res['tier']}** {q_note}\n")
+        lines.append(_proba_table(s_res["proba"], s_res["tier"]))
+        if s_res.get("missing_features"):
+            lines.append(f"\n（另有{len(s_res['missing_features'])}个特征因历史数据不够/没填对应"
+                         f"问答暂缺，模型原生支持缺失值，不影响预测能不能跑，只是这几个特征"
+                         f"这次没提供信息量）")
 
     lines.append(
         "\n---\n⚠️ 这两个模型目前只在合成数据上训练过，没有真实兽医标签校准过，"
@@ -1321,9 +1376,9 @@ def build_app():
                     "# ML版（算法组训练出来的RF模型）\n"
                     "`skin_health/`目录是算法组自己设计的方案——不用PM的固定加权公式，"
                     "权重是从数据训练出来的（模型A：IMU行为特征→C0/C1/C2；模型B：模型A"
-                    "的特征+输出概率+问答特征→S0/S1/S2）。这个标签用**同一份真实IMU"
-                    "数据**跑一遍模型A/B，可以跟前面「C值计算」「S总分」两个标签的"
-                    "PM版结果对照，看两套方案在同一天差多少。\n\n"
+                    "的特征+输出概率+问答特征(可选)→S0/S1/S2）。这个标签用**同一份"
+                    "真实IMU数据**跑一遍模型A/B，可以跟前面「C值计算」「S总分」两个"
+                    "标签的PM版结果对照，看两套方案在同一天差多少。\n\n"
                     "⚠️ **重要**：这两个模型目前只在`skin_health/data/rf_synthetic/`下的"
                     "**合成数据**上训练过，没有真实兽医标签校准过，预测结果**不代表"
                     "真实准确率**——训练脚本自己的报告也写得很清楚这一点。这里只是"
@@ -1343,32 +1398,50 @@ def build_app():
                     )
                     ml_scan_btn = gr.Button("扫描")
                 ml_scan_status_md = gr.Markdown()
-                ml_combos_state = gr.State(value=[])
+                ml_rows_state = gr.State(value=[])
 
                 with gr.Row():
-                    ml_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
                     ml_date_select = gr.Dropdown(label="日期", interactive=True)
-                ml_date_status_md = gr.Markdown()
+                    ml_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
+                    ml_dog_select = gr.Dropdown(
+                        DOG_NAME_OPTIONS, label="对应狗狗", interactive=True,
+                        info="自动带出默认值，不确定就手动核对/改一下（尤其IMU1）",
+                    )
+                ml_preview_md = gr.Markdown()
 
                 gr.Markdown(
-                    "狗狗品种从「填写问答」标签选好的狗狗名字自动取（比如"
-                    "「比熊-BB」取「比熊」），S档位预测需要「填写问答」标签"
-                    "把问答部分也填好——不用在这个标签重新填一遍。"
+                    "点「预测」会先跑模型A出C档位；S档位是可选的——「填写问答」"
+                    "标签填好了就带上问答特征一起预测，没填也照样能出S档位"
+                    "（模型原生支持缺失特征，不强制要求先有问答答案，只是"
+                    "置信度可能因为少了这部分信号更不确定）。"
                 )
                 ml_predict_btn = gr.Button("预测", variant="primary")
                 ml_result_md = gr.Markdown()
 
                 ml_scan_btn.click(
                     fn=ml_scan_roots, inputs=[ml_roots],
-                    outputs=[ml_combos_state, ml_imu_select, ml_scan_status_md],
+                    outputs=[ml_rows_state, ml_date_select, ml_scan_status_md],
+                )
+                # 跟「导入IMU统计数据」标签同一套交互：先选日期（下拉框只列
+                # 真的有数据的天），机位下拉框自动收窄到这天实际有数据的
+                # 那几个IMU，机位选好后「对应狗狗」自动带出默认值——复用
+                # update_imu_choices()/default_dog_for_imu()这两个已有函数，
+                # 不是照着UI外观重新写一遍逻辑
+                ml_date_select.change(
+                    fn=update_imu_choices, inputs=[ml_rows_state, ml_date_select],
+                    outputs=[ml_imu_select],
                 )
                 ml_imu_select.change(
-                    fn=ml_get_dates, inputs=[ml_combos_state, ml_imu_select],
-                    outputs=[ml_date_select, ml_date_status_md],
+                    fn=default_dog_for_imu, inputs=[ml_imu_select], outputs=[ml_dog_select],
                 )
+                for trig in (ml_date_select, ml_imu_select, ml_dog_select):
+                    trig.change(
+                        fn=ml_preview, inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
+                        outputs=[ml_preview_md],
+                    )
                 ml_predict_btn.click(
                     fn=ml_predict,
-                    inputs=[ml_combos_state, ml_imu_select, ml_date_select, dog_name,
+                    inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select,
                            has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat],
                     outputs=[ml_result_md],
                 )
