@@ -399,10 +399,22 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
     return total, tier, breakdown
 
 
-def compute_s_total(c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+def compute_s_total(c_value, c_tier_hint, has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
     """"S总分"标签用——读"填写问答"标签里已经选好的答案（复用
     _question_group_scores，跟"填写问答"标签算问答分数是同一套逻辑，
-    不会算出两个不一致的数字）+ 这个标签自己填的C值，组合成最终S总分。"""
+    不会算出两个不一致的数字）+ 这个标签自己填的C值，组合成最终S总分。
+
+    c_tier_hint是从"C值计算"标签同步过来的真实档位(那边已经按红旗规则
+    算好了，比如"聚集时段≥3个"这种红旗会直接判C2，不是单纯看C值总分够
+    不够50)。这里不能拿到c_value之后自己用c_tier_of()按30/50阈值重新
+    粗算一遍——那样会漏掉红旗，把该判C2的算成C1。c_tier_hint留空(比如
+    用户没去"C值计算"标签算过、是直接手动填的C值)时才退回c_tier_of()的
+    简单阈值判断，这是唯一能做到的兜底，因为手动填的C值本身就不带红旗
+    信息。
+
+    C是C2(不管是总分够50、还是红旗触发)时，S也直接判S2，不看加权总分——
+    跟问答单项满分20分触发红旗是同一个"某个维度已经严重到能跳过总分
+    直接定档"的设计，PM确认过这条规则。"""
     g = _question_group_scores(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat)
     skin_group_score = g["skin_group_raw"] * SKIN_GROUP_WEIGHT
     hair_group_score = g["hair_group_raw"] * HAIR_GROUP_WEIGHT
@@ -411,15 +423,22 @@ def compute_s_total(c_value, has_hair_loss, color, odor, lesion, hair_spot, hair
     c_score = c * C_WEIGHT
     total = _round_half_up(c_score + skin_group_score + hair_group_score, 2)
 
-    red_flag = 20 in (g["odor"], g["lesion"], g["spot"], g["diameter"], g["coat"])
-    c_tier = c_tier_of(c_value)
+    c_tier = c_tier_hint if c_tier_hint else c_tier_of(c_value)
+    question_red_flag = 20 in (g["odor"], g["lesion"], g["spot"], g["diameter"], g["coat"])
+    c2_red_flag = c_tier == "C2"
+    red_flag = question_red_flag or c2_red_flag
     s_tier = s_tier_of(total, red_flag)
 
     c_line = (f"| C值 | {c} × {C_WEIGHT:.0%} = {c_score:.2f} | [{c_tier}] |\n"
              if c_value is not None else
              "| ⚠️ 还没填C值 | 按C=0算 | — |\n")
-    red_flag_line = ("\n> 🚩 触发红旗信号：问答部分有单项打了20分满分，S档位直接判S2，不看加权总分"
-                     if red_flag else "")
+    red_flag_reasons = []
+    if question_red_flag:
+        red_flag_reasons.append("问答部分有单项打了20分满分")
+    if c2_red_flag:
+        red_flag_reasons.append("C值判定为C2")
+    red_flag_line = (f"\n> 🚩 触发红旗信号：{'、'.join(red_flag_reasons)}，S档位直接判S2，不看加权总分"
+                     if red_flag_reasons else "")
 
     breakdown = (
         f"| 组成部分 | 加权分 | 档位 |\n|---|---|---|\n"
@@ -1030,6 +1049,12 @@ def build_app():
                     label="C值（0-100）",
                     info="留空按0算；也可以直接去「C值计算」标签算，这里会自动同步",
                 )
+                # 不显示在页面上——跟着s_c_value一起从"C值计算"标签同步过来的
+                # 真实档位(含红旗判定)，S总分要用这个来判"C是不是C2"，不能拿
+                # c_value自己按30/50阈值重新粗算(那样会漏掉红旗)。用户没去
+                # "C值计算"标签算过、直接手动填C值时这个是空的，compute_s_total
+                # 会退回简单阈值判断当兜底
+                s_c_tier_hint = gr.Textbox(visible=False)
                 gr.Markdown("## 结果")
                 with gr.Row():
                     s_total_output = gr.Number(label="S总分", precision=2)
@@ -1038,15 +1063,21 @@ def build_app():
                 s_breakdown_md = gr.Markdown()
 
                 s_calc_btn = gr.Button("计算S总分", variant="primary")
-                s_inputs = [s_c_value, has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
+                s_inputs = [s_c_value, s_c_tier_hint, has_hair_loss, color, odor, lesion,
+                           hair_spot, hair_diameter, coat]
                 s_outputs = [s_total_output, s_c_tier_output, s_tier_output, s_breakdown_md]
                 s_calc_btn.click(fn=compute_s_total, inputs=s_inputs, outputs=s_outputs)
                 for inp in s_inputs:
                     inp.change(fn=compute_s_total, inputs=s_inputs, outputs=s_outputs)
 
-                # C值计算标签算完之后，自动把结果同步进这个标签的C值输入框——
-                # 不用手动抄数字过来，两个标签的C值保持一致
-                c_score_output.change(fn=lambda v: v, inputs=[c_score_output], outputs=[s_c_value])
+                # C值计算标签算完之后，自动把C值和真实档位(含红旗判定)一起
+                # 同步进这个标签——不用手动抄数字过来，两个标签的C值和档位
+                # 保持一致，不会出现S总分这边自己按阈值重新粗算出跟"C值计算"
+                # 标签不一样的档位
+                c_score_output.change(
+                    fn=lambda v, t: (v, t), inputs=[c_score_output, c_tier_output],
+                    outputs=[s_c_value, s_c_tier_hint],
+                )
 
             with gr.Tab("历史记录"):
                 gr.Markdown("## 历史记录")
