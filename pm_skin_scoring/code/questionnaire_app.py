@@ -689,11 +689,20 @@ def _dog_breed(dog_name_val):
 
 
 def ml_scan_roots(roots_str: str):
-    """扫描逗号分隔的推理结果根目录，找每个根目录下每个IMU、每一天的真实
-    佩戴数据——直接扫{root}/*/_infer/*_infer.json文件名(不需要
-    imu_daily_scratch_stats.csv这份预生成的统计文件，RF这边要的是多天
-    历史事件明细，不是聚合过的单日统计量)，用extract_imu_label()取法
-    保证跟别处"IMU几"的含义一致。
+    """扫描逗号分隔的推理结果根目录，找每个根目录下每个IMU、每一天有没有
+    _infer.json数据——只看文件名+目录名，不打开文件内容、不算特征，纯
+    glob+字符串处理，快慢跟"导入IMU统计数据"标签的扫描是同一个数量级。
+
+    之前这里对每个文件都打开读JSON内容拿csv_basename，其实文件名本身
+    (去掉"_infer.json"后缀)就是csv_basename的stem，压根不用打开文件；
+    还对每个(root,imu)都调一次load_events_and_wear()去算真实佩戴日期，
+    那个函数要把这个IMU全部历史的_infer.json内容都读一遍、逐个解析
+    windows/scratch_segments，IMU一多、天数一多，扫描阶段这么干会很慢——
+    扫描阶段只需要知道"这天这个IMU有没有数据"，不需要真的算出佩戴时长，
+    日期本身已经写在目录名里({day}/_infer/...)，直接读目录名转换格式就
+    够了。真正的特征计算(load_events_and_wear/compute_rf_features)留到
+    用户选好具体哪一天哪个IMU、点"预测"的时候才做，不在扫描阶段提前对
+    每个组合都算一遍。
 
     返回的rows结构故意跟scan_imu_roots()（"导入IMU统计数据"标签用的那个）
     保持一样的字段名(date/imu/root/root_label)，这样_date_label()/
@@ -715,25 +724,25 @@ def ml_scan_roots(roots_str: str):
         if not os.path.isdir(root):
             skipped.append(f"{root}（目录不存在）")
             continue
-        infer_jsons = glob.glob(os.path.join(root, "*", "_infer", "*_infer.json"))
-        imus_seen = set()
-        for path in infer_jsons:
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            stem = os.path.splitext(data.get("csv_basename", os.path.basename(path)))[0]
-            imus_seen.add(extract_imu_label(stem))
-        if not imus_seen:
-            skipped.append(f"{root}（没有找到任何_infer.json）")
+        infer_dirs = sorted(glob.glob(os.path.join(root, "*", "_infer")))
+        if not infer_dirs:
+            skipped.append(f"{root}（没有找到任何_infer目录）")
             continue
 
         root_label = os.path.basename(root.rstrip("/\\")) or root
-        for imu in sorted(imus_seen):
-            _, wear = rf_infer.load_events_and_wear(root, imu)
-            for d in sorted(wear["date"].astype(str).tolist()):
-                all_rows.append({"date": d, "imu": imu, "root": root, "root_label": root_label})
+        found_any = False
+        for infer_dir in infer_dirs:
+            day_str = os.path.basename(os.path.dirname(infer_dir))  # 比如"2026_8_24"
+            iso_date = _to_iso_date(day_str)
+            imus_this_day = set()
+            for path in glob.glob(os.path.join(infer_dir, "*_infer.json")):
+                stem = os.path.basename(path)[: -len("_infer.json")]
+                imus_this_day.add(extract_imu_label(stem))
+            for imu in sorted(imus_this_day):
+                all_rows.append({"date": iso_date, "imu": imu, "root": root, "root_label": root_label})
+                found_any = True
+        if not found_any:
+            skipped.append(f"{root}（没有找到任何_infer.json）")
 
     if not all_rows:
         msg = "❌ 没有扫描到任何天/机位的佩戴数据"
@@ -1130,7 +1139,7 @@ def delete_record(row_idx):
 def build_app():
     with gr.Blocks(title="狗狗皮肤问答（PM原版打分）") as demo:
         with gr.Tabs() as main_tabs:
-            with gr.Tab("填写问答"):
+            with gr.Tab("填写问答", id=0):
                 gr.Markdown(
                     "# 狗狗皮肤问答表\n"
                     "填表说明：设备检测到抓挠水平比平时高，麻烦花1-2分钟观察并填写下面的问题，"
@@ -1228,7 +1237,7 @@ def build_app():
                 save_btn = gr.Button("保存记录")
                 save_status = gr.Markdown()
 
-            with gr.Tab("导入IMU统计数据"):
+            with gr.Tab("导入IMU统计数据", id=1):
                 gr.Markdown(
                     "# 导入IMU统计数据\n"
                     "填好推理结果根目录（逗号分隔可以填多个），点「扫描」——会去每个根"
@@ -1293,7 +1302,7 @@ def build_app():
                     fn=default_dog_for_imu, inputs=[stats_imu_select], outputs=[stats_dog_select],
                 )
 
-            with gr.Tab("C值计算"):
+            with gr.Tab("C值计算", id=2):
                 gr.Markdown(
                     "# IMU行为严重度（C值）计算器\n"
                     "按PM文档的规则(变化幅度/聚集程度/持续程度/中断影响四项)手动"
@@ -1401,7 +1410,7 @@ def build_app():
                             fill_date, dog_name, apply_status_md],
                 )
 
-            with gr.Tab("S总分"):
+            with gr.Tab("S总分", id=3):
                 gr.Markdown(
                     "# S总分（综合严重度）\n"
                     "S = C值×40% + 皮肤状态组×35% + 毛发状态组×25%。\n"
@@ -1443,7 +1452,7 @@ def build_app():
                     outputs=[s_c_value, s_c_tier_hint],
                 )
 
-            with gr.Tab("ML版对比"):
+            with gr.Tab("ML版对比", id=4):
                 gr.Markdown(
                     "# ML版（算法组训练出来的RF模型）\n"
                     "`skin_health/`目录是算法组自己设计的方案——不用PM的固定加权公式，"
@@ -1535,7 +1544,7 @@ def build_app():
                     outputs=[ml_s_result_md],
                 )
 
-            with gr.Tab("历史记录"):
+            with gr.Tab("历史记录", id=5):
                 gr.Markdown("## 历史记录")
                 with gr.Row():
                     refresh_btn = gr.Button("刷新")
@@ -1576,6 +1585,18 @@ def main():
     port = 7860
     lan_ip = get_lan_ip()
     print(f"局域网访问地址: http://{lan_ip}:{port}  (把这个链接发给同一局域网内的其他设备)")
+
+    # 服务启动时就把ML版对比要用的两个模型读进内存缓存——不然第一个点
+    # "预测"的用户要多等一下现读盘的时间，之后调用rf_infer.load_model_a/b()
+    # 都是走缓存，不会重复读盘
+    if rf_infer is not None:
+        warm_result = rf_infer.warm_models()
+        if warm_result["model_a"] and warm_result["model_b"]:
+            print("ML版对比：模型A/B已预热加载")
+        else:
+            print(f"ML版对比：模型预热未完全成功{warm_result}，"
+                  f"「ML版对比」标签里会提示怎么训练模型")
+
     demo = build_app()
     demo.launch(server_name="0.0.0.0", server_port=port)
 
