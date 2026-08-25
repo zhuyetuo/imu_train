@@ -1,0 +1,38 @@
+# 第二套独立的Label Studio实例，专门给"只应该看到部分project"的外部/
+# 兼职标注员用——开源版Label Studio没有project级别的权限控制，同一个
+# 实例里的用户能看到全部project，所以要真隔离只能整个实例分开跑，不是
+# 配置项能解决的（详见跟用户的讨论，Enterprise版才有Workspace/RBAC）。
+#
+# 这套实例是独立的数据库/用户体系，跟主实例(100个project那套)完全不
+# 共享账号——只在这里建外部人员该看到的那几个project，主实例的账号
+# 不给他们。媒体文件(CSV/MP4)复用主实例同一个Nginx(8182端口)，两边
+# 生成的task JSON里csv1/video1这些URL不用改，直接指向同一份http地址
+# 即可，不用额外拷贝一份媒体文件。
+#
+# 用法:
+#   cd label_studio_secondary
+#   docker compose up -d
+#   浏览器打开 http://<服务器IP>:8081，首次访问会引导注册第一个账号
+#   （这个账号会成为这套实例的管理员），后续在Django admin或Label Studio
+#   自己的用户管理页面(Organization > Members)邀请其他人
+#
+#   停止:   docker compose down
+#   看日志: docker compose logs -f
+
+services:
+  label-studio-secondary:
+    image: heartexlabs/label-studio:latest
+    container_name: label_studio_secondary
+    restart: unless-stopped
+    ports:
+      # 换一个跟主实例不同的端口——主实例常见默认是8080，这里用8081，
+      # 如果你的主实例本来就不是8080，或者8081也被占用了，改这里就行
+      - "8081:8080"
+    environment:
+      # 关掉"允许任何人自助注册"，避免陌生人自己注册账号就能看到project——
+      # 只应该由管理员在后台手动邀请指定的外部标注员
+      - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
+    volumes:
+      # 独立的数据目录（数据库、上传文件等），不跟主实例共用，保证project
+      # 和用户数据完全隔离——这就是"真隔离"这个效果的来源
+      - ./data:/label-studio/data
