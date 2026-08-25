@@ -13,11 +13,17 @@
 # 环境变量（可以临时覆盖下面的默认值，比如给不同的原实例跑）:
 #   LS_HOST        原实例(要导出数据的那个)地址，包含端口，不带末尾斜杠
 #   LS_PAT         原实例的Personal Access Token
-#   COMPLETED_BY_MAP  "原ID=目标ID"的映射，逗号分隔多个，默认"5=5,6=6"——这是
-#                  目前raven@hiccpet.com(两边都是5)和zyt290386779@gmail.com
-#                  (两边都是6)这两位的映射，换了别的project如果标注人不一样，
-#                  传这个环境变量覆盖，比如：
-#                  COMPLETED_BY_MAP="3=2,5=5" ./export_and_remap_project.sh 200
+#   COMPLETED_BY_MAP  "原ID=目标ID"的映射，逗号分隔多个。默认值是按两边
+#                  实例各自真实的/api/users/查出来对齐的（不是猜的顺序）：
+#                    原1(zyt290386779@gmail.com)  → 新6(zyt290386779@gmail.com)
+#                    原2(leon@hiccpet.com)        → 新2(leon@hiccpet.com)
+#                    原3(466038089@qq.com)        → 新4(466038089@qq.com)
+#                    原5(raven@hiccpet.com)       → 新5(raven@hiccpet.com)
+#                    原6(ml@model.local)          → 新3(ml@model.local)
+#                  原4(1270329394@qq.com)新实例还没注册，暂时没放进默认映射，
+#                  这个人的project导入前要先让他用邀请链接注册，查到新ID后
+#                  用COMPLETED_BY_MAP补上"4=<新ID>"，比如：
+#                  COMPLETED_BY_MAP="1=6,2=2,3=4,4=7,5=5,6=3" ./export_and_remap_project.sh 200
 #
 # 输出: project{ID}_remapped.json（当前目录下，可以直接拿去目标实例导入）
 #
@@ -37,7 +43,7 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-MAP_STR="${COMPLETED_BY_MAP:-5=5,6=6}"
+MAP_STR="${COMPLETED_BY_MAP:-1=6,2=2,3=4,5=5,6=3}"
 IFS=',' read -r -a MAP_PAIRS <<< "$MAP_STR"
 MAP_ARGS=()
 for pair in "${MAP_PAIRS[@]}"; do
