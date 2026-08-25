@@ -25,12 +25,15 @@ import argparse
 import json
 import os
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import GroupKFold
+
+MODEL_FILENAME = "model_a.joblib"
 
 from rf_features import FEATURE_COLUMNS, compute_rf_features
 from scratch_burden import run_pipeline
@@ -104,9 +107,26 @@ def main():
     print(confusion_matrix(all_true, all_pred, labels=labels_order))
 
     # 全量数据上再训一版，专门用来看特征重要性（permutation importance，
-    # 比HistGradientBoosting自带的重要性更可靠，且能处理类别特征）
+    # 比HistGradientBoosting自带的重要性更可靠，且能处理类别特征）——这一版
+    # 也是要持久化、供推理用的最终模型，不是只为了算重要性临时训一下
     print("\n用全量数据重新训练，计算特征重要性(permutation importance)...")
     model.fit(X, y)
+
+    # 持久化模型，供rf_infer.py加载做真实推理用——之前这几个训练脚本只写
+    # CSV/MD报告，fit完的模型对象从来没存过盘，没法在训练脚本进程之外用。
+    # 一起存feature_cols(哪些列、什么顺序)和breed_categories(训练时见过
+    # 的品种类别，HistGradientBoostingClassifier的category dtype在推理时
+    # 要用同一套categories构造pandas.Categorical，类别集合对不上会报错或
+    # 编码错位)——只存模型对象不够，这两样信息推理时必须精确复现
+    model_path = os.path.join(args.data_dir, MODEL_FILENAME)
+    joblib.dump({
+        "model": model,
+        "feature_cols": feature_cols,
+        "breed_categories": list(X["breed_or_size_class"].cat.categories),
+        "classes": list(model.classes_),
+    }, model_path)
+    print(f"模型A已持久化: {model_path}")
+
     # 直接用X（保留breed_or_size_class的category dtype），不要转成整数编码——
     # HistGradientBoostingClassifier内部按fit时看到的category dtype做预处理，
     # permutation_importance重新预测时如果喂整数编码会跟内部的类别映射对不上

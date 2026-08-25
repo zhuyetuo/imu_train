@@ -27,10 +27,12 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
 """
 import csv
 import glob
+import json
 import math
 import os
 import re
 import socket
+import sys
 from datetime import datetime
 
 import gradio as gr
@@ -608,6 +610,220 @@ STATS_CSV_NAME = "imu_daily_scratch_stats.csv"
 DEFAULT_IMU_STATS_ROOTS = "infer_result_majority_syn, infer_result_majority"
 
 
+# ── ML版对比：加载skin_health/的RF模型，跟PM固定权重公式跑同一份真实数据
+# 做对比。skin_health/是算法组自己的独立目录(rf_infer.py/rf_features.py/
+# train_rf_model_a.py/train_rf_model_b.py)，不属于pm_skin_scoring自己的
+# 代码，import前要把它的code目录加进sys.path。
+SKIN_HEALTH_CODE_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "skin_health", "code"))
+if SKIN_HEALTH_CODE_DIR not in sys.path:
+    sys.path.insert(0, SKIN_HEALTH_CODE_DIR)
+
+try:
+    import rf_infer  # noqa: E402
+    _RF_INFER_IMPORT_ERROR = ""
+except Exception as e:  # noqa: BLE001 —— 只是想在页面上给出清楚的提示，
+    # 不是要吞掉所有异常类型；导入失败最常见的原因是skin_health/code/
+    # rf_features.py依赖的numpy/pandas/scikit-learn版本环境问题，不应该
+    # 让整个questionnaire_app.py直接起不来，只影响"ML版对比"这一个标签
+    rf_infer = None
+    _RF_INFER_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+
+# PM问答选项 → questionnaire_features.py的有序整数特征——PM原题库跟RF
+# 问答特征不是一一对应的：皮肤颜色这一题PM原表里同时混了"泛红程度"和
+# "色素异常"两件事(A正常/B发红/C鲜红/D黑色油油/E变黑变褐)，RF那边是拆成
+# 两个独立特征(skin_redness_level有序0-2 + skin_pigment_abnormal二值)，
+# D/E选项映射到色素异常=1、泛红程度给0(这两个选项本身不是在描述泛红，
+# 给0不是"没问题"的意思，只是泛红程度这个维度在这两个选项下没有信息)。
+# 其余5题(体味/皮损/秃毛分布/秃毛面积/整体毛质)PM的4个选项本来就是从轻到
+# 重的有序梯度，直接按选项顺序映射成0/1/2/3，跟questionnaire_features.py
+# 里各特征的LEVELS定义(都是4档，0~3)一一对应，不用额外设计映射规则。
+def _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, coat):
+    """任意一题没选(None/空字符串)时那一项直接不放进返回的dict——调用方
+    (rf_infer.predict_s)会把没给的问答特征当NaN处理，不是当成"选了最轻
+    档"，缺答案跟"确认是最轻档"是两回事，不能用0悄悄顶替。"""
+
+    def _letter(choice):
+        if not choice or len(choice) < 2 or choice[1] != ".":
+            return None
+        return choice[0]
+
+    ordinals = {}
+
+    color_letter = _letter(color)
+    if color_letter in ("A", "B", "C"):
+        ordinals["skin_redness_level"] = {"A": 0, "B": 1, "C": 2}[color_letter]
+        ordinals["skin_pigment_abnormal"] = 0
+    elif color_letter in ("D", "E"):
+        ordinals["skin_redness_level"] = 0
+        ordinals["skin_pigment_abnormal"] = 1
+
+    letter_to_ordinal = {"A": 0, "B": 1, "C": 2, "D": 3}
+    odor_letter = _letter(odor)
+    if odor_letter in letter_to_ordinal:
+        ordinals["odor_level"] = letter_to_ordinal[odor_letter]
+    lesion_letter = _letter(lesion)
+    if lesion_letter in letter_to_ordinal:
+        ordinals["skin_lesion_severity"] = letter_to_ordinal[lesion_letter]
+    spot_letter = _letter(hair_spot)
+    if spot_letter in letter_to_ordinal:
+        ordinals["hair_loss_spot_count_level"] = letter_to_ordinal[spot_letter]
+    diameter_letter = _letter(hair_diameter)
+    if diameter_letter in letter_to_ordinal:
+        ordinals["hair_loss_max_diameter_level"] = letter_to_ordinal[diameter_letter]
+    coat_letter = _letter(coat)
+    if coat_letter in letter_to_ordinal:
+        ordinals["coat_quality_level"] = letter_to_ordinal[coat_letter]
+
+    return ordinals
+
+
+def _dog_breed(dog_name_val):
+    """"比熊-BB" → "比熊"——DOG_NAME_OPTIONS里的命名约定本来就是"品种-
+    名字"，取"-"前面那段就是品种，刚好也是rf_infer模型训练时breed_map
+    用的同一套品种字符串(比熊/金毛/中华田园犬/马尔济斯)，不用额外维护
+    一份映射表。"""
+    if not dog_name_val or "-" not in dog_name_val:
+        return None
+    return dog_name_val.split("-", 1)[0]
+
+
+def ml_scan_roots(roots_str: str):
+    """扫描逗号分隔的推理结果根目录，找每个根目录下出现过的IMU标签——
+    直接扫{root}/*/_infer/*_infer.json文件名(不需要imu_daily_scratch_
+    stats.csv这份预生成的统计文件，RF这边要的是原始事件明细，不是聚合
+    过的统计量)，用rf_infer.load_events_and_wear同样的extract_imu_label
+    取法保证跟别处"IMU几"的含义一致。"""
+    if rf_infer is None:
+        return [], gr.update(choices=[], value=None), f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
+
+    roots = [r.strip() for r in (roots_str or "").split(",") if r.strip()]
+    if not roots:
+        return [], gr.update(choices=[], value=None), "❌ 请先填至少一个根目录"
+
+    from extract_clips import extract_imu_label  # noqa: E402（skin_health/code已在sys.path里）
+
+    combos = []  # (root, imu_label)
+    skipped = []
+    for root in roots:
+        if not os.path.isdir(root):
+            skipped.append(f"{root}（目录不存在）")
+            continue
+        infer_jsons = glob.glob(os.path.join(root, "*", "_infer", "*_infer.json"))
+        imus_seen = set()
+        for path in infer_jsons:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            stem = os.path.splitext(data.get("csv_basename", os.path.basename(path)))[0]
+            imus_seen.add(extract_imu_label(stem))
+        if not imus_seen:
+            skipped.append(f"{root}（没有找到任何_infer.json）")
+            continue
+        for imu in sorted(imus_seen):
+            combos.append((root, imu))
+
+    if not combos:
+        msg = "❌ 没有扫描到任何IMU"
+        if skipped:
+            msg += "；" + "、".join(skipped)
+        return [], gr.update(choices=[], value=None), msg
+
+    labels = [f"{imu} [{os.path.basename(r.rstrip('/'))}]" for r, imu in combos]
+    status = f"✅ 扫描到{len(combos)}个(根目录,IMU)组合"
+    if skipped:
+        status += "；跳过：" + "、".join(skipped)
+    combos_with_labels = [(r, imu, lbl) for (r, imu), lbl in zip(combos, labels)]
+    return combos_with_labels, gr.update(choices=labels, value=labels[-1] if labels else None), status
+
+
+def _find_combo(combos, label):
+    return next(((r, imu) for r, imu, lbl in combos if lbl == label), (None, None))
+
+
+def ml_get_dates(combos, label):
+    """选好(根目录,IMU)之后，扫这个IMU全部历史算出佩戴时长表，日期下拉框
+    只列真的有佩戴数据的天——跟"C值计算"C的输入不同，这里不需要用户自己
+    选基线，RF模型自己从多天历史里学基线，选好一天就能直接预测。"""
+    root, imu = _find_combo(combos, label)
+    if not root:
+        return gr.update(choices=[], value=None), ""
+    events, wear = rf_infer.load_events_and_wear(root, imu)
+    if wear.empty:
+        return gr.update(choices=[], value=None), "这个IMU没有可用的佩戴数据"
+    dates = sorted(wear["date"].astype(str).tolist())
+    return gr.update(choices=dates, value=dates[-1]), f"共{len(dates)}天历史数据"
+
+
+def ml_predict(combos, label, date_str, dog_name_val,
+               has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+    """真正调用rf_infer跑一遍预测——events/wear_hours每次都重新扫描/重新
+    算特征，不缓存，保证拿到的是当前_infer.json目录下最新的数据（这些
+    目录内容可能在用户操作过程中被新的推理结果更新，缓存的话容易过期）。"""
+    if rf_infer is None:
+        return f"❌ rf_infer模块导入失败：{_RF_INFER_IMPORT_ERROR}"
+    a_avail, b_avail = rf_infer.models_available()
+    if not (a_avail and b_avail):
+        return ("❌ 模型文件不存在，先在skin_health/code/下跑：\n\n"
+               "```\npython train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
+               "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
+               "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```")
+
+    root, imu = _find_combo(combos, label)
+    if not root:
+        return "❌ 请先扫描根目录，并选好一个IMU"
+    if not date_str:
+        return "❌ 请选一个日期"
+
+    breed = _dog_breed(dog_name_val)
+    if not breed:
+        return "❌ 请先在「填写问答」标签选好狗狗名字（用来对应品种）"
+
+    import datetime as _dt
+    target_date = _dt.date.fromisoformat(date_str)
+
+    events, wear = rf_infer.load_events_and_wear(root, imu)
+    model_a = rf_infer.load_model_a()
+
+    c_res = rf_infer.predict_c(model_a, events, wear, imu, breed, target_date)
+    if not c_res["available"]:
+        return f"❌ 模型A无法预测：{c_res['reason']}"
+
+    c_proba_line = "、".join(f"{k}={v:.1%}" for k, v in sorted(c_res["proba"].items()))
+    lines = [
+        "## 模型A（IMU行为严重度，学习出来的权重，不是PM固定公式）",
+        f"**C档位：{c_res['tier']}**　（{c_proba_line}）",
+        "",
+    ]
+
+    ordinals = _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, coat)
+    if len(ordinals) < 2:  # 至少要有皮肤颜色那一组(占2个key)才算填了问答
+        lines.append("## 模型B（综合严重度）\n⚠️ 「填写问答」标签还没填，只能出C档位，出不了S档位"
+                     "（模型B需要问答答案，跟PM版「S总分需要C值+问答」是同一个设计思路）")
+    else:
+        model_b = rf_infer.load_model_b()
+        s_res = rf_infer.predict_s(model_a, model_b, events, wear, imu, breed, target_date, ordinals)
+        if not s_res["available"]:
+            lines.append(f"## 模型B（综合严重度）\n⚠️ {s_res['reason']}")
+        else:
+            s_proba_line = "、".join(f"{k}={v:.1%}" for k, v in sorted(s_res["proba"].items()))
+            lines.append("## 模型B（综合严重度，学习出来的权重+问答特征）")
+            lines.append(f"**S档位：{s_res['tier']}**　（{s_proba_line}）")
+            if s_res.get("missing_features"):
+                lines.append(f"\n（{len(s_res['missing_features'])}个特征因历史数据不够/没有"
+                             f"对应问答暂缺，模型原生支持缺失值，不影响预测能不能跑，"
+                             f"只是这几个特征这次没提供信息）")
+
+    lines.append(
+        "\n---\n⚠️ 这两个模型目前只在合成数据上训练过，没有真实兽医标签校准过，"
+        "预测结果不代表真实准确率，只能看个大概方向、跟PM版的C值计算/S总分"
+        "对照看两套方案在同一天差多少，不能当成真实诊断依据。"
+    )
+    return "\n".join(lines)
+
+
 def _to_iso_date(day_str: str) -> str:
     """"2026_8_19" → "2026-08-19"，用来填进gr.DateTime(type="string")的
     填表日期组件——那边存的是标准"YYYY-MM-DD"格式，目录名格式不一样，
@@ -1098,6 +1314,63 @@ def build_app():
                 c_score_output.change(
                     fn=lambda v, t: (v, t), inputs=[c_score_output, c_tier_output],
                     outputs=[s_c_value, s_c_tier_hint],
+                )
+
+            with gr.Tab("ML版对比"):
+                gr.Markdown(
+                    "# ML版（算法组训练出来的RF模型）\n"
+                    "`skin_health/`目录是算法组自己设计的方案——不用PM的固定加权公式，"
+                    "权重是从数据训练出来的（模型A：IMU行为特征→C0/C1/C2；模型B：模型A"
+                    "的特征+输出概率+问答特征→S0/S1/S2）。这个标签用**同一份真实IMU"
+                    "数据**跑一遍模型A/B，可以跟前面「C值计算」「S总分」两个标签的"
+                    "PM版结果对照，看两套方案在同一天差多少。\n\n"
+                    "⚠️ **重要**：这两个模型目前只在`skin_health/data/rf_synthetic/`下的"
+                    "**合成数据**上训练过，没有真实兽医标签校准过，预测结果**不代表"
+                    "真实准确率**——训练脚本自己的报告也写得很清楚这一点。这里只是"
+                    "把训练管道接上真实数据跑一下、看个大概方向，不能当诊断依据。\n\n"
+                    "模型文件不存在时需要先在服务器上跑（只用跑一次，跑完这两个"
+                    "`.joblib`文件就在仓库里，不用每次都重新训练）：\n"
+                    "```\ncd skin_health/code\n"
+                    "python train_rf_model_a.py --data_dir ../data/rf_synthetic\n"
+                    "python gen_model_b_training_data.py --data_dir ../data/rf_synthetic\n"
+                    "python train_rf_model_b.py --data_dir ../data/rf_synthetic\n```"
+                )
+                with gr.Row():
+                    ml_roots = gr.Textbox(
+                        label="推理结果根目录（逗号分隔可填多个）",
+                        value=DEFAULT_IMU_STATS_ROOTS,
+                        placeholder="比如 infer_result_majority_syn, infer_result_majority",
+                    )
+                    ml_scan_btn = gr.Button("扫描")
+                ml_scan_status_md = gr.Markdown()
+                ml_combos_state = gr.State(value=[])
+
+                with gr.Row():
+                    ml_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
+                    ml_date_select = gr.Dropdown(label="日期", interactive=True)
+                ml_date_status_md = gr.Markdown()
+
+                gr.Markdown(
+                    "狗狗品种从「填写问答」标签选好的狗狗名字自动取（比如"
+                    "「比熊-BB」取「比熊」），S档位预测需要「填写问答」标签"
+                    "把问答部分也填好——不用在这个标签重新填一遍。"
+                )
+                ml_predict_btn = gr.Button("预测", variant="primary")
+                ml_result_md = gr.Markdown()
+
+                ml_scan_btn.click(
+                    fn=ml_scan_roots, inputs=[ml_roots],
+                    outputs=[ml_combos_state, ml_imu_select, ml_scan_status_md],
+                )
+                ml_imu_select.change(
+                    fn=ml_get_dates, inputs=[ml_combos_state, ml_imu_select],
+                    outputs=[ml_date_select, ml_date_status_md],
+                )
+                ml_predict_btn.click(
+                    fn=ml_predict,
+                    inputs=[ml_combos_state, ml_imu_select, ml_date_select, dog_name,
+                           has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat],
+                    outputs=[ml_result_md],
                 )
 
             with gr.Tab("历史记录"):
