@@ -53,12 +53,53 @@ def models_available(data_dir=MODEL_DIR_DEFAULT):
     return a, b
 
 
-def load_model_a(data_dir=MODEL_DIR_DEFAULT):
-    return joblib.load(os.path.join(data_dir, MODEL_A_FILENAME))
+# 模型加载后缓存在内存里——之前每次点"预测"都重新joblib.load一遍，模型
+# 文件本身不大(单个不到1MB)所以单次读盘不算慢，但每次预测都读一遍完全
+# 没必要，页面用的还是同一份.joblib文件。用data_dir当缓存key，同一个
+# 目录只读一次；不同data_dir(比如以后真的接了不同版本的模型)会分别缓存，
+# 不会用错模型。
+_MODEL_A_CACHE = {}
+_MODEL_B_CACHE = {}
 
 
-def load_model_b(data_dir=MODEL_DIR_DEFAULT):
-    return joblib.load(os.path.join(data_dir, MODEL_B_FILENAME))
+def load_model_a(data_dir=MODEL_DIR_DEFAULT, use_cache=True):
+    if use_cache and data_dir in _MODEL_A_CACHE:
+        return _MODEL_A_CACHE[data_dir]
+    bundle = joblib.load(os.path.join(data_dir, MODEL_A_FILENAME))
+    if use_cache:
+        _MODEL_A_CACHE[data_dir] = bundle
+    return bundle
+
+
+def load_model_b(data_dir=MODEL_DIR_DEFAULT, use_cache=True):
+    if use_cache and data_dir in _MODEL_B_CACHE:
+        return _MODEL_B_CACHE[data_dir]
+    bundle = joblib.load(os.path.join(data_dir, MODEL_B_FILENAME))
+    if use_cache:
+        _MODEL_B_CACHE[data_dir] = bundle
+    return bundle
+
+
+def warm_models(data_dir=MODEL_DIR_DEFAULT):
+    """服务启动时调用一次，把两个模型提前读进内存缓存——这样第一次真实
+    点"预测"的用户不用等现读盘那一下，之后每次预测也都是直接读缓存。
+    模型文件还没训练出来时不报错，只在返回值里如实说明哪个没成功，
+    调用方(main())自己决定要不要打印提示，不强行让整个服务起不来。"""
+    result = {"model_a": False, "model_b": False}
+    a_avail, b_avail = models_available(data_dir)
+    if a_avail:
+        try:
+            load_model_a(data_dir)
+            result["model_a"] = True
+        except Exception:
+            pass
+    if b_avail:
+        try:
+            load_model_b(data_dir)
+            result["model_b"] = True
+        except Exception:
+            pass
+    return result
 
 
 def load_events_and_wear(infer_root, imu_label, min_conf=0.8, conf_field="conf_mean"):
