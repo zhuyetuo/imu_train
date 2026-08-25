@@ -678,6 +678,25 @@ def _pm_answers_to_rf_ordinals(color, odor, lesion, hair_spot, hair_diameter, co
     return ordinals
 
 
+def ml_questionnaire_status(has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat):
+    """「填写问答」标签的答案有没有填、填了几题——显示在"预测S档位"按钮
+    旁边，不用点了预测才从结果文字里知道这次到底用没用上问答。用户反馈
+    "填完跳转回来，应该有问答的选项结果才对，模型B预测应该自己检测打印
+    是否有问答可以用，这样我才知道是否生效了"——这个函数就是那个"提前
+    检测"。数问答题数直接数原始的7个输入参数里有几个非空，不绕道
+    _pm_answers_to_rf_ordinals()返回的字典去反推（皮肤颜色一题会同时
+    产出两个RF特征key，反推题数容易算错），逻辑更直接。"""
+    required = [has_hair_loss, color, odor, lesion, coat]
+    if has_hair_loss == "是":
+        required += [hair_spot, hair_diameter]
+    answered = sum(1 for v in required if v)
+    total = len(required)
+    if answered == 0:
+        return "⚠️ 还没检测到「填写问答」标签的答案——模型B待会儿会只用IMU特征预测"
+    return (f"✅ 检测到「填写问答」标签已经填了{answered}/{total}题，"
+           f"待会儿点「预测S档位」会带上这些答案")
+
+
 def _dog_breed(dog_name_val):
     """"比熊-BB" → "比熊"——DOG_NAME_OPTIONS里的命名约定本来就是"品种-
     名字"，取"-"前面那段就是品种，刚好也是rf_infer模型训练时breed_map
@@ -1549,6 +1568,10 @@ def build_app():
                 ml_goto_q_btn = gr.Button("去「填写问答」标签填问卷（可选）")
 
                 gr.Markdown("### ③ 用模型B预测S档位（问答填不填都能跑）")
+                # 提前告诉你"填写问答"标签现在这几个答案会不会被模型B用上——
+                # 不用点了预测才从结果文字里知道这次到底生效没生效，从"填写
+                # 问答"标签跳回来的那一刻(main_tabs.select)就刷新一次
+                ml_questionnaire_status_md = gr.Markdown()
                 ml_predict_s_btn = gr.Button("预测S档位（模型B）", variant="primary")
                 ml_s_result_md = gr.Markdown()
 
@@ -1587,6 +1610,18 @@ def build_app():
                     inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select],
                     outputs=[fill_date, dog_name, main_tabs],
                 )
+                ml_q_status_inputs = [has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat]
+                # 问答的任何一题一变就刷新一次状态提示——不管是在"填写问答"
+                # 标签里直接改的，还是从别处跳转带过去改的，这个提示都要跟着
+                # 更新，不能只在"跳转回来那一下"生效
+                for inp in ml_q_status_inputs:
+                    inp.change(fn=ml_questionnaire_status, inputs=ml_q_status_inputs,
+                              outputs=[ml_questionnaire_status_md])
+                # 从"填写问答"标签跳回"ML版对比"标签(或者点了任意Tab)那一刻
+                # 也刷新一次——这样"填完问答→点按钮跳回来"这个动作本身就能
+                # 立刻看到"检测到已经填了N题"，不用等碰一下问答选项才触发
+                main_tabs.select(fn=ml_questionnaire_status, inputs=ml_q_status_inputs,
+                                 outputs=[ml_questionnaire_status_md])
                 ml_predict_s_btn.click(
                     fn=ml_predict_s,
                     inputs=[ml_rows_state, ml_date_select, ml_imu_select, ml_dog_select,
