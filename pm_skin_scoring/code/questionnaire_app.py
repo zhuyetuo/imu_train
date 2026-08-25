@@ -290,9 +290,13 @@ def _c_score_persistence(consecutive_days):
 
 
 def _c_score_interruption(zn, zd, long_scratch):
-    if zd >= 2 or long_scratch:
+    """2026-08更新：跟兽医同事重新讨论后的版本——ZD<3(即1或2次)算20分，
+    ZD>=3或触发长时间抓挠(满足一项即可，不用同时满足)才是30分红旗，之前
+    版本的门槛是ZD==1给20分、ZD>=2就跳到30分红旗，已经改成PM文档最新的
+    这版数值。"""
+    if zd >= 3 or long_scratch:
         return 30, True  # 红旗
-    if zd == 1:
+    if zd >= 1:
         return 20, False
     if zn > 5:
         return 10, False
@@ -321,13 +325,16 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
     if has_baseline:
         delta_score, delta_by, delta_ratio = _c_score_delta(
             baseline_count, baseline_duration_min, today_count, today_duration_min)
-        # 相对基线>3倍直接触发红旗封顶30分——tier表里ratio_min=3.0那档本来就是
-        # 30分，这里再显式判一次是为了在red_flags列表里明确标出"变化幅度"这个
-        # 红旗来源，跟PM文档"红旗信号：4个维度里面标红的最大分值项目"这句话
-        # 对应起来，不是重复计分
-        delta_red_flag = delta_ratio > 3
-        if delta_red_flag:
-            delta_score = 30
+        # 红旗＝真的落进了30分那一档(_c_delta_score_one按"绝对增加和相对
+        # 倍数同时满足"判定出来的)，不能只看"相对倍数>3"这一个条件就直接
+        # 判红旗——这是之前一个真实bug：≥20次/≥15分钟这个绝对门槛没达到，
+        # 但相对倍数因为基线值很小意外超过3倍时(比如基线1次涨到10次，
+        # 倍数3.33但只增加了9次，够不到20次这个绝对门槛)，之前的代码会
+        # 不看绝对门槛直接把delta_score强改成30分红旗，跟_c_delta_score_one
+        # 自己按"双门槛"算出来的分数(这个例子应该是20分，时长那边10分钟
+        # 时长增量够不到15分钟的绝对门槛)不一致，页面上会多算出10分、还会
+        # 凭空触发一个不该有的红旗
+        delta_red_flag = delta_score >= 30
         delta_note = f"按{delta_by}判定，相对基线比值={delta_ratio:.2f}"
     else:
         # 没有基线：这一项不计分也不触发红旗。注意这样算出来的C值会偏低
@@ -369,7 +376,7 @@ def compute_c_score(baseline_count, baseline_duration_min, today_count, today_du
     if persistence_red_flag:
         red_flags.append("持续≥3天")
     if interrupt_red_flag:
-        red_flags.append("睡眠中断≥2次或触发长时间抓挠")
+        red_flags.append("睡眠中断≥3次或触发长时间抓挠")
     red_flag_line = (f"\n> 🚩 红旗信号：{'、'.join(red_flags)}，直接判定C2，不看加权总分是否达到50分"
                      if red_flags else "")
 
@@ -963,9 +970,11 @@ def build_app():
                 gr.Markdown(
                     "## 四、正常行为影响/中断（0-30分）\n"
                     "这一项看的是「抓挠有没有影响到狗的正常作息」，不只是抓了多少次。\n\n"
-                    "打分规则（从重到轻依次判，命中就不看后面的）：\n"
-                    "- `ZD≥2` **或** 有单次抓挠≥60秒 → **30分（红旗，直接判C2）**\n"
-                    "- `ZD==1` → 20分\n"
+                    "打分规则（从重到轻依次判，命中就不看后面的，2026-08跟兽医"
+                    "同事重新讨论后的版本）：\n"
+                    "- `ZD≥3` **或** 有单次抓挠≥60秒 → **30分（红旗，直接判C2，"
+                    "满足一项即可，不用同时满足）**\n"
+                    "- `ZD<3`（即ZD是1或2） → 20分\n"
                     "- `ZN>5` → 10分\n"
                     "- 都不满足 → 0分\n\n"
                     "⚠️ 注意ZD优先级高于ZN：只要ZD≥1，不管ZN是5还是50都不影响得分。"
