@@ -731,8 +731,18 @@ def ml_scan_roots(roots_str: str):
 
         root_label = os.path.basename(root.rstrip("/\\")) or root
         found_any = False
+        ignored_dirnames = []
         for infer_dir in infer_dirs:
             day_str = os.path.basename(os.path.dirname(infer_dir))  # 比如"2026_8_24"
+            # 只认真正的日期目录(YYYY_M_D)——实际数据里发现RESULT_ROOT下会
+            # 混进"2026_8_11_raw"/"2026_8_11_resampled16hz"这种带后缀的
+            # 非日期目录(重采样/原始数据测试留下的)，如果不过滤，这些目录
+            # 名转不了ISO格式会原样保留，下划线"_"的ASCII码比连字符"-"大，
+            # 排序时会排到所有正常日期后面，"默认选最后一个(最新日期)"就会
+            # 选中这种假日期而不是真的最新一天
+            if not re.match(r"^\d{4}_\d{1,2}_\d{1,2}$", day_str):
+                ignored_dirnames.append(day_str)
+                continue
             iso_date = _to_iso_date(day_str)
             imus_this_day = set()
             for path in glob.glob(os.path.join(infer_dir, "*_infer.json")):
@@ -743,6 +753,10 @@ def ml_scan_roots(roots_str: str):
                 found_any = True
         if not found_any:
             skipped.append(f"{root}（没有找到任何_infer.json）")
+        if ignored_dirnames:
+            skipped.append(f"{root}下{len(ignored_dirnames)}个非日期格式的目录已忽略："
+                          f"{'、'.join(sorted(ignored_dirnames)[:5])}"
+                          f"{'...' if len(ignored_dirnames) > 5 else ''}")
 
     if not all_rows:
         msg = "❌ 没有扫描到任何天/机位的佩戴数据"
