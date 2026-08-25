@@ -13,6 +13,7 @@
 import argparse
 import os
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -22,6 +23,8 @@ from sklearn.model_selection import GroupKFold, cross_val_predict
 
 from questionnaire_features import QUESTIONNAIRE_FEATURE_COLUMNS
 from rf_features import FEATURE_COLUMNS
+
+MODEL_FILENAME = "model_b.joblib"
 
 
 def main():
@@ -97,6 +100,23 @@ def main():
 
     print("\n用全量数据重新训练，计算特征重要性(permutation importance)...")
     model_b.fit(X, y)
+
+    # 持久化，供rf_infer.py加载做真实推理用。stack_cols用来在推理时对齐——
+    # 推理时不会重新训一个model_a_for_stack，而是直接用已经持久化的
+    # model_a.joblib对新数据算predict_proba，按这里存的stack_cols名字
+    # (对应模型A的每个类别C0/C1/C2)拼进模型B的输入特征，不依赖训练时这里
+    # 用cross_val_predict算出来的具体概率值(那是训练/评估阶段防泄漏用的，
+    # 不是推理该用的模型A)
+    model_path = os.path.join(args.data_dir, MODEL_FILENAME)
+    joblib.dump({
+        "model": model_b,
+        "feature_cols": feature_cols_b,
+        "stack_cols": stack_cols,
+        "breed_categories": list(X["breed_or_size_class"].cat.categories),
+        "classes": list(model_b.classes_),
+    }, model_path)
+    print(f"模型B已持久化: {model_path}")
+
     result = permutation_importance(model_b, X, y, n_repeats=15, random_state=42,
                                      scoring="f1_macro", n_jobs=-1)
     importance_df = pd.DataFrame({
