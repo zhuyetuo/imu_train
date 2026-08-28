@@ -81,6 +81,12 @@ def _fmt_row(cols):
     return " | ".join(_pad(v, w) for v, w in cols)
 
 
+def _ls_url(base, project_id, task_id):
+    if not base:
+        return ""
+    return f"  {base.rstrip('/')}/projects/{project_id}/data?task={task_id}"
+
+
 def _fmt_time(t):
     """时间戳只保留到0.1秒——微秒级精度对人工核对没意义，反而占地方看着乱。"""
     t = pd.to_datetime(t)
@@ -176,6 +182,11 @@ def main():
     ap.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"])
     ap.add_argument("--log", default="tmp/review_predictions.log",
                      help="结果打印+落盘到这个文件（不是CSV，直接翻log看）")
+    ap.add_argument("--ls_url_base", default="",
+                     help="Label Studio地址（例如 http://192.168.2.140:8181），填了的话每行"
+                          "后面会附一个可以直接点开跳转到对应task的链接，方便改标注。"
+                          "不带tab参数（tab是网页上视图的编号，从导出的JSON里拿不到），"
+                          "跳转后如果没落到对应视图，手动在Label Studio里点一下就行")
     ap.add_argument("--only_wrong", action="store_true",
                      help="逐段明细只打印预测跟人工标注不一致的（✗），太短/一致的不打印，"
                           "方便直接盯着有问题的段看，不用在全量输出里翻")
@@ -302,7 +313,7 @@ def main():
                         ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8),
                         (_fmt_time(t0), 22), (_fmt_time(t1), 22),
                         (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
-                    ]) + f"  ({agree}/{len(pred_names)})")
+                    ]) + f"  ({agree}/{len(pred_names)})" + _ls_url(args.ls_url_base, project_id, task_id))
                 stats[(true_label, correct)] += 1
 
     n_total = sum(stats.values())
@@ -335,7 +346,8 @@ def main():
                 (f"{r['max_conf']:.2f}", 8), (f"{r['mean_conf']:.2f}", 8),
                 (_fmt_time(r["t0"]), 22), (_fmt_time(r["t1"]), 22),
                 (_fmt_time(r["pred_start_t"]), 22), (_fmt_time(r["pred_end_t"]), 22),
-            ]) + f"  ({r['agree']}/{r['n_windows']})")
+            ]) + f"  ({r['agree']}/{r['n_windows']})"
+                  + _ls_url(args.ls_url_base, r["project_id"], r["task_id"]))
 
     print(f"\n已保存: {log_path}")
     sys.stdout = sys.__stdout__
