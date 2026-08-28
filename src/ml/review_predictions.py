@@ -199,7 +199,7 @@ def main():
     print(f"[review] 匹配到 {len(files)} 个project文件")
 
     COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
-            ("true_label", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
+            ("映射标签", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
             ("pred_label", 10), ("一致", 4)]
     print("\n" + _fmt_row(COLS))
 
