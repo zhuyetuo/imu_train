@@ -11,17 +11,20 @@
 #   bash train_custom.sh --date 2026_7_23 --clean   # 先删掉旧缓存再全新生成，
 #                                                     # 改过预处理/特征相关代码后建议加上
 #
-#   # 合并多个采集批次一起训练（不同批次采样率可以不一样，非--hz的批次会先
-#   # 被重采样对齐到--hz，见src/data/resample_csv_hz.py）：
-#   bash train_custom.sh --date 2026_8_11-2026_8_27_raw --hz 16 \
+#   # 合并多个采集批次一起训练（不同批次采样率可以不一样，非目标--hz的批次
+#   # 会先被重采样对齐，见src/data/resample_csv_hz.py）：
+#   bash train_custom.sh --date 2026_8_11-2026_8_27_raw --source_hz 50 --hz 16 \
 #     --extra_date 2026_7_17-2026_7_29:16 \
 #     --extra_date 2026_7_30-2026_8_11:16 \
 #     --tag merged --clean
-#   # 上面例子里主数据是50Hz原始采集，--hz 16表示训练目标采样率是16Hz，
-#   # 三个批次（50Hz的主数据+两个本来就是16Hz的旧数据）都会被统一到16Hz后
-#   # 合并训练。--extra_date原有数据本来是16Hz采的就不需要重采样，冒号后面
-#   # 的数字写它自己真实的采样率（16），跟主数据的--hz一样就会跳过重采样。
-#   # 单独--date不加--extra_date时完全是原来的行为，不受影响。
+#   # 上面例子里主数据（--date）是50Hz原始采集的，--source_hz 50必须显式
+#   # 写它自己真实的采样率，不写默认等于--hz（当成"已经是目标采样率"，
+#   # 不会重采样，主数据是原始采样率跟--hz不一样时一定要传，否则会静默
+#   # 当成已经是目标Hz、直接跳过重采样，训练进去的时间轴是错的）。
+#   # --hz 16是训练目标采样率，三个批次（50Hz的主数据+两个本来就是16Hz的
+#   # 旧数据）都会被统一到16Hz后合并训练。--extra_date后面冒号跟的是那个
+#   # 批次自己真实的采样率，跟--hz一样就会跳过重采样。
+#   # 单独--date不加--extra_date/--source_hz时完全是原来的行为，不受影响。
 #
 # 输出:
 #   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
@@ -76,7 +79,12 @@ CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓�
                            # 是这几天踩过好几次的坑，改动过预处理/特征相关代码后
                            # 强烈建议加这个参数，保证是从头全新生成、不会跟旧缓存混着用
 EXTRA_DATES=()             # --extra_date DATE:HZ，可重复传，跟主--date合并一起训练。
-                           # HZ跟主--hz不一样的批次会先重采样对齐（见上面用法示例）
+                           # HZ跟目标--hz不一样的批次会先重采样对齐（见上面用法示例）
+SOURCE_HZ=""               # 主--date数据自己真实的采样率，留空默认等于--hz（当成"已经
+                           # 是目标采样率不用重采样"）。只有加了--extra_date合并多批次、
+                           # 且主数据的原始采样率跟--hz不一样时才需要显式传（比如主数据
+                           # 是50Hz原始采集，--hz 16是训练目标，就要传--source_hz 50，
+                           # 不传会被静默当成已经是16Hz，不做重采样，时间轴是错的）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -95,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
+    --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -210,11 +219,18 @@ fi
 # 日期前缀，避免不同批次导出的task编号刚好撞车导致数据集划分时误判成
 # 同一段录制。
 if [[ ${#EXTRA_DATES[@]} -gt 0 ]]; then
+  MAIN_SOURCE_HZ="${SOURCE_HZ:-$HZ}"
+  if [[ -z "$SOURCE_HZ" ]]; then
+    echo ""
+    echo "⚠ 未传 --source_hz，主数据(--date $DATE)会被当成已经是 ${HZ}Hz（不重采样）。" \
+         "如果它实际采样率不是${HZ}Hz，加 --source_hz <实际采样率> 重跑，否则合并进去的" \
+         "时间轴是错的。"
+  fi
   MERGED_CSV="${DATA_DIR}/merged_${DATE}${TAG:+_$TAG}_combined.csv"
   if [[ ! -f "$MERGED_CSV" || "$CLEAN" == "1" ]]; then
     echo ""
     echo "▶ 步骤1.5：合并 ${#EXTRA_DATES[@]} 个额外批次 → $MERGED_CSV ..."
-    CSV_PARTS=("${DATE}:${CSV}:${HZ}")
+    CSV_PARTS=("${DATE}:${CSV}:${MAIN_SOURCE_HZ}")
     for _ed in "${EXTRA_DATES[@]}"; do
       _edate="${_ed%%:*}"
       _ehz="${_ed##*:}"
