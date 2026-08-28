@@ -199,8 +199,8 @@ def main():
     print(f"[review] 匹配到 {len(files)} 个project文件")
 
     COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
-            ("true_label", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
-            ("pred_label", 10), ("一致", 4)]
+            ("映射标签", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
+            ("pred_label", 10), ("一致", 4), ("pred_start", 26), ("pred_end", 26)]
     print("\n" + _fmt_row(COLS))
 
     stats = Counter()  # (true_label, correct) -> count，跑完打统计用
@@ -220,7 +220,7 @@ def main():
                     print(_fmt_row([
                         (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
                         (remap.get(raw_label, "(未映射)"), 10), (t0, 26), (t1, 26),
-                        (0, 6), ("(片段太短)", 10), ("", 4),
+                        (0, 6), ("(片段太短)", 10), ("", 4), ("", 26), ("", 26),
                     ]))
                     continue
 
@@ -244,10 +244,23 @@ def main():
                 agree = sum(1 for p in pred_names if p == pred_label)
                 correct = pred_label == true_label
 
+                # 每个窗口i覆盖的是重采样后第[i*stride, i*stride+window_size)个
+                # 采样点，按target_hz换算回真实时间（重采样是按固定hz等间隔插值/
+                # 抽点的，t0+样本序号/target_hz就是这个窗口对应的真实时刻）——
+                # 取"被判成pred_label的那些窗口"里最早的起点、最晚的终点，就是
+                # 模型自己认为这段事件的起止时间，拿去跟人工标注的seg_start/
+                # seg_end比，能看出模型判断的边界跟人工标的差多少。
+                t0_dt = pd.to_datetime(t0)
+                pred_match_idx = [i for i, p in enumerate(pred_names) if p == pred_label]
+                pred_start_t = t0_dt + pd.Timedelta(seconds=pred_match_idx[0] * stride / target_hz)
+                pred_end_t = t0_dt + pd.Timedelta(
+                    seconds=(pred_match_idx[-1] * stride + window_size) / target_hz)
+
                 print(_fmt_row([
                     (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
                     (true_label, 10), (t0, 26), (t1, 26), (len(pred_names), 6),
                     (pred_label, 10), ("✓" if correct else "✗", 4),
+                    (pred_start_t, 26), (pred_end_t, 26),
                 ]) + f"  ({agree}/{len(pred_names)})")
                 stats[(true_label, correct)] += 1
 
