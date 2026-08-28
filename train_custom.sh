@@ -289,6 +289,12 @@ for part in parts:
     date_tag, path, src_hz = part.split(':')
     src_hz = int(src_hz)
     df = pd.read_csv(path)
+    # 重采样批次不会保留timestamp列（重采样后行数变了，原时间戳对不上），
+    # 直通批次的CSV还带着原始timestamp列——两种批次concat到一起会让这一列
+    # 一部分是NaN一部分是时间戳字符串，读混合CSV时pandas会报DtypeWarning。
+    # loader_custom.py只认sensor_cols/label_col/record_id_col，不用
+    # timestamp，这里统一丢掉，两边保持列一致
+    df = df.drop(columns=["timestamp"], errors="ignore")
     if src_hz != target_hz:
         print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz')
         out_rows = []
