@@ -262,3 +262,6 @@ tooth_health/data/examples/videos/*
 # 填表数据，不进git，只保留目录结构本身
 pm_skin_scoring/data/*
 !pm_skin_scoring/data/.gitkeep
+
+# train_custom.sh的训练日志目录（项目本地tmp/，不是系统/tmp）
+tmp/

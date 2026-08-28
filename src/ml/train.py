@@ -85,16 +85,25 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr, sample_weight=None):
     return model
 
 
-def apply_remap(y, classes, remap: dict) -> tuple[np.ndarray, list[str]]:
+def apply_remap(y, classes, remap: dict) -> tuple[np.ndarray, list[str], np.ndarray]:
     """
     remap: {"Lying chest": "睡觉", "Walking": "活动", ...}
-    返回重映射后的 y 和新 classes 列表。
+    返回重映射后的 y、新 classes 列表、keep_mask。
+
+    remap配置里没覆盖到的原始类别（比如自采数据里的"未佩戴"——这个不是
+    行为，是设备没戴在狗身上，训练行为分类器不该把这类样本也塞进去，见
+    src/data/wear_state.py专门的未佩戴/静置检测）会被过滤掉，不是直接
+    KeyError崩溃：mapping字典本来就只收录remap覆盖到的类别(`if c in
+    remap`)，但之前这里对y的每个样本都无条件查表，没有同步过滤，遇到
+    没覆盖的类别就崩了。keep_mask标记哪些样本被保留，调用方要用同一个
+    mask去过滤对应的X，保持X/y行数一致。
     """
     new_class_names = list(dict.fromkeys(remap.values()))  # 保序去重
     new_class2id = {c: i for i, c in enumerate(new_class_names)}
     mapping = {i: new_class2id[remap[c]] for i, c in enumerate(classes) if c in remap}
-    new_y = np.array([mapping[int(label)] for label in y], dtype=np.int64)
-    return new_y, new_class_names
+    keep_mask = np.array([int(label) in mapping for label in y], dtype=bool)
+    new_y = np.array([mapping[int(label)] for label in y[keep_mask]], dtype=np.int64)
+    return new_y, new_class_names, keep_mask
 
 
 def main(args):
@@ -128,9 +137,17 @@ def main(args):
         print(f"\n[ml/train] 标签重映射: {args.remap}")
         for k, v in remap_cfg.items():
             print(f"  {k} → {v}")
-        y_tr,  classes_new = apply_remap(y_tr,  classes, remap_cfg)
-        y_val, _           = apply_remap(y_val, classes, remap_cfg)
-        y_te,  _           = apply_remap(y_te,  classes, remap_cfg)
+        y_tr,  classes_new, keep_tr  = apply_remap(y_tr,  classes, remap_cfg)
+        y_val, _,           keep_val = apply_remap(y_val, classes, remap_cfg)
+        y_te,  _,           keep_te  = apply_remap(y_te,  classes, remap_cfg)
+        # keep_mask过滤掉的是remap配置没覆盖到的类别(比如"未佩戴")，
+        # X要跟着y一起过滤，不然行数对不上
+        X_tr, X_val, X_te = X_tr[keep_tr], X_val[keep_val], X_te[keep_te]
+        n_dropped = int((~keep_tr).sum() + (~keep_val).sum() + (~keep_te).sum())
+        if n_dropped:
+            print(f"[ml/train] 重映射: 丢弃了{n_dropped}个remap配置没覆盖到的样本"
+                  f"（比如'未佩戴'这类不该当行为标签训练的类别，不是预期的话检查"
+                  f"一下{args.remap}是不是漏配了某个类别）")
         classes = classes_new
         print(f"[ml/train] 重映射后类别: {classes}")
 

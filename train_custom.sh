@@ -74,6 +74,16 @@ JSON="${DATA_DIR}/merged_tmp.json"
 SYNTHETIC="data/synthetic/scratch_${DATE}${TAG:+_$TAG}.npz"
 DATASET_TAG=$(basename "$PROCESSED_DIR")
 
+# 训练日志放项目自己的tmp/目录下，不是系统/tmp——系统/tmp是全机器共用的，
+# 日志文件名又没带DATASET_TAG，不同用户/不同次跑（尤其带不同--tag同时跑）
+# 容易互相覆盖，日志内容对不上这次跑的是哪个数据集；放项目tmp/目录下、
+# 文件名带上DATASET_TAG，各自独立，也方便跑完之后回头翻日志（不用记得
+# 是哪次登录、哪个系统临时目录）
+TMP_DIR="tmp"
+mkdir -p "$TMP_DIR"
+LOG_NO_SYN="${TMP_DIR}/train_no_syn_${DATASET_TAG}.log"
+LOG_WITH_SYN="${TMP_DIR}/train_with_syn_${DATASET_TAG}.log"
+
 echo "=================================================="
 echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG${TAG:+   tag: $TAG}"
 echo "=================================================="
@@ -160,7 +170,7 @@ python src/ml/train.py --hz "$HZ" --model rf \
   --remap "$REMAP" \
   --results_dir "$RESULTS_DIR" \
   --feat_workers "$FEAT_WORKERS" \
-  > /tmp/train_no_syn.log 2>&1 &
+  > "$LOG_NO_SYN" 2>&1 &
 PID_A=$!
 
 # ── 生成合成数据 ──────────────────────────────────────────
@@ -185,7 +195,7 @@ python src/ml/train.py --hz "$HZ" --model rf \
   --synthetic_label "$LABEL" \
   --results_dir "$RESULTS_DIR" \
   --feat_workers "$FEAT_WORKERS" \
-  > /tmp/train_with_syn.log 2>&1 &
+  > "$LOG_WITH_SYN" 2>&1 &
 PID_B=$!
 
 # ── 等待两个训练完成，实时把两边的日志打到当前终端（加[A]/[B]前缀区分）──
@@ -202,13 +212,13 @@ echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志�
 # 光加tr还不够：tr写到管道（不是终端）时默认是全缓冲的，会把转换后的内容
 # 攒在自己的缓冲区里不立刻往下传，一样会卡住——用 stdbuf -oL 强制tr按行
 # 缓冲，才能真正做到每次更新都立刻显示。
-tail -f -n +1 /tmp/train_no_syn.log 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[A] /' &
+tail -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[A] /' &
 TAIL_A=$!
-tail -f -n +1 /tmp/train_with_syn.log 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[B] /' &
+tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[B] /' &
 TAIL_B=$!
 
-wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 /tmp/train_no_syn.log"
-wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 /tmp/train_with_syn.log"
+wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 $LOG_NO_SYN"
+wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 $LOG_WITH_SYN"
 
 kill "$TAIL_A" "$TAIL_B" 2>/dev/null
 wait "$TAIL_A" "$TAIL_B" 2>/dev/null
@@ -226,10 +236,10 @@ echo "  训练结果对比"
 echo "=================================================="
 echo ""
 echo "── 方案 A（纯标注）──"
-_show_log /tmp/train_no_syn.log
+_show_log "$LOG_NO_SYN"
 echo ""
 echo "── 方案 B（带合成）──"
-_show_log /tmp/train_with_syn.log
+_show_log "$LOG_WITH_SYN"
 
 echo ""
 echo "模型路径:"
