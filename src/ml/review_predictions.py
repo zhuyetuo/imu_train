@@ -15,9 +15,10 @@
     --csv_dir data/raw_wit/ \\
     --model_dir results/processed_2026_8_11-2026_8_27_raw_merged_majority/16hz_remap_custom_3class \\
     --source_hz 50 \\
-    --output tmp/review_2026_8_11-2026_8_27_raw.csv
+    --log tmp/review_2026_8_11-2026_8_27_raw.log
 
-  # 多个日期目录分别跑完，输出的CSV可以直接用tail -n+2 -q追加合并
+  # 结果直接打印+落到--log文本文件，一行一段标注，方便直接翻log看；
+  # 多个日期目录分别跑完，几份log文件可以直接cat到一起看
 """
 
 import argparse
@@ -150,12 +151,11 @@ def main():
                      help="这批project json对应原始传感器CSV的真实采样率")
     ap.add_argument("--remap", default="configs/remap_custom_3class.yaml")
     ap.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"])
-    ap.add_argument("--output", default="tmp/review_predictions.csv")
-    ap.add_argument("--log", default="",
-                     help="终端输出同步记录到这个文件，默认跟--output同目录同名、扩展名改.log")
+    ap.add_argument("--log", default="tmp/review_predictions.log",
+                     help="结果打印+落盘到这个文件（不是CSV，直接翻log看）")
     args = ap.parse_args()
 
-    log_path = args.log or os.path.splitext(args.output)[0] + ".log"
+    log_path = args.log
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     log_f = open(log_path, "w", encoding="utf-8")
     sys.stdout = _Tee(sys.__stdout__, log_f)
@@ -181,7 +181,10 @@ def main():
         sys.exit(1)
     print(f"[review] 匹配到 {len(files)} 个project文件")
 
-    rows_out = []
+    print(f"\n{'project':<8}{'task':<8}{'record_id':<18}{'raw_label':<8}{'true_label':<10}"
+          f"{'seg_start':<24}{'seg_end':<24}{'窗口数':>6}  {'pred_label':<10}{'一致':>4}")
+
+    stats = Counter()  # (true_label, correct) -> count，跑完打统计用
     for fp in files:
         m = PROJECT_ID_RE.search(os.path.basename(fp))
         project_id = m.group(1) if m else "?"
@@ -195,12 +198,9 @@ def main():
                     data, labels = downsample(data, labels, args.source_hz, target_hz)
 
                 if len(data) < window_size:
-                    rows_out.append({
-                        "project_id": project_id, "task_id": task_id, "record_id": subject_id,
-                        "raw_label": raw_label, "true_label": remap.get(raw_label, "(未映射-被排除)"),
-                        "seg_start": t0, "seg_end": t1, "n_windows": 0,
-                        "pred_label": "(片段太短，不足1个窗口)", "correct": "",
-                    })
+                    print(f"{project_id:<8}{task_id:<8}{subject_id:<18}{raw_label:<8}"
+                          f"{remap.get(raw_label, '(未映射)'):<10}{str(t0):<24}{str(t1):<24}"
+                          f"{0:>6}  {'(片段太短)':<10}")
                     continue
 
                 true_label = remap.get(raw_label)
@@ -221,31 +221,32 @@ def main():
                 pred_names = [classes[i] for i in pred_ids]
                 pred_label = Counter(pred_names).most_common(1)[0][0]
                 agree = sum(1 for p in pred_names if p == pred_label)
+                correct = pred_label == true_label
 
-                rows_out.append({
-                    "project_id": project_id, "task_id": task_id, "record_id": subject_id,
-                    "raw_label": raw_label, "true_label": true_label,
-                    "seg_start": t0, "seg_end": t1, "n_windows": len(pred_names),
-                    "pred_label": pred_label,
-                    "pred_agreement": f"{agree}/{len(pred_names)}",
-                    "correct": "✓" if pred_label == true_label else "✗",
-                })
+                print(f"{project_id:<8}{task_id:<8}{subject_id:<18}{raw_label:<8}{true_label:<10}"
+                      f"{str(t0):<24}{str(t1):<24}{len(pred_names):>6}  "
+                      f"{pred_label:<10}{'✓' if correct else '✗':>4}  ({agree}/{len(pred_names)})")
+                stats[(true_label, correct)] += 1
 
-    out_df = pd.DataFrame(rows_out)
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    out_df.to_csv(args.output, index=False)
-
-    n_total = len(out_df[out_df["correct"] != ""])
-    n_wrong = len(out_df[out_df["correct"] == "✗"])
-    print(f"\n[review] 共 {len(out_df)} 段标注，{n_total} 段有效对比，"
-          f"其中 {n_wrong} 段预测跟人工标注不一致（{n_wrong/n_total*100:.1f}%）" if n_total else
-          f"\n[review] 共 {len(out_df)} 段标注，没有可对比的段")
+    n_total = sum(stats.values())
+    n_wrong = sum(v for (_, correct), v in stats.items() if not correct)
+    print("")
     if n_total:
+        print(f"[review] 共 {n_total} 段有效对比，其中 {n_wrong} 段预测跟人工标注不一致"
+              f"（{n_wrong/n_total*100:.1f}%）")
         print("\n[review] 按人工标签统计不一致占比:")
-        for lbl, g in out_df[out_df["correct"] != ""].groupby("true_label"):
-            wrong = (g["correct"] == "✗").sum()
-            print(f"  {lbl}: {wrong}/{len(g)} 段不一致 ({wrong/len(g)*100:.1f}%)")
-    print(f"\n已保存: {args.output}")
+        by_label = Counter()
+        wrong_by_label = Counter()
+        for (lbl, correct), v in stats.items():
+            by_label[lbl] += v
+            if not correct:
+                wrong_by_label[lbl] += v
+        for lbl, total in sorted(by_label.items(), key=lambda kv: -kv[1]):
+            wrong = wrong_by_label.get(lbl, 0)
+            print(f"  {lbl}: {wrong}/{total} 段不一致 ({wrong/total*100:.1f}%)")
+    else:
+        print("[review] 没有可对比的段")
+    print(f"\n已保存: {log_path}")
     sys.stdout = sys.__stdout__
     log_f.close()
 
