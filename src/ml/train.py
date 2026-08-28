@@ -357,6 +357,21 @@ def main(args):
     print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
 
+    # classification_report的support只算了eval集（验证集/测试集），训练用了
+    # 多少窗口看不出来——之前想确认"标注数据是不是都用上了"，只能翻前面
+    # "数据集类别分布"那张表，跟这里的precision/recall对不上号，不方便对照。
+    # 这里把训练窗口数也拼到同一张表里，一眼就能看到每个类别训练/验证各用了
+    # 多少窗口。
+    train_counts = {lbl: int((y_tr == lbl).sum()) for lbl in present_labels}
+    _pc = classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
+                                 zero_division=0, output_dict=True)
+    print(f"  ── 各类别窗口数（训练 vs {eval_tag}）──")
+    print(f"  {'类别':<8}{'训练窗口数':>10}{f'{eval_tag}窗口数':>14}{'precision':>12}{'recall':>10}{'f1-score':>10}")
+    for lbl, name in zip(present_labels, present_names):
+        row = _pc[name]
+        print(f"  {name:<8}{train_counts[lbl]:>10}{int(row['support']):>14}"
+              f"{row['precision']:>12.2f}{row['recall']:>10.2f}{row['f1-score']:>10.2f}")
+
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
     syn_tag     = "_syn" if args.synthetic else ""
