@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 
 import numpy as np
@@ -62,6 +63,22 @@ from features import extract_features  # noqa: E402
 
 PROJECT_ID_RE = re.compile(r"project-(\d+)-")
 SENSOR_COLS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+
+def _disp_width(s):
+    """中文/全角字符在终端里占2格，Python的:<N对齐是按字符数算的（不是显示
+    宽度），中英文混排时列会错位——这里按east_asian_width算实际显示宽度。"""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in str(s))
+
+
+def _pad(s, width):
+    s = str(s)
+    return s + " " * max(0, width - _disp_width(s))
+
+
+def _fmt_row(cols):
+    """cols: [(值, 目标宽度), ...]，用｜分隔，中英文混排也不会错位。"""
+    return " | ".join(_pad(v, w) for v, w in cols)
 
 
 def _window_data(data, window_size, stride):
@@ -181,8 +198,10 @@ def main():
         sys.exit(1)
     print(f"[review] 匹配到 {len(files)} 个project文件")
 
-    print(f"\n{'project':<8}{'task':<8}{'record_id':<18}{'raw_label':<8}{'true_label':<10}"
-          f"{'seg_start':<24}{'seg_end':<24}{'窗口数':>6}  {'pred_label':<10}{'一致':>4}")
+    COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
+            ("true_label", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
+            ("pred_label", 10), ("一致", 4)]
+    print("\n" + _fmt_row(COLS))
 
     stats = Counter()  # (true_label, correct) -> count，跑完打统计用
     for fp in files:
@@ -198,9 +217,11 @@ def main():
                     data, labels = downsample(data, labels, args.source_hz, target_hz)
 
                 if len(data) < window_size:
-                    print(f"{project_id:<8}{task_id:<8}{subject_id:<18}{raw_label:<8}"
-                          f"{remap.get(raw_label, '(未映射)'):<10}{str(t0):<24}{str(t1):<24}"
-                          f"{0:>6}  {'(片段太短)':<10}")
+                    print(_fmt_row([
+                        (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
+                        (remap.get(raw_label, "(未映射)"), 10), (t0, 26), (t1, 26),
+                        (0, 6), ("(片段太短)", 10), ("", 4),
+                    ]))
                     continue
 
                 true_label = remap.get(raw_label)
@@ -223,9 +244,11 @@ def main():
                 agree = sum(1 for p in pred_names if p == pred_label)
                 correct = pred_label == true_label
 
-                print(f"{project_id:<8}{task_id:<8}{subject_id:<18}{raw_label:<8}{true_label:<10}"
-                      f"{str(t0):<24}{str(t1):<24}{len(pred_names):>6}  "
-                      f"{pred_label:<10}{'✓' if correct else '✗':>4}  ({agree}/{len(pred_names)})")
+                print(_fmt_row([
+                    (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
+                    (true_label, 10), (t0, 26), (t1, 26), (len(pred_names), 6),
+                    (pred_label, 10), ("✓" if correct else "✗", 4),
+                ]) + f"  ({agree}/{len(pred_names)})")
                 stats[(true_label, correct)] += 1
 
     n_total = sum(stats.values())
