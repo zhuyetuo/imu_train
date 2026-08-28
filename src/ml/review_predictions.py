@@ -224,7 +224,7 @@ def main():
 
     COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
             ("映射标签", 10), ("窗口数", 6), ("pred_label", 10), ("一致", 4),
-            ("最大置信度", 8), ("平均置信度", 8),
+            ("最大置信度", 8), ("平均置信度", 8), ("全窗口平均置信度", 8),
             ("seg_start", 22), ("seg_end", 22), ("pred_start", 22), ("pred_end", 22)]
     print("\n" + _fmt_row(COLS))
 
@@ -247,7 +247,7 @@ def main():
                         print(_fmt_row([
                             (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
                             (remap.get(raw_label, "(未映射)"), 10), (0, 6), ("(片段太短)", 10), ("", 4),
-                            ("", 8), ("", 8),
+                            ("", 8), ("", 8), ("", 8),
                             (_fmt_time(t0), 22), (_fmt_time(t1), 22), ("", 22), ("", 22),
                         ]))
                     continue
@@ -284,17 +284,22 @@ def main():
                 pred_end_t = t0_dt + pd.Timedelta(
                     seconds=(pred_match_idx[-1] * stride + window_size) / target_hz)
 
-                # 置信度：每个窗口预测出的那个类别自己的概率（predict_proba里对应
-                # 那一列），只看跟多数票pred_label一致的那些窗口——跟"这段判成
-                # pred_label"这件事直接相关的置信度，不是所有窗口不分青红皂白
-                # 混在一起算
+                # 置信度：最大/平均置信度只看跟多数票pred_label一致的那些窗口，
+                # 跟"这段判成pred_label"这件事直接相关，但会把不同意的窗口整个
+                # 忽略掉，看不出段内部有没有分歧（比如3个窗口投抓挠都很自信，
+                # 另外2个窗口其实倾向活动，这两个只看"获胜方"的指标完全体现不
+                # 出来）。全窗口平均置信度是不管每个窗口自己投给谁，统一看
+                # 全部窗口对pred_label这个类别打了多少概率再取平均，不同意的
+                # 窗口会把这个数字拉低，能反映出段内部的分歧程度。
                 if has_proba:
                     proba = model.predict_proba(feats)
                     proba_of_pred = proba[np.arange(len(pred_ids)), pred_ids]
                     match_confs = proba_of_pred[pred_match_idx]
                     max_conf, mean_conf = f"{match_confs.max():.2f}", f"{match_confs.mean():.2f}"
+                    pred_label_col = classes.index(pred_label)
+                    all_conf = f"{proba[:, pred_label_col].mean():.2f}"
                 else:
-                    max_conf, mean_conf = "-", "-"
+                    max_conf, mean_conf, all_conf = "-", "-", "-"
 
                 if not correct:
                     wrong_rows.append({
@@ -302,6 +307,7 @@ def main():
                         "raw_label": raw_label, "true_label": true_label, "pred_label": pred_label,
                         "n_windows": len(pred_names), "max_conf": float(max_conf) if has_proba else -1,
                         "mean_conf": float(mean_conf) if has_proba else -1,
+                        "all_conf": float(all_conf) if has_proba else -1,
                         "t0": t0, "t1": t1, "pred_start_t": pred_start_t, "pred_end_t": pred_end_t,
                         "agree": agree,
                     })
@@ -310,7 +316,7 @@ def main():
                     print(_fmt_row([
                         (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
                         (true_label, 10), (len(pred_names), 6), (pred_label, 10),
-                        ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8),
+                        ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8), (all_conf, 8),
                         (_fmt_time(t0), 22), (_fmt_time(t1), 22),
                         (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
                     ]) + f"  ({agree}/{len(pred_names)})" + _ls_url(args.ls_url_base, project_id, task_id))
@@ -343,7 +349,7 @@ def main():
                 (r["project_id"], 7), (r["task_id"], 7), (r["subject_id"], 17),
                 (r["raw_label"], 10), (r["true_label"], 10), (r["n_windows"], 6),
                 (r["pred_label"], 10), ("✗", 4),
-                (f"{r['max_conf']:.2f}", 8), (f"{r['mean_conf']:.2f}", 8),
+                (f"{r['max_conf']:.2f}", 8), (f"{r['mean_conf']:.2f}", 8), (f"{r['all_conf']:.2f}", 8),
                 (_fmt_time(r["t0"]), 22), (_fmt_time(r["t1"]), 22),
                 (_fmt_time(r["pred_start_t"]), 22), (_fmt_time(r["pred_end_t"]), 22),
             ]) + f"  ({r['agree']}/{r['n_windows']})"
