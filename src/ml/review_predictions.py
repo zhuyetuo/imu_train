@@ -209,9 +209,9 @@ def main():
         print("[提示] 模型不支持predict_proba，置信度列会显示为'-'")
 
     COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
-            ("映射标签", 10), ("seg_start", 22), ("seg_end", 22), ("窗口数", 6),
-            ("pred_label", 10), ("一致", 4), ("pred_start", 22), ("pred_end", 22),
-            ("最大置信度", 8), ("平均置信度", 8)]
+            ("映射标签", 10), ("窗口数", 6), ("pred_label", 10), ("一致", 4),
+            ("最大置信度", 8), ("平均置信度", 8),
+            ("seg_start", 22), ("seg_end", 22), ("pred_start", 22), ("pred_end", 22)]
     print("\n" + _fmt_row(COLS))
 
     stats = Counter()  # (true_label, correct) -> count，跑完打统计用
@@ -230,8 +230,9 @@ def main():
                 if len(data) < window_size:
                     print(_fmt_row([
                         (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                        (remap.get(raw_label, "(未映射)"), 10), (_fmt_time(t0), 22), (_fmt_time(t1), 22),
-                        (0, 6), ("(片段太短)", 10), ("", 4), ("", 22), ("", 22), ("", 8), ("", 8),
+                        (remap.get(raw_label, "(未映射)"), 10), (0, 6), ("(片段太短)", 10), ("", 4),
+                        ("", 8), ("", 8),
+                        (_fmt_time(t0), 22), (_fmt_time(t1), 22), ("", 22), ("", 22),
                     ]))
                     continue
 
@@ -281,10 +282,10 @@ def main():
 
                 print(_fmt_row([
                     (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                    (true_label, 10), (_fmt_time(t0), 22), (_fmt_time(t1), 22), (len(pred_names), 6),
-                    (pred_label, 10), ("✓" if correct else "✗", 4),
+                    (true_label, 10), (len(pred_names), 6), (pred_label, 10),
+                    ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8),
+                    (_fmt_time(t0), 22), (_fmt_time(t1), 22),
                     (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
-                    (max_conf, 8), (mean_conf, 8),
                 ]) + f"  ({agree}/{len(pred_names)})")
                 stats[(true_label, correct)] += 1
 
