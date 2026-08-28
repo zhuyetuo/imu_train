@@ -294,7 +294,7 @@ for part in parts:
     # 一部分是NaN一部分是时间戳字符串，读混合CSV时pandas会报DtypeWarning。
     # loader_custom.py只认sensor_cols/label_col/record_id_col，不用
     # timestamp，这里统一丢掉，两边保持列一致
-    df = df.drop(columns=["timestamp"], errors="ignore")
+    df = df.drop(columns=['timestamp'], errors='ignore')
     if src_hz != target_hz:
         print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz')
         out_rows = []
