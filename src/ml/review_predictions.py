@@ -176,6 +176,9 @@ def main():
     ap.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"])
     ap.add_argument("--log", default="tmp/review_predictions.log",
                      help="结果打印+落盘到这个文件（不是CSV，直接翻log看）")
+    ap.add_argument("--only_wrong", action="store_true",
+                     help="逐段明细只打印预测跟人工标注不一致的（✗），太短/一致的不打印，"
+                          "方便直接盯着有问题的段看，不用在全量输出里翻")
     args = ap.parse_args()
 
     log_path = args.log
@@ -215,6 +218,7 @@ def main():
     print("\n" + _fmt_row(COLS))
 
     stats = Counter()  # (true_label, correct) -> count，跑完打统计用
+    wrong_rows = []  # 预测错的段，跑完按置信度从低到高排一份"最可疑"清单
     for fp in files:
         m = PROJECT_ID_RE.search(os.path.basename(fp))
         project_id = m.group(1) if m else "?"
@@ -228,12 +232,13 @@ def main():
                     data, labels = downsample(data, labels, args.source_hz, target_hz)
 
                 if len(data) < window_size:
-                    print(_fmt_row([
-                        (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                        (remap.get(raw_label, "(未映射)"), 10), (0, 6), ("(片段太短)", 10), ("", 4),
-                        ("", 8), ("", 8),
-                        (_fmt_time(t0), 22), (_fmt_time(t1), 22), ("", 22), ("", 22),
-                    ]))
+                    if not args.only_wrong:
+                        print(_fmt_row([
+                            (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
+                            (remap.get(raw_label, "(未映射)"), 10), (0, 6), ("(片段太短)", 10), ("", 4),
+                            ("", 8), ("", 8),
+                            (_fmt_time(t0), 22), (_fmt_time(t1), 22), ("", 22), ("", 22),
+                        ]))
                     continue
 
                 true_label = remap.get(raw_label)
@@ -280,13 +285,24 @@ def main():
                 else:
                     max_conf, mean_conf = "-", "-"
 
-                print(_fmt_row([
-                    (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                    (true_label, 10), (len(pred_names), 6), (pred_label, 10),
-                    ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8),
-                    (_fmt_time(t0), 22), (_fmt_time(t1), 22),
-                    (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
-                ]) + f"  ({agree}/{len(pred_names)})")
+                if not correct:
+                    wrong_rows.append({
+                        "project_id": project_id, "task_id": task_id, "subject_id": subject_id,
+                        "raw_label": raw_label, "true_label": true_label, "pred_label": pred_label,
+                        "n_windows": len(pred_names), "max_conf": float(max_conf) if has_proba else -1,
+                        "mean_conf": float(mean_conf) if has_proba else -1,
+                        "t0": t0, "t1": t1, "pred_start_t": pred_start_t, "pred_end_t": pred_end_t,
+                        "agree": agree,
+                    })
+
+                if not (correct and args.only_wrong):
+                    print(_fmt_row([
+                        (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
+                        (true_label, 10), (len(pred_names), 6), (pred_label, 10),
+                        ("✓" if correct else "✗", 4), (max_conf, 8), (mean_conf, 8),
+                        (_fmt_time(t0), 22), (_fmt_time(t1), 22),
+                        (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
+                    ]) + f"  ({agree}/{len(pred_names)})")
                 stats[(true_label, correct)] += 1
 
     n_total = sum(stats.values())
@@ -307,6 +323,20 @@ def main():
             print(f"  {lbl}: {wrong}/{total} 段不一致 ({wrong/total*100:.1f}%)")
     else:
         print("[review] 没有可对比的段")
+
+    if wrong_rows and has_proba:
+        print("\n[review] 预测错误的段，按最大置信度从低到高排序（越靠前越可疑，优先人工核对）:")
+        print(_fmt_row(COLS))
+        for r in sorted(wrong_rows, key=lambda r: r["max_conf"]):
+            print(_fmt_row([
+                (r["project_id"], 7), (r["task_id"], 7), (r["subject_id"], 17),
+                (r["raw_label"], 10), (r["true_label"], 10), (r["n_windows"], 6),
+                (r["pred_label"], 10), ("✗", 4),
+                (f"{r['max_conf']:.2f}", 8), (f"{r['mean_conf']:.2f}", 8),
+                (_fmt_time(r["t0"]), 22), (_fmt_time(r["t1"]), 22),
+                (_fmt_time(r["pred_start_t"]), 22), (_fmt_time(r["pred_end_t"]), 22),
+            ]) + f"  ({r['agree']}/{r['n_windows']})")
+
     print(f"\n已保存: {log_path}")
     sys.stdout = sys.__stdout__
     log_f.close()
