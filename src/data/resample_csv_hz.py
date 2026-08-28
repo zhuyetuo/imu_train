@@ -1,5 +1,5 @@
 """
-把 labelstudio_to_custom.py 生成的训练CSV（record_id,label,acc_x..gyro_z）从
+把 labelstudio_to_custom.py 生成的训练CSV（record_id,label,timestamp,acc_x..gyr_z）从
 source_hz 重采样到 target_hz——用于把不同采集批次统一到同一个采样率再合并
 训练（比如老数据本来就是16Hz采集的，新数据是50Hz原始的，混合训练前把50Hz
 的降采样到16Hz对齐）。
@@ -24,7 +24,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from preprocess import downsample  # noqa: E402
 
-SENSOR_COLS = ["acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
+SENSOR_COLS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
 
 
 def main():
