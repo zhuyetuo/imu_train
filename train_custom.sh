@@ -105,6 +105,17 @@ TMP_DIR="tmp"
 mkdir -p "$TMP_DIR"
 LOG_NO_SYN="${TMP_DIR}/train_no_syn_${DATASET_TAG}.log"
 LOG_WITH_SYN="${TMP_DIR}/train_with_syn_${DATASET_TAG}.log"
+LOG_FULL="${TMP_DIR}/train_full_${DATASET_TAG}.log"
+
+# 把这个脚本自己打印的全部内容（步骤0/1/1.5的合并/转CSV/重采样日志、
+# 预处理输出、每一行echo的进度提示……）也整份记下来，不只是后台跑的
+# 两个python src/ml/train.py各自的LOG_NO_SYN/LOG_WITH_SYN——那两个只
+# 覆盖训练那一步，前面预处理/数据合并阶段出的问题之前是看不到历史记录
+# 的。用exec重定向脚本自身的stdout/stderr，同时通过tee照常打印到终端，
+# 不影响交互时的实时可见性。
+exec > >(tee -a "$LOG_FULL") 2>&1
+echo ""
+echo "完整日志: $LOG_FULL"
 
 echo "=================================================="
 echo "  日期: $DATE   采样率: ${HZ}Hz   增强倍数: $N_AUG${TAG:+   tag: $TAG}"
