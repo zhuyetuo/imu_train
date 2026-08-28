@@ -11,6 +11,18 @@
 #   bash train_custom.sh --date 2026_7_23 --clean   # 先删掉旧缓存再全新生成，
 #                                                     # 改过预处理/特征相关代码后建议加上
 #
+#   # 合并多个采集批次一起训练（不同批次采样率可以不一样，非--hz的批次会先
+#   # 被重采样对齐到--hz，见src/data/resample_csv_hz.py）：
+#   bash train_custom.sh --date 2026_8_11-2026_8_27_raw --hz 16 \
+#     --extra_date 2026_7_17-2026_7_29:16 \
+#     --extra_date 2026_7_30-2026_8_11:16 \
+#     --tag merged --clean
+#   # 上面例子里主数据是50Hz原始采集，--hz 16表示训练目标采样率是16Hz，
+#   # 三个批次（50Hz的主数据+两个本来就是16Hz的旧数据）都会被统一到16Hz后
+#   # 合并训练。--extra_date原有数据本来是16Hz采的就不需要重采样，冒号后面
+#   # 的数字写它自己真实的采样率（16），跟主数据的--hz一样就会跳过重采样。
+#   # 单独--date不加--extra_date时完全是原来的行为，不受影响。
+#
 # 输出:
 #   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
 #   results/processed_<DATE>/16hz_remap_custom_3class_syn/ml_rf.pkl  ← 带合成
@@ -41,6 +53,8 @@ CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓�
                            # 数据处理逻辑改了但没删缓存，新旧代码生成的中间产物混用，
                            # 是这几天踩过好几次的坑，改动过预处理/特征相关代码后
                            # 强烈建议加这个参数，保证是从头全新生成、不会跟旧缓存混着用
+EXTRA_DATES=()             # --extra_date DATE:HZ，可重复传，跟主--date合并一起训练。
+                           # HZ跟主--hz不一样的批次会先重采样对齐（见上面用法示例）
 
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -58,8 +72,16 @@ while [[ $# -gt 0 ]]; do
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
+    --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
+done
+
+for _ed in "${EXTRA_DATES[@]:-}"; do
+  if [[ -n "$_ed" && "$_ed" != *:* ]]; then
+    echo "[错误] --extra_date 格式应为 DATE:HZ（例: 2026_7_17-2026_7_29:16），收到: $_ed"
+    exit 1
+  fi
 done
 
 if [[ -z "$DATE" ]]; then
@@ -144,6 +166,103 @@ fi
 if [[ ! -f "$CSV" ]]; then
   echo "[错误] 生成训练CSV失败: $CSV"
   exit 1
+fi
+
+# ── 步骤1.5：合并 --extra_date 指定的其它批次（可选）────────────────────
+# 每个额外批次走跟主--date一样的 步骤0(合并project json)+步骤1(生成CSV)，
+# 采样率跟主--hz不一样的话，先用resample_csv_hz.py重采样对齐到--hz，再
+# 合并进一份CSV里给后面的预处理/训练用（预处理只认一个全局source_hz，
+# 混不同采样率的原始数据在一起会用错误的hz去插值/降采样，见
+# src/data/resample_csv_hz.py 顶部说明）。record_id前面统一加上各自的
+# 日期前缀，避免不同批次导出的task编号刚好撞车导致数据集划分时误判成
+# 同一段录制。
+if [[ ${#EXTRA_DATES[@]} -gt 0 ]]; then
+  MERGED_CSV="${DATA_DIR}/merged_${DATE}${TAG:+_$TAG}_combined.csv"
+  if [[ ! -f "$MERGED_CSV" || "$CLEAN" == "1" ]]; then
+    echo ""
+    echo "▶ 步骤1.5：合并 ${#EXTRA_DATES[@]} 个额外批次 → $MERGED_CSV ..."
+    CSV_PARTS=("${DATE}:${CSV}:${HZ}")
+    for _ed in "${EXTRA_DATES[@]}"; do
+      _edate="${_ed%%:*}"
+      _ehz="${_ed##*:}"
+      _edata_dir="data/raw_custom/${_edate}"
+      _ejson="${_edata_dir}/merged_tmp.json"
+      _ecsv="${_edata_dir}/merged_${_edate}.csv"
+
+      if [[ ! -f "$_ejson" || "$CLEAN" == "1" ]]; then
+        _en=$(find "$_edata_dir" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
+        if [[ "$_en" -eq 0 ]]; then
+          echo "[错误] $_edata_dir 下没有找到任何 project-*.json"
+          exit 1
+        fi
+        echo "  ▶ 合并 $_edata_dir 下 $_en 个 project-*.json → $_ejson ..."
+        python -c "
+import json, glob, sys
+files = sorted(glob.glob(sys.argv[1]))
+merged = []
+for f in files:
+    merged += json.load(open(f, encoding='utf-8'))
+    print(f'    加载: {f}')
+json.dump(merged, open(sys.argv[2], 'w'), ensure_ascii=False)
+print(f'  合并完成，共 {len(merged)} 条任务')
+" "${_edata_dir}/project-*.json" "$_ejson"
+      fi
+
+      if [[ ! -f "$_ecsv" || "$CLEAN" == "1" ]]; then
+        echo "  ▶ 生成训练CSV: $_ecsv ..."
+        python src/data/labelstudio_to_custom.py \
+          --json "$_ejson" \
+          --output "$_ecsv" \
+          --csv_dir "$CSV_DIR" \
+          --keep_labels
+      fi
+
+      if [[ ! -f "$_ecsv" ]]; then
+        echo "[错误] 生成训练CSV失败: $_ecsv"
+        exit 1
+      fi
+
+      CSV_PARTS+=("${_edate}:${_ecsv}:${_ehz}")
+    done
+
+    python -c "
+import sys
+sys.path.insert(0, 'src/data')
+import pandas as pd
+from resample_csv_hz import SENSOR_COLS
+from preprocess import downsample
+import numpy as np
+
+target_hz = int(sys.argv[1])
+parts = sys.argv[2:]
+frames = []
+for part in parts:
+    date_tag, path, src_hz = part.split(':')
+    src_hz = int(src_hz)
+    df = pd.read_csv(path)
+    if src_hz != target_hz:
+        print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz')
+        out_rows = []
+        for rid, g in df.groupby('record_id', sort=False):
+            data = g[SENSOR_COLS].to_numpy(dtype=np.float64)
+            labels = g['label'].to_numpy()
+            data_ds, labels_ds = downsample(data, labels, src_hz, target_hz)
+            out = pd.DataFrame(data_ds, columns=SENSOR_COLS)
+            out.insert(0, 'label', labels_ds)
+            out.insert(0, 'record_id', rid)
+            out_rows.append(out)
+        df = pd.concat(out_rows, ignore_index=True)
+    else:
+        print(f'  {path}: 已经是{target_hz}Hz，跳过重采样')
+    df['record_id'] = date_tag + '_' + df['record_id'].astype(str)
+    frames.append(df)
+
+merged = pd.concat(frames, ignore_index=True)
+merged.to_csv('${MERGED_CSV}', index=False)
+print(f'合并完成: {len(frames)}个批次, 共{len(merged)}行 -> ${MERGED_CSV}')
+" "$HZ" "${CSV_PARTS[@]}"
+  fi
+  CSV="$MERGED_CSV"
 fi
 
 # ── 预处理（自动清除旧缓存）──────────────────────────────
