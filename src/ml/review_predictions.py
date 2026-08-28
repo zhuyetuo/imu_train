@@ -81,6 +81,12 @@ def _fmt_row(cols):
     return " | ".join(_pad(v, w) for v, w in cols)
 
 
+def _fmt_time(t):
+    """时间戳只保留到0.1秒——微秒级精度对人工核对没意义，反而占地方看着乱。"""
+    t = pd.to_datetime(t)
+    return t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-5]
+
+
 def _window_data(data, window_size, stride):
     """按窗口切data（一个标注段内label是单一值，不需要preprocess.sliding_window
     那套多数投票/整数标签逻辑），返回 (N, window_size, n_channels)。"""
@@ -198,9 +204,14 @@ def main():
         sys.exit(1)
     print(f"[review] 匹配到 {len(files)} 个project文件")
 
+    has_proba = hasattr(model, "predict_proba")
+    if not has_proba:
+        print("[提示] 模型不支持predict_proba，置信度列会显示为'-'")
+
     COLS = [("project", 7), ("task", 7), ("record_id", 17), ("raw_label", 10),
-            ("映射标签", 10), ("seg_start", 26), ("seg_end", 26), ("窗口数", 6),
-            ("pred_label", 10), ("一致", 4), ("pred_start", 26), ("pred_end", 26)]
+            ("映射标签", 10), ("seg_start", 22), ("seg_end", 22), ("窗口数", 6),
+            ("pred_label", 10), ("一致", 4), ("pred_start", 22), ("pred_end", 22),
+            ("最大置信度", 8), ("平均置信度", 8)]
     print("\n" + _fmt_row(COLS))
 
     stats = Counter()  # (true_label, correct) -> count，跑完打统计用
@@ -219,8 +230,8 @@ def main():
                 if len(data) < window_size:
                     print(_fmt_row([
                         (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                        (remap.get(raw_label, "(未映射)"), 10), (t0, 26), (t1, 26),
-                        (0, 6), ("(片段太短)", 10), ("", 4), ("", 26), ("", 26),
+                        (remap.get(raw_label, "(未映射)"), 10), (_fmt_time(t0), 22), (_fmt_time(t1), 22),
+                        (0, 6), ("(片段太短)", 10), ("", 4), ("", 22), ("", 22), ("", 8), ("", 8),
                     ]))
                     continue
 
@@ -256,11 +267,24 @@ def main():
                 pred_end_t = t0_dt + pd.Timedelta(
                     seconds=(pred_match_idx[-1] * stride + window_size) / target_hz)
 
+                # 置信度：每个窗口预测出的那个类别自己的概率（predict_proba里对应
+                # 那一列），只看跟多数票pred_label一致的那些窗口——跟"这段判成
+                # pred_label"这件事直接相关的置信度，不是所有窗口不分青红皂白
+                # 混在一起算
+                if has_proba:
+                    proba = model.predict_proba(feats)
+                    proba_of_pred = proba[np.arange(len(pred_ids)), pred_ids]
+                    match_confs = proba_of_pred[pred_match_idx]
+                    max_conf, mean_conf = f"{match_confs.max():.2f}", f"{match_confs.mean():.2f}"
+                else:
+                    max_conf, mean_conf = "-", "-"
+
                 print(_fmt_row([
                     (project_id, 7), (task_id, 7), (subject_id, 17), (raw_label, 10),
-                    (true_label, 10), (t0, 26), (t1, 26), (len(pred_names), 6),
+                    (true_label, 10), (_fmt_time(t0), 22), (_fmt_time(t1), 22), (len(pred_names), 6),
                     (pred_label, 10), ("✓" if correct else "✗", 4),
-                    (pred_start_t, 26), (pred_end_t, 26),
+                    (_fmt_time(pred_start_t), 22), (_fmt_time(pred_end_t), 22),
+                    (max_conf, 8), (mean_conf, 8),
                 ]) + f"  ({agree}/{len(pred_names)})")
                 stats[(true_label, correct)] += 1
 
