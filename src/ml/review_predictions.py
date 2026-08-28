@@ -369,15 +369,22 @@ def main():
             ]) + f"  ({r['agree']}/{r['n_windows']})"
                   + _ls_url(args.ls_url_base, r["project_id"], r["task_id"]))
 
-            if args.window_detail and r["window_details"]:
-                wcols = [("窗口", 4)] + [(c, 8) for c in classes] + [("自己投给", 10),
-                         ("窗口起", 14), ("窗口止", 14)]
-                print("    " + _fmt_row(wcols))
-                for w in r["window_details"]:
-                    print("    " + _fmt_row(
-                        [(w["idx"], 4)] + [(f"{w['probs'][c]:.2f}", 8) for c in classes]
-                        + [(w["pred"], 10), (w["start"].strftime("%H:%M:%S.%f")[:-5], 14),
-                           (w["end"].strftime("%H:%M:%S.%f")[:-5], 14)]))
+    if args.window_detail and wrong_rows and has_proba:
+        print("\n[review] 逐窗口置信度明细（跟上面按置信度排序的顺序一致）:")
+        for r in sorted(wrong_rows, key=lambda r: r["max_conf"]):
+            if not r["window_details"]:
+                continue
+            print(f"\n  {r['project_id']} | {r['task_id']} | {r['subject_id']} | "
+                  f"{r['raw_label']}→{r['pred_label']}"
+                  + _ls_url(args.ls_url_base, r["project_id"], r["task_id"]))
+            wcols = [("窗口", 4)] + [(c, 8) for c in classes] + [("自己投给", 10),
+                     ("窗口起", 14), ("窗口止", 14)]
+            print("    " + _fmt_row(wcols))
+            for w in r["window_details"]:
+                print("    " + _fmt_row(
+                    [(w["idx"], 4)] + [(f"{w['probs'][c]:.2f}", 8) for c in classes]
+                    + [(w["pred"], 10), (w["start"].strftime("%H:%M:%S.%f")[:-5], 14),
+                       (w["end"].strftime("%H:%M:%S.%f")[:-5], 14)]))
 
     print(f"\n已保存: {log_path}")
     sys.stdout = sys.__stdout__
