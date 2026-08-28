@@ -190,6 +190,11 @@ def main():
     ap.add_argument("--only_wrong", action="store_true",
                      help="逐段明细只打印预测跟人工标注不一致的（✗），太短/一致的不打印，"
                           "方便直接盯着有问题的段看，不用在全量输出里翻")
+    ap.add_argument("--window_detail", action="store_true",
+                     help="预测错误的段，额外打印每个窗口自己对每个类别的概率、自己投给谁——"
+                          "标注本身没错但模型学不会时，从这里能看出是整段窗口都判错（模型"
+                          "系统性地不认识这类样本），还是只有部分窗口判错、内部本来就有分歧"
+                          "（可能是窗口切分刚好切在动作边界上）")
     args = ap.parse_args()
 
     log_path = args.log
@@ -302,6 +307,15 @@ def main():
                     max_conf, mean_conf, all_conf = "-", "-", "-"
 
                 if not correct:
+                    window_details = []
+                    if args.window_detail and has_proba:
+                        for i, p in enumerate(pred_names):
+                            w_start = t0_dt + pd.Timedelta(seconds=i * stride / target_hz)
+                            w_end = w_start + pd.Timedelta(seconds=window_size / target_hz)
+                            window_details.append({
+                                "idx": i, "start": w_start, "end": w_end, "pred": p,
+                                "probs": {c: float(proba[i, j]) for j, c in enumerate(classes)},
+                            })
                     wrong_rows.append({
                         "project_id": project_id, "task_id": task_id, "subject_id": subject_id,
                         "raw_label": raw_label, "true_label": true_label, "pred_label": pred_label,
@@ -309,7 +323,7 @@ def main():
                         "mean_conf": float(mean_conf) if has_proba else -1,
                         "all_conf": float(all_conf) if has_proba else -1,
                         "t0": t0, "t1": t1, "pred_start_t": pred_start_t, "pred_end_t": pred_end_t,
-                        "agree": agree,
+                        "agree": agree, "window_details": window_details,
                     })
 
                 if not (correct and args.only_wrong):
@@ -354,6 +368,16 @@ def main():
                 (_fmt_time(r["pred_start_t"]), 22), (_fmt_time(r["pred_end_t"]), 22),
             ]) + f"  ({r['agree']}/{r['n_windows']})"
                   + _ls_url(args.ls_url_base, r["project_id"], r["task_id"]))
+
+            if args.window_detail and r["window_details"]:
+                wcols = [("窗口", 4)] + [(c, 8) for c in classes] + [("自己投给", 10),
+                         ("窗口起", 14), ("窗口止", 14)]
+                print("    " + _fmt_row(wcols))
+                for w in r["window_details"]:
+                    print("    " + _fmt_row(
+                        [(w["idx"], 4)] + [(f"{w['probs'][c]:.2f}", 8) for c in classes]
+                        + [(w["pred"], 10), (w["start"].strftime("%H:%M:%S.%f")[:-5], 14),
+                           (w["end"].strftime("%H:%M:%S.%f")[:-5], 14)]))
 
     print(f"\n已保存: {log_path}")
     sys.stdout = sys.__stdout__
