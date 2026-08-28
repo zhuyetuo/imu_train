@@ -1,0 +1,254 @@
+"""
+人工核对工具：把训练/标注数据里的每一段标注，跟模型预测结果对照，输出
+一张表——project是哪个、task是哪个、record_id是什么、人工标的类别和
+起止时间、模型预测的类别，一致打勾、不一致打叉。用来排查"是不是有些
+数据标注错了"（比如把甩身体标成抓挠、活动标成抓挠）。
+
+跟labelstudio_to_custom.py读同样的Label Studio导出JSON+原始传感器CSV，
+按标注段（不是整条record）切出片段，每段独立滑窗、提取特征、跑模型
+预测，多数投票得到这一段的预测类别，再跟人工标签（remap后）比较。
+
+用法（对单个日期目录跑，因为每个日期目录的原始采样率可能不一样，见
+下面--source_hz）:
+  python src/ml/review_predictions.py \\
+    --project_glob "data/raw_custom/2026_8_11-2026_8_27_raw/project-*.json" \\
+    --csv_dir data/raw_wit/ \\
+    --model_dir results/processed_2026_8_11-2026_8_27_raw_merged_majority/16hz_remap_custom_3class \\
+    --source_hz 50 \\
+    --output tmp/review_2026_8_11-2026_8_27_raw.csv
+
+  # 多个日期目录分别跑完，输出的CSV可以直接用tail -n+2 -q追加合并
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+import joblib
+
+class _Tee:
+    """把print()同时写到终端和日志文件——跑一堆project/task下来终端刷太快，
+    没log文件的话出了问题翻不回去看，输出结果时已经找不到当时哪段报了警告。"""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.path.join(_THIS_DIR, "..", "data")
+sys.path.insert(0, _DATA_DIR)
+sys.path.insert(0, _THIS_DIR)
+
+from labelstudio_to_custom import _load_sensor_df, _extract_rows  # noqa: E402
+from preprocess import downsample  # noqa: E402
+from gravity_align import gravity_align_batch, append_raw_tilt_batch  # noqa: E402
+from features import extract_features  # noqa: E402
+
+PROJECT_ID_RE = re.compile(r"project-(\d+)-")
+SENSOR_COLS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+
+def _window_data(data, window_size, stride):
+    """按窗口切data（一个标注段内label是单一值，不需要preprocess.sliding_window
+    那套多数投票/整数标签逻辑），返回 (N, window_size, n_channels)。"""
+    n = len(data)
+    windows = [data[start:start + window_size]
+               for start in range(0, n - window_size + 1, stride)]
+    if not windows:
+        return np.empty((0, window_size, data.shape[1]), dtype=np.float32)
+    return np.array(windows, dtype=np.float32)
+
+
+def _load_remap(path):
+    import yaml
+    cfg = yaml.safe_load(open(path, encoding="utf-8"))
+    return {k: v for k, v in cfg.items() if not str(k).startswith("#")}
+
+
+def _iter_task_segments(task, csv_dir, acc_unit):
+    """复用labelstudio_to_custom.py里convert()的task解析逻辑，但保留每段的
+    独立身份（不摊平成行），yield (subject_id, label, t0, t1, seg_rows_df)。"""
+    task_id = task["id"]
+    data = task.get("data", {})
+    annotations = task.get("annotations", [])
+    if not annotations:
+        return
+
+    is_multi = "csv1" in data or "csv2" in data
+    if is_multi:
+        sensor_map = {}
+        for idx in ("1", "2"):
+            url = data.get(f"csv{idx}", "")
+            if url:
+                res = _load_sensor_df(url, csv_dir, f"imu{idx}")
+                if res:
+                    sensor_map[f"label{idx}"] = (res[0], res[1], res[2], f"task{task_id}_imu{idx}")
+        if not sensor_map:
+            return
+        if len(sensor_map) == 1:
+            sensor_map["label"] = next(iter(sensor_map.values()))
+
+        for ann in annotations:
+            for seg in ann.get("result", []):
+                val = seg.get("value", {})
+                labels = val.get("timeserieslabels", [])
+                t0, t1 = val.get("start", ""), val.get("end", "")
+                fn = seg.get("from_name", "")
+                if not labels or not t0 or not t1 or fn not in sensor_map:
+                    continue
+                df, acc_cols, gyro_cols, subject_id = sensor_map[fn]
+                rows = _extract_rows(df, acc_cols, gyro_cols, labels[0], t0, t1,
+                                      subject_id, acc_unit, None)
+                if rows:
+                    yield task_id, subject_id, labels[0], t0, t1, pd.DataFrame(rows)
+    else:
+        csv_url = data.get("csv", "")
+        if not csv_url:
+            return
+        res = _load_sensor_df(csv_url, csv_dir, "imu")
+        if not res:
+            return
+        df, acc_cols, gyro_cols = res
+        subject_id = f"task{task_id}"
+        for ann in annotations:
+            for seg in ann.get("result", []):
+                val = seg.get("value", {})
+                labels = val.get("timeserieslabels", [])
+                t0, t1 = val.get("start", ""), val.get("end", "")
+                if not labels or not t0 or not t1:
+                    continue
+                rows = _extract_rows(df, acc_cols, gyro_cols, labels[0], t0, t1,
+                                      subject_id, acc_unit, None)
+                if rows:
+                    yield task_id, subject_id, labels[0], t0, t1, pd.DataFrame(rows)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project_glob", required=True,
+                     help='匹配project-*.json的glob，例如 "data/raw_custom/2026_7_17-2026_7_29/project-*.json"')
+    ap.add_argument("--csv_dir", default="data/raw_wit/")
+    ap.add_argument("--model_dir", required=True,
+                     help="包含ml_rf.pkl和ml_rf.json的目录（train.py的--results_dir输出）")
+    ap.add_argument("--model_name", default="rf")
+    ap.add_argument("--source_hz", type=int, required=True,
+                     help="这批project json对应原始传感器CSV的真实采样率")
+    ap.add_argument("--remap", default="configs/remap_custom_3class.yaml")
+    ap.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"])
+    ap.add_argument("--output", default="tmp/review_predictions.csv")
+    ap.add_argument("--log", default="",
+                     help="终端输出同步记录到这个文件，默认跟--output同目录同名、扩展名改.log")
+    args = ap.parse_args()
+
+    log_path = args.log or os.path.splitext(args.output)[0] + ".log"
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+    log_f = open(log_path, "w", encoding="utf-8")
+    sys.stdout = _Tee(sys.__stdout__, log_f)
+    print(f"[review] 日志: {log_path}")
+
+    model_path = os.path.join(args.model_dir, f"ml_{args.model_name}.pkl")
+    meta_path = os.path.join(args.model_dir, f"ml_{args.model_name}.json")
+    model = joblib.load(model_path)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    classes = meta["classes"]
+    target_hz = int(meta["hz"])
+    window_size = int(meta["window_size"])
+    stride = int(meta["stride"])
+    gravity_aligned = meta.get("gravity_aligned", True)
+    print(f"[review] 模型: {model_path}  classes={classes}  "
+          f"hz={target_hz} window={window_size} stride={stride}")
+
+    remap = _load_remap(args.remap)
+
+    files = sorted(glob.glob(args.project_glob))
+    if not files:
+        print(f"[错误] {args.project_glob} 没匹配到任何文件")
+        sys.exit(1)
+    print(f"[review] 匹配到 {len(files)} 个project文件")
+
+    rows_out = []
+    for fp in files:
+        m = PROJECT_ID_RE.search(os.path.basename(fp))
+        project_id = m.group(1) if m else "?"
+        tasks = json.load(open(fp, encoding="utf-8"))
+        for task in tasks:
+            for task_id, subject_id, raw_label, t0, t1, seg_df in _iter_task_segments(
+                    task, args.csv_dir, args.acc_unit):
+                data = seg_df[SENSOR_COLS].to_numpy(dtype=np.float64)
+                labels = seg_df["label"].to_numpy()
+                if args.source_hz != target_hz:
+                    data, labels = downsample(data, labels, args.source_hz, target_hz)
+
+                if len(data) < window_size:
+                    rows_out.append({
+                        "project_id": project_id, "task_id": task_id, "record_id": subject_id,
+                        "raw_label": raw_label, "true_label": remap.get(raw_label, "(未映射-被排除)"),
+                        "seg_start": t0, "seg_end": t1, "n_windows": 0,
+                        "pred_label": "(片段太短，不足1个窗口)", "correct": "",
+                    })
+                    continue
+
+                true_label = remap.get(raw_label)
+                if true_label is None:
+                    # 这个原始标签没在remap里，模型训练时压根没见过这个类别，
+                    # 没法比较预测对不对，跳过（不是bug，是remap故意排除的类别）
+                    continue
+
+                X = _window_data(data, window_size, stride)
+                if len(X) == 0:
+                    continue
+                tilt = append_raw_tilt_batch(X)[:, :, 6:8]
+                if gravity_aligned:
+                    X = gravity_align_batch(X)
+                X = np.concatenate([X, tilt], axis=2)
+                feats = extract_features(X, target_hz, show_progress=False)
+                pred_ids = np.array(model.predict(feats)).flatten().astype(int)
+                pred_names = [classes[i] for i in pred_ids]
+                pred_label = Counter(pred_names).most_common(1)[0][0]
+                agree = sum(1 for p in pred_names if p == pred_label)
+
+                rows_out.append({
+                    "project_id": project_id, "task_id": task_id, "record_id": subject_id,
+                    "raw_label": raw_label, "true_label": true_label,
+                    "seg_start": t0, "seg_end": t1, "n_windows": len(pred_names),
+                    "pred_label": pred_label,
+                    "pred_agreement": f"{agree}/{len(pred_names)}",
+                    "correct": "✓" if pred_label == true_label else "✗",
+                })
+
+    out_df = pd.DataFrame(rows_out)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    out_df.to_csv(args.output, index=False)
+
+    n_total = len(out_df[out_df["correct"] != ""])
+    n_wrong = len(out_df[out_df["correct"] == "✗"])
+    print(f"\n[review] 共 {len(out_df)} 段标注，{n_total} 段有效对比，"
+          f"其中 {n_wrong} 段预测跟人工标注不一致（{n_wrong/n_total*100:.1f}%）" if n_total else
+          f"\n[review] 共 {len(out_df)} 段标注，没有可对比的段")
+    if n_total:
+        print("\n[review] 按人工标签统计不一致占比:")
+        for lbl, g in out_df[out_df["correct"] != ""].groupby("true_label"):
+            wrong = (g["correct"] == "✗").sum()
+            print(f"  {lbl}: {wrong}/{len(g)} 段不一致 ({wrong/len(g)*100:.1f}%)")
+    print(f"\n已保存: {args.output}")
+    sys.stdout = sys.__stdout__
+    log_f.close()
+
+
+if __name__ == "__main__":
+    main()
