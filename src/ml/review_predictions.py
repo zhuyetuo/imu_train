@@ -32,6 +32,23 @@ import numpy as np
 import pandas as pd
 import joblib
 
+class _Tee:
+    """把print()同时写到终端和日志文件——跑一堆project/task下来终端刷太快，
+    没log文件的话出了问题翻不回去看，输出结果时已经找不到当时哪段报了警告。"""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.path.join(_THIS_DIR, "..", "data")
 sys.path.insert(0, _DATA_DIR)
@@ -134,7 +151,15 @@ def main():
     ap.add_argument("--remap", default="configs/remap_custom_3class.yaml")
     ap.add_argument("--acc_unit", default="ms2", choices=["ms2", "g"])
     ap.add_argument("--output", default="tmp/review_predictions.csv")
+    ap.add_argument("--log", default="",
+                     help="终端输出同步记录到这个文件，默认跟--output同目录同名、扩展名改.log")
     args = ap.parse_args()
+
+    log_path = args.log or os.path.splitext(args.output)[0] + ".log"
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+    log_f = open(log_path, "w", encoding="utf-8")
+    sys.stdout = _Tee(sys.__stdout__, log_f)
+    print(f"[review] 日志: {log_path}")
 
     model_path = os.path.join(args.model_dir, f"ml_{args.model_name}.pkl")
     meta_path = os.path.join(args.model_dir, f"ml_{args.model_name}.json")
@@ -221,6 +246,8 @@ def main():
             wrong = (g["correct"] == "✗").sum()
             print(f"  {lbl}: {wrong}/{len(g)} 段不一致 ({wrong/len(g)*100:.1f}%)")
     print(f"\n已保存: {args.output}")
+    sys.stdout = sys.__stdout__
+    log_f.close()
 
 
 if __name__ == "__main__":
