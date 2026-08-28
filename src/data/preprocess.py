@@ -325,7 +325,7 @@ def main(args):
         cfg = yaml.safe_load(f)
 
     target_hz_list = [args.hz] if args.hz else cfg["target_hz_list"]
-    window_sec = cfg["window_seconds"]
+    window_sec = args.window_s if args.window_s > 0 else cfg["window_seconds"]
     stride_sec = args.stride_s if args.stride_s > 0 else cfg["stride_seconds"]
     seed = cfg["seed"]
     train_r = args.train_ratio if args.train_ratio > 0 else cfg["train_ratio"]
@@ -483,4 +483,10 @@ if __name__ == "__main__":
                         help="训练窗口步长（秒），覆盖 configs/data.yaml 的 stride_seconds"
                              "（0=用配置文件默认值）。步长越密，训练窗口越多、"
                              "越能覆盖标注边界过渡区，但预处理和训练耗时也越高")
+    parser.add_argument("--window_s", type=float, default=0.0,
+                        help="训练窗口长度（秒），覆盖 configs/data.yaml 的 window_seconds"
+                             "（0=用配置文件默认值）。窗口变短能覆盖甩身体这类短促动作"
+                             "（默认2秒窗口比它们的真实时长还长，短片段建不成窗口、"
+                             "直接被跳过），但窗口变短后频域特征可用的采样点变少，"
+                             "特征精度会略微下降")
     main(parser.parse_args())
