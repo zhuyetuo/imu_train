@@ -357,6 +357,43 @@ def main(args):
     print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
 
+    window_size = int(meta.get("window_size", 0))
+    stride      = int(meta.get("stride", 0))
+    window_s    = round(window_size / args.hz, 3) if args.hz else 0
+    stride_s    = round(stride      / args.hz, 3) if args.hz else 0
+
+    def _fmt_duration(n_windows):
+        # 窗口是按stride滑动切出来的，窗口之间有重叠（比如window=2s/
+        # stride=1s时相邻窗口重叠1s），每个窗口新增的"没见过的"时长约等于
+        # stride_s，用 窗口数×stride_s 估算这批数据实际覆盖的标注时长——
+        # 不是精确值（忽略了每段片段第一个窗口多出来的window_s-stride_s
+        # 首窗时长），但够用来判断"这个类别大概有多少时长、该补多少"。
+        secs = n_windows * stride_s
+        if secs >= 3600:
+            return f"{secs/3600:.2f}h"
+        if secs >= 60:
+            return f"{secs/60:.1f}min"
+        return f"{secs:.0f}s"
+
+    # classification_report的support只算了eval集（验证集/测试集），训练用了
+    # 多少窗口/多少时长看不出来——之前想确认"标注数据是不是都用上了、该给
+    # 哪个类别补多少时长的数据"，只能翻前面"数据集类别分布"那张表，跟这里
+    # 的precision/recall对不上号，不方便对照。这里把训练窗口数+估算时长
+    # 也拼到同一张表里。
+    train_counts = {lbl: int((y_tr == lbl).sum()) for lbl in present_labels}
+    _pc = classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
+                                 zero_division=0, output_dict=True)
+    print(f"  ── 各类别窗口数/时长（训练 vs {eval_tag}，时长是按stride估算的，仅供参考）──")
+    print(f"  {'类别':<8}{'训练窗口数':>10}{'训练时长':>10}"
+          f"{f'{eval_tag}窗口数':>14}{f'{eval_tag}时长':>10}"
+          f"{'precision':>12}{'recall':>10}{'f1-score':>10}")
+    for lbl, name in zip(present_labels, present_names):
+        row = _pc[name]
+        eval_n = int(row['support'])
+        print(f"  {name:<8}{train_counts[lbl]:>10}{_fmt_duration(train_counts[lbl]):>10}"
+              f"{eval_n:>14}{_fmt_duration(eval_n):>10}"
+              f"{row['precision']:>12.2f}{row['recall']:>10.2f}{row['f1-score']:>10.2f}")
+
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
     syn_tag     = "_syn" if args.synthetic else ""
@@ -368,10 +405,6 @@ def main(args):
     gravity_aligned = meta.get("gravity_aligned", "True")
     if isinstance(gravity_aligned, str):
         gravity_aligned = gravity_aligned.lower() == "true"
-    window_size = int(meta.get("window_size", 0))
-    stride      = int(meta.get("stride", 0))
-    window_s    = round(window_size / args.hz, 3) if args.hz else 0
-    stride_s    = round(stride      / args.hz, 3) if args.hz else 0
     result = {
         "hz": args.hz, "model": args.model,
         "accuracy": acc, "macro_f1": f1,
