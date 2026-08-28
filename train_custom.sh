@@ -226,26 +226,28 @@ if [[ ${#EXTRA_DATES[@]} -gt 0 ]]; then
          "如果它实际采样率不是${HZ}Hz，加 --source_hz <实际采样率> 重跑，否则合并进去的" \
          "时间轴是错的。"
   fi
-  MERGED_CSV="${DATA_DIR}/merged_${DATE}${TAG:+_$TAG}_combined.csv"
-  if [[ ! -f "$MERGED_CSV" || "$CLEAN" == "1" ]]; then
-    echo ""
-    echo "▶ 步骤1.5：合并 ${#EXTRA_DATES[@]} 个额外批次 → $MERGED_CSV ..."
-    CSV_PARTS=("${DATE}:${CSV}:${MAIN_SOURCE_HZ}")
-    for _ed in "${EXTRA_DATES[@]}"; do
-      _edate="${_ed%%:*}"
-      _ehz="${_ed##*:}"
-      _edata_dir="data/raw_custom/${_edate}"
-      _ejson="${_edata_dir}/merged_tmp.json"
-      _ecsv="${_edata_dir}/merged_${_edate}.csv"
+  # 每个额外批次的project json→merged_tmp.json、merged_tmp.json→CSV，不管
+  # MERGED_CSV/MERGED_JSON缓存在不在，都要跑一遍（后面两个缓存判断各自
+  # 独立，都依赖这里算出来的_ejson/_ecsv路径；如果这段只在MERGED_CSV
+  # 缺失时才跑，MERGED_JSON单独失效时_ejson会是空的，合成数据那步就
+  # 又会读不到额外批次）
+  JSON_PARTS=("$JSON")
+  CSV_PARTS=("${DATE}:${CSV}:${MAIN_SOURCE_HZ}")
+  for _ed in "${EXTRA_DATES[@]}"; do
+    _edate="${_ed%%:*}"
+    _ehz="${_ed##*:}"
+    _edata_dir="data/raw_custom/${_edate}"
+    _ejson="${_edata_dir}/merged_tmp.json"
+    _ecsv="${_edata_dir}/merged_${_edate}.csv"
 
-      if [[ ! -f "$_ejson" || "$CLEAN" == "1" ]]; then
-        _en=$(find "$_edata_dir" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
-        if [[ "$_en" -eq 0 ]]; then
-          echo "[错误] $_edata_dir 下没有找到任何 project-*.json"
-          exit 1
-        fi
-        echo "  ▶ 合并 $_edata_dir 下 $_en 个 project-*.json → $_ejson ..."
-        python -c "
+    if [[ ! -f "$_ejson" || "$CLEAN" == "1" ]]; then
+      _en=$(find "$_edata_dir" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
+      if [[ "$_en" -eq 0 ]]; then
+        echo "[错误] $_edata_dir 下没有找到任何 project-*.json"
+        exit 1
+      fi
+      echo "  ▶ 合并 $_edata_dir 下 $_en 个 project-*.json → $_ejson ..."
+      python -c "
 import json, glob, sys
 files = sorted(glob.glob(sys.argv[1]))
 merged = []
@@ -255,25 +257,48 @@ for f in files:
 json.dump(merged, open(sys.argv[2], 'w'), ensure_ascii=False)
 print(f'  合并完成，共 {len(merged)} 条任务')
 " "${_edata_dir}/project-*.json" "$_ejson"
-      fi
+    fi
 
-      if [[ ! -f "$_ecsv" || "$CLEAN" == "1" ]]; then
-        echo "  ▶ 生成训练CSV: $_ecsv ..."
-        python src/data/labelstudio_to_custom.py \
-          --json "$_ejson" \
-          --output "$_ecsv" \
-          --csv_dir "$CSV_DIR" \
-          --keep_labels
-      fi
+    if [[ ! -f "$_ecsv" || "$CLEAN" == "1" ]]; then
+      echo "  ▶ 生成训练CSV: $_ecsv ..."
+      python src/data/labelstudio_to_custom.py \
+        --json "$_ejson" \
+        --output "$_ecsv" \
+        --csv_dir "$CSV_DIR" \
+        --keep_labels
+    fi
 
-      if [[ ! -f "$_ecsv" ]]; then
-        echo "[错误] 生成训练CSV失败: $_ecsv"
-        exit 1
-      fi
+    if [[ ! -f "$_ecsv" ]]; then
+      echo "[错误] 生成训练CSV失败: $_ecsv"
+      exit 1
+    fi
 
-      CSV_PARTS+=("${_edate}:${_ecsv}:${_ehz}")
-    done
+    JSON_PARTS+=("$_ejson")
+    CSV_PARTS+=("${_edate}:${_ecsv}:${_ehz}")
+  done
 
+  # 合成数据(synthesize_scratch.py)之前只读主批次的JSON，额外批次里的
+  # 抓挠真实标注根本没被用来生成合成数据——这里把所有批次的JSON也合并
+  # 一份，后面生成合成数据时改用这份，让它能看到全部真实抓挠数据。
+  MERGED_JSON="${DATA_DIR}/merged_tmp_${DATE}${TAG:+_$TAG}_combined.json"
+  if [[ ! -f "$MERGED_JSON" || "$CLEAN" == "1" ]]; then
+    echo ""
+    echo "▶ 合并全部批次的JSON → $MERGED_JSON（给合成数据用，能看到全部真实抓挠数据）..."
+    python -c "
+import json, sys
+merged = []
+for f in sys.argv[1:]:
+    merged += json.load(open(f, encoding='utf-8'))
+json.dump(merged, open('${MERGED_JSON}', 'w'), ensure_ascii=False)
+print(f'  合并完成，共 {len(merged)} 条任务 -> ${MERGED_JSON}')
+" "${JSON_PARTS[@]}"
+  fi
+  JSON="$MERGED_JSON"
+
+  MERGED_CSV="${DATA_DIR}/merged_${DATE}${TAG:+_$TAG}_combined.csv"
+  if [[ ! -f "$MERGED_CSV" || "$CLEAN" == "1" ]]; then
+    echo ""
+    echo "▶ 步骤1.5：合并 ${#EXTRA_DATES[@]} 个额外批次 → $MERGED_CSV ..."
     python -c "
 import sys
 sys.path.insert(0, 'src/data')
