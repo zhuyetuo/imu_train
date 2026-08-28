@@ -68,6 +68,10 @@ VAL_RATIO="0.1"           # 验证集比例（默认0.1）
 TEST_RATIO="0.0"          # 测试集比例（默认0=无测试集，纠错循环阶段不需要）
 LABEL_MODE="majority"     # majority=多数投票（默认，原有行为），center=窗口标签取中心帧
 STRIDE_S=""               # 训练窗口步长秒数（留空=用 configs/data.yaml 默认值1秒）
+WINDOW_S=""               # 训练窗口长度秒数（留空=用 configs/data.yaml 默认值2秒）。
+                           # 甩身体这类短促动作（1~1.5秒）比默认2秒窗口还短，建不成
+                           # 窗口、直接被跳过，试着调小（比如--window_s 1 --stride_s 0.5）
+                           # 能不能把这类短片段也纳入训练
 FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
 TAG=""                    # 输出目录后缀（留空=不加，跟原来路径一致）。
                            # 同一个DATE想同时保留majority/center两个版本的模型时，
@@ -99,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --test_ratio)     TEST_RATIO="$2";     shift 2 ;;
     --label_mode)     LABEL_MODE="$2";     shift 2 ;;
     --stride_s)       STRIDE_S="$2";       shift 2 ;;
+    --window_s)       WINDOW_S="$2";       shift 2 ;;
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
@@ -359,6 +364,7 @@ python src/data/preprocess.py \
   --test_ratio "$TEST_RATIO" \
   --label_mode "$LABEL_MODE" \
   $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
+  $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
   --hz "$HZ"
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
@@ -374,6 +380,8 @@ PID_A=$!
 
 # ── 生成合成数据 ──────────────────────────────────────────
 echo "▶ 生成合成数据（${LABEL}，n_aug=${N_AUG}）..."
+# --window_s/--stride_s要跟上面预处理真实数据用的保持一致，不然合成
+# 窗口跟真实窗口点数对不上，train.py合并训练集时特征维度会对不齐
 python src/data/synthesize_scratch.py \
   --json "$JSON" \
   --csv_dir "$CSV_DIR" \
@@ -382,7 +390,9 @@ python src/data/synthesize_scratch.py \
   --remap "$REMAP" \
   --label "$LABEL" \
   --hz "$HZ" \
-  --n_aug "$N_AUG"
+  --n_aug "$N_AUG" \
+  $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
+  $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
 
 # ── 方案 B：带合成数据模型（后台运行）───────────────────
 echo ""
