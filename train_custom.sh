@@ -29,6 +29,28 @@
 
 set -e
 
+# Ctrl+C 杀不掉后台训练进程的原因：这个脚本是用`bash train_custom.sh`
+# 跑的非交互式脚本，没有开job control，`&`起的后台进程（PID_A/PID_B/
+# TAIL_A/TAIL_B）默认会忽略SIGINT——Ctrl+C只会打断前台的`wait`，两个
+# python src/ml/train.py（以及--feat_workers>1时它们fork出来的特征
+# 提取子进程）会变成孤儿继续在后台跑，看着像"中断不了"。这里用trap
+# 显式在收到INT/TERM时把它们都杀掉。
+cleanup() {
+  echo ""
+  echo "⚠ 收到中断信号，清理后台进程..."
+  for _pid in "${PID_A:-}" "${PID_B:-}" "${TAIL_A:-}" "${TAIL_B:-}"; do
+    if [[ -n "$_pid" ]]; then
+      # pkill/kill 找不到匹配进程时返回非0——没有子进程（feat_workers=1）
+      # 或者进程已经退出都是正常情况，加||true避免被set -e在清理一半时
+      # 直接终止掉，导致后面本该杀的kill "$_pid"根本没执行到
+      pkill -P "$_pid" 2>/dev/null || true   # 先杀子进程（feat_workers多进程）
+      kill "$_pid" 2>/dev/null || true
+    fi
+  done
+  exit 130
+}
+trap cleanup INT TERM
+
 # ── 默认参数 ──────────────────────────────────────────────
 DATE=""
 HZ=16
