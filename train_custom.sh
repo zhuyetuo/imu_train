@@ -289,6 +289,12 @@ for part in parts:
     date_tag, path, src_hz = part.split(':')
     src_hz = int(src_hz)
     df = pd.read_csv(path)
+    # 重采样批次不会保留timestamp列（重采样后行数变了，原时间戳对不上），
+    # 直通批次的CSV还带着原始timestamp列——两种批次concat到一起会让这一列
+    # 一部分是NaN一部分是时间戳字符串，读混合CSV时pandas会报DtypeWarning。
+    # loader_custom.py只认sensor_cols/label_col/record_id_col，不用
+    # timestamp，这里统一丢掉，两边保持列一致
+    df = df.drop(columns=["timestamp"], errors="ignore")
     if src_hz != target_hz:
         print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz')
         out_rows = []
@@ -380,9 +386,29 @@ echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志�
 # 光加tr还不够：tr写到管道（不是终端）时默认是全缓冲的，会把转换后的内容
 # 攒在自己的缓冲区里不立刻往下传，一样会卡住——用 stdbuf -oL 强制tr按行
 # 缓冲，才能真正做到每次更新都立刻显示。
-tail -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[A] /' &
+# "提取特征"这条进度条每秒刷新上百次，改行输出后一秒钟能刷几十行、刷屏
+# 刷得根本看不清——限速成同一路（A/B各自算）的"提取特征"行至少间隔2秒
+# 才打印一次，其它行（阶段提示、最终结果等）不受影响照常立刻打印。
+# 这里特意没用awk实现限速：这台机器/usr/bin/awk是mawk，mawk从管道读
+# 输入时是整段攒起来的，不是来一行处理一行，用它会导致进度条从"实时
+# 但刷屏"变成"完全不显示、等到最后才一次性吐出来"——比刷屏还倒退回
+# 了当初tr那个坑。改用纯bash的while read循环，实测是真的边读边处理。
+_throttle() {
+  local last=0 now
+  while IFS= read -r line; do
+    if [[ "$line" == *"提取特征"* ]]; then
+      now=$(date +%s)
+      if (( now - last < 2 )); then
+        continue
+      fi
+      last=$now
+    fi
+    printf '%s\n' "$line"
+  done
+}
+tail -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[A] /' &
 TAIL_A=$!
-tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | sed -u 's/^/[B] /' &
+tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[B] /' &
 TAIL_B=$!
 
 wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 $LOG_NO_SYN"
