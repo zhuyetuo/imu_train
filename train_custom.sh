@@ -58,7 +58,9 @@ trap cleanup INT TERM
 DATE=""
 HZ=16
 N_AUG=50
-LABEL="抓挠"
+LABELS=()                 # 要合成的类别，--label可重复传（比如--label 抓挠 --label 甩身体
+                           # 同时给两个类别都补合成数据）。不传时默认只合成"抓挠"（见下面
+                           # 解析完参数后的默认值兜底）
 REMAP="configs/remap_custom_3class.yaml"
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
@@ -96,7 +98,7 @@ while [[ $# -gt 0 ]]; do
     --date)           DATE="$2";           shift 2 ;;
     --hz)             HZ="$2";             shift 2 ;;
     --n_aug)          N_AUG="$2";          shift 2 ;;
-    --label)          LABEL="$2";          shift 2 ;;
+    --label)          LABELS+=("$2");      shift 2 ;;
     --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
     --train_ratio)    TRAIN_RATIO="$2";    shift 2 ;;
     --val_ratio)      VAL_RATIO="$2";      shift 2 ;;
@@ -120,6 +122,10 @@ for _ed in "${EXTRA_DATES[@]:-}"; do
   fi
 done
 
+if [[ ${#LABELS[@]} -eq 0 ]]; then
+  LABELS=("抓挠")
+fi
+
 if [[ -z "$DATE" ]]; then
   echo "用法: bash train_custom.sh --date <DATE>  (例: --date 2026_7_23)"
   exit 1
@@ -129,7 +135,13 @@ PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
 DATA_DIR="data/raw_custom/${DATE}"
 CSV="${DATA_DIR}/merged_${DATE}.csv"
 JSON="${DATA_DIR}/merged_tmp.json"
-SYNTHETIC="data/synthetic/scratch_${DATE}${TAG:+_$TAG}.npz"
+# 每个要合成的类别各自一份npz文件，文件名带上类别名区分（多个类别时避免
+# 互相覆盖）；SYNTHETIC_PATHS按LABELS顺序一一对应，后面--synthetic_spec
+# 会拿LABELS[i]:SYNTHETIC_PATHS[i]拼起来传给train.py
+SYNTHETIC_PATHS=()
+for _lbl in "${LABELS[@]}"; do
+  SYNTHETIC_PATHS+=("data/synthetic/scratch_${DATE}${TAG:+_$TAG}_${_lbl}.npz")
+done
 DATASET_TAG=$(basename "$PROCESSED_DIR")
 
 # 训练日志放项目自己的tmp/目录下，不是系统/tmp——系统/tmp是全机器共用的，
@@ -165,8 +177,10 @@ if [[ "$CLEAN" == "1" ]]; then
   rm -rf "$PROCESSED_DIR"
   echo "  rm -rf $RESULTS_DIR/$DATASET_TAG"
   rm -rf "${RESULTS_DIR:?}/$DATASET_TAG"
-  echo "  rm -f  $SYNTHETIC"
-  rm -f "$SYNTHETIC"
+  for _sp in "${SYNTHETIC_PATHS[@]}"; do
+    echo "  rm -f  $_sp"
+    rm -f "$_sp"
+  done
 fi
 
 # ── 步骤0：合并 project-*.json → merged_tmp.json（唯一需要手动维护的源文件
@@ -378,30 +392,35 @@ python src/ml/train.py --hz "$HZ" --model rf \
   > "$LOG_NO_SYN" 2>&1 &
 PID_A=$!
 
-# ── 生成合成数据 ──────────────────────────────────────────
-echo "▶ 生成合成数据（${LABEL}，n_aug=${N_AUG}）..."
+# ── 生成合成数据（每个--label各自生成一份）──────────────────────────
 # --window_s/--stride_s要跟上面预处理真实数据用的保持一致，不然合成
 # 窗口跟真实窗口点数对不上，train.py合并训练集时特征维度会对不齐
-python src/data/synthesize_scratch.py \
-  --json "$JSON" \
-  --csv_dir "$CSV_DIR" \
-  --output "$SYNTHETIC" \
-  --processed_dir "$PROCESSED_DIR" \
-  --remap "$REMAP" \
-  --label "$LABEL" \
-  --hz "$HZ" \
-  --n_aug "$N_AUG" \
-  $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
-  $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
+SYNTHETIC_SPEC_ARGS=()
+for _i in "${!LABELS[@]}"; do
+  _lbl="${LABELS[$_i]}"
+  _sp="${SYNTHETIC_PATHS[$_i]}"
+  echo "▶ 生成合成数据（${_lbl}，n_aug=${N_AUG}）..."
+  python src/data/synthesize_scratch.py \
+    --json "$JSON" \
+    --csv_dir "$CSV_DIR" \
+    --output "$_sp" \
+    --processed_dir "$PROCESSED_DIR" \
+    --remap "$REMAP" \
+    --label "$_lbl" \
+    --hz "$HZ" \
+    --n_aug "$N_AUG" \
+    $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
+    $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
+  SYNTHETIC_SPEC_ARGS+=(--synthetic_spec "${_lbl}:${_sp}")
+done
 
 # ── 方案 B：带合成数据模型（后台运行）───────────────────
 echo ""
-echo "▶ 方案 B：带合成数据模型（后台运行）..."
+echo "▶ 方案 B：带合成数据模型（后台运行，合成类别: ${LABELS[*]}）..."
 python src/ml/train.py --hz "$HZ" --model rf \
   --processed_dir "$PROCESSED_DIR" \
   --remap "$REMAP" \
-  --synthetic "$SYNTHETIC" \
-  --synthetic_label "$LABEL" \
+  "${SYNTHETIC_SPEC_ARGS[@]}" \
   --results_dir "$RESULTS_DIR" \
   --feat_workers "$FEAT_WORKERS" \
   > "$LOG_WITH_SYN" 2>&1 &
