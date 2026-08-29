@@ -5,6 +5,15 @@
 #   DATA_ROOT     CSV 数据根目录，按日期子目录组织（必填）
 #   MODEL         ML 模型路径（必填）
 #   RESULT_ROOT   推理结果输出目录（默认 infer_result）
+#   TARGET_LABELS 要检测的目标类别，逗号分隔（默认"抓挠"，保持跟改造前完全
+#                 一致的行为——不设这个变量的旧用法不受影响）。传多个类别
+#                 比如"抓挠,甩身体"时，每个类别在 RESULT_ROOT/{day}/{label}/
+#                 下单独产出一整套结果（by_conf_max/、_infer/、
+#                 imu_daily_scratch_stats.csv、labelstudio_review_full_ml_IMU*.json
+#                 等），互相独立、内容只统计各自那个类别的片段。CSV只读一次、
+#                 特征只提一次（在infer_csv_scratch.py一次调用内部按类别拆分
+#                 输出），不是每个类别重新跑一遍推理——那部分才是真正耗时的，
+#                 类别数量不该线性拖慢它
 #   EXCLUDE_DAYS  空格分隔的跳过日期列表（默认空）
 #   WORKERS       并行进程数（默认 8）
 #   PATTERN       CSV 文件名通配符（默认 *.csv）
@@ -78,6 +87,7 @@ set -e
 DATA_ROOT="${DATA_ROOT:?请设置 DATA_ROOT 环境变量，例: DATA_ROOT=data/multicam_multiimu}"
 MODEL="${MODEL:?请设置 MODEL 环境变量，例: MODEL=results/processed_2026_7_23/16hz_remap_custom_3class/ml_rf.pkl}"
 RESULT_ROOT="${RESULT_ROOT:-infer_result}"
+TARGET_LABELS="${TARGET_LABELS:-抓挠}"   # 逗号分隔，默认只有"抓挠"，向后兼容旧用法
 EXCLUDE_DAYS="${EXCLUDE_DAYS:-}"
 WORKERS="${WORKERS:-8}"
 PATTERN="${PATTERN:-*.csv}"
@@ -158,7 +168,18 @@ echo ""
 echo "共 ${#days[@]} 个日期: ${days[*]}"
 echo ""
 
+# ── 目标类别列表 ──────────────────────────────────────────
+# 逗号分隔转数组，下面所有按类别产出的步骤都复用这一份，任何步骤要新增
+# 类别时只用改 TARGET_LABELS 这一个环境变量
+IFS=',' read -ra labels <<< "$TARGET_LABELS"
+echo "  目标类别: ${labels[*]}"
+echo ""
+
 # ── 逐日期推理 ────────────────────────────────────────────
+# CSV只读一次、特征只提一次、模型只预测一次——多个类别的片段提取/合并/JSON
+# 输出都在 infer_csv_scratch.py 一次调用内部按类别拆分完成（--target_labels），
+# 不是每个类别重跑一次完整推理，避免类别数量线性拖慢这一步（这是整个流水线
+# 里最耗时的部分）
 hz_args=""
 [[ "$DEVICE_HZ" -gt 0 ]] && hz_args="$hz_args --device_hz $DEVICE_HZ"
 [[ "$MODEL_HZ"  -gt 0 ]] && hz_args="$hz_args --model_hz $MODEL_HZ"
@@ -168,15 +189,17 @@ for day in "${days[@]}"; do
     out_dir="$RESULT_ROOT/$day"
     mkdir -p "$out_dir"
 
-    infer_json_dir="$out_dir/_infer"
-    mkdir -p "$infer_json_dir"
     echo "▶ $day ..."
+    # --output_dir 传的是"这一天"这一级目录，infer_csv_scratch.py 自己按
+    # --target_labels 把每个类别的结果分别落在 out_dir/{label}/_infer/ 下
+    combined_log="$out_dir/.infer_combined.log"
     python src/infer_csv_scratch.py \
         --csv_dir "$csv_dir" \
         --pattern "$PATTERN" \
         --model "$MODEL" \
         --workers "$WORKERS" \
-        --output_dir "$infer_json_dir" \
+        --output_dir "$out_dir" \
+        --target_labels "$TARGET_LABELS" \
         --quiet \
         --scratch_only \
         --merge_gap "$MERGE_GAP" \
@@ -184,35 +207,50 @@ for day in "${days[@]}"; do
         --resample_method "$RESAMPLE_METHOD" \
         $( [[ "$KEEP_ISOLATED" == "0" ]] && echo "--no_keep_isolated" ) \
         $hz_args \
-        2>&1 | tee "$out_dir/infer.log"
+        2>&1 | tee "$combined_log"
+
+    # infer.log 按类别各存一份——单次python调用的日志本身已经用[label]标记
+    # 区分了不同类别的输出，复制同一份日志到每个类别目录下，保持"每个类别
+    # 子目录下都能看到当天完整推理日志"这个结构，不用为拆日志重新跑多次
+    for label in "${labels[@]}"; do
+        mkdir -p "$out_dir/$label"
+        cp "$combined_log" "$out_dir/$label/infer.log"
+    done
+    rm -f "$combined_log"
 
     echo "  结果已保存至 $out_dir/"
 done
 
 # ── 裁剪视频片段 ─────────────────────────────────────────
+# 每个目标类别各裁一份，clip落在 out_dir/{label}/ 下——每个类别的_infer.json
+# 只含它自己那个类别的片段（infer_csv_scratch.py已经按类别拆好），extract_clips.py
+# 本身不认label，只是读传给它的--infer_dir/--output_dir，所以按类别各调一次
+# 就能天然得到按类别分开的clips_*/输出，不需要改extract_clips.py本身
 if [[ "$EXTRACT_CLIPS" == "1" ]]; then
     echo ""
     echo "▶ 按置信度区间裁剪视频片段..."
     for day in "${days[@]}"; do
-        out_dir="$RESULT_ROOT/$day"
         video_dir="$DATA_ROOT/$day"
-        echo "  $day ..."
-        # --run_tag 自动用 RESULT_ROOT 的名字，保证不同次运行（比如对比
-        # 带合成/不带合成两个模型）裁出来的clip文件名不会撞在一起——如果
-        # 后面还会把clip复制到共享的Nginx媒体目录，撞名会导致后一次运行
-        # 静默覆盖前一次的文件，看似还在但内容已经被换掉了
-        python src/extract_clips.py \
-            --infer_dir  "$out_dir/_infer" \
-            --video_dir  "$video_dir" \
-            --output_dir "$out_dir" \
-            --context_s  "$CONTEXT_S" \
-            --workers    "${CLIP_WORKERS:-4}" \
-            --bin_by     "$BIN_BY" \
-            --encoder    "${ENCODER:-cpu}" \
-            --preset     "${PRESET:-veryfast}" \
-            --ffmpeg_threads "${FFMPEG_THREADS:-2}" \
-            --cam_mode   "$CAM_MODE" \
-            --run_tag    "$(basename "$RESULT_ROOT")"
+        for label in "${labels[@]}"; do
+            label_dir="$RESULT_ROOT/$day/$label"
+            echo "  $day [$label] ..."
+            # --run_tag 自动用 RESULT_ROOT 的名字，保证不同次运行（比如对比
+            # 带合成/不带合成两个模型）裁出来的clip文件名不会撞在一起——如果
+            # 后面还会把clip复制到共享的Nginx媒体目录，撞名会导致后一次运行
+            # 静默覆盖前一次的文件，看似还在但内容已经被换掉了
+            python src/extract_clips.py \
+                --infer_dir  "$label_dir/_infer" \
+                --video_dir  "$video_dir" \
+                --output_dir "$label_dir" \
+                --context_s  "$CONTEXT_S" \
+                --workers    "${CLIP_WORKERS:-4}" \
+                --bin_by     "$BIN_BY" \
+                --encoder    "${ENCODER:-cpu}" \
+                --preset     "${PRESET:-veryfast}" \
+                --ffmpeg_threads "${FFMPEG_THREADS:-2}" \
+                --cam_mode   "$CAM_MODE" \
+                --run_tag    "$(basename "$RESULT_ROOT")"
+        done
     done
 fi
 
@@ -228,73 +266,86 @@ video_prefix_arg=""
 [[ -n "$LS_VIDEO_URL_PREFIX" ]] && video_prefix_arg="--video_url_prefix $LS_VIDEO_URL_PREFIX"
 
 for day in "${days[@]}"; do
-    out_dir="$RESULT_ROOT/$day"
+    for label in "${labels[@]}"; do
+        label_dir="$RESULT_ROOT/$day/$label"
 
-    if [[ "$BIN_BY" == "both" ]]; then
-        clip_subdirs=("by_conf_max" "by_conf_mean")
-    else
-        clip_subdirs=("")
-    fi
+        if [[ "$BIN_BY" == "both" ]]; then
+            clip_subdirs=("by_conf_max" "by_conf_mean")
+        else
+            clip_subdirs=("")
+        fi
 
-    split_arg=""
-    [[ "$SPLIT_BY_IMU" == "1" ]] && split_arg="--split_by_imu"
-    min_conf_arg=""
-    [[ -n "$MIN_CONF" ]] && min_conf_arg="--min_conf $MIN_CONF"
+        split_arg=""
+        [[ "$SPLIT_BY_IMU" == "1" ]] && split_arg="--split_by_imu"
+        min_conf_arg=""
+        [[ -n "$MIN_CONF" ]] && min_conf_arg="--min_conf $MIN_CONF"
 
-    for sub in "${clip_subdirs[@]}"; do
-        scan_dir="$out_dir${sub:+/$sub}"
-        ls_json="$scan_dir/labelstudio_review.json"
-        python src/review_to_labelstudio.py \
-            --infer_dir "$scan_dir" \
-            --output "$ls_json" \
-            --csv_url_prefix "$LS_URL_PREFIX" \
-            $video_prefix_arg \
-            --use_clips \
-            --cam_mode "$CAM_MODE" \
-            $split_arg \
-            $min_conf_arg \
-            --mode "$LS_MODE"
-        echo "  $day${sub:+ [$sub]} → $ls_json"
+        for sub in "${clip_subdirs[@]}"; do
+            scan_dir="$label_dir${sub:+/$sub}"
+            ls_json="$scan_dir/labelstudio_review.json"
+            python src/review_to_labelstudio.py \
+                --infer_dir "$scan_dir" \
+                --output "$ls_json" \
+                --csv_url_prefix "$LS_URL_PREFIX" \
+                $video_prefix_arg \
+                --use_clips \
+                --cam_mode "$CAM_MODE" \
+                $split_arg \
+                $min_conf_arg \
+                --mode "$LS_MODE" \
+                --label "$label"
+            echo "  $day [$label]${sub:+ [$sub]} → $ls_json"
+        done
     done
 done
 
 # ── ML自动预标注（全录制视频，不裁剪clip）────────────────
-# 跟上面clips那一套完全独立：读out_dir/_infer下的原始推理结果，不依赖
-# extract_clips.py的输出，只标注高置信度片段，标注人标成ML
+# 跟上面clips那一套完全独立：读label_dir/_infer下的原始推理结果，不依赖
+# extract_clips.py的输出，只标注高置信度片段，标注人标成ML；每个目标类别
+# 各自一份，落在各自的 RESULT_ROOT/{day}/{label}/ 下
 if [[ "$ML_PRELABEL" == "1" ]]; then
     echo ""
     echo "▶ 生成 ML 自动预标注任务（全录制视频，$ML_CONF_FIELD>=$ML_MIN_CONF）..."
     for day in "${days[@]}"; do
-        out_dir="$RESULT_ROOT/$day"
-        ls_json="$out_dir/labelstudio_review.json"
-        python src/review_to_labelstudio.py \
-            --infer_dir "$out_dir/_infer" \
-            --output "$ls_json" \
-            --csv_url_prefix "$LS_URL_PREFIX" \
-            $video_prefix_arg \
-            --ml_full_video \
-            --ml_min_conf "$ML_MIN_CONF" \
-            --ml_conf_field "$ML_CONF_FIELD" \
-            --cam_mode "$CAM_MODE" \
-            --label "抓挠"
-        echo "  $day → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
+        for label in "${labels[@]}"; do
+            label_dir="$RESULT_ROOT/$day/$label"
+            ls_json="$label_dir/labelstudio_review.json"
+            python src/review_to_labelstudio.py \
+                --infer_dir "$label_dir/_infer" \
+                --output "$ls_json" \
+                --csv_url_prefix "$LS_URL_PREFIX" \
+                $video_prefix_arg \
+                --ml_full_video \
+                --ml_min_conf "$ML_MIN_CONF" \
+                --ml_conf_field "$ML_CONF_FIELD" \
+                --cam_mode "$CAM_MODE" \
+                --label "$label"
+            echo "  $day [$label] → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
+        done
     done
 fi
 
 # ── 每天每个IMU的抓挠统计（给pm_skin_scoring网页的C值计算用）──────────
+# 每个目标类别各跑一次imu_scratch_daily_stats.py（--label区分），输出CSV
+# 落在各自的 RESULT_ROOT/{day}/{label}/imu_daily_scratch_stats.csv 下，
+# 不同类别的事件次数/时长互相独立统计，不会混在一起
 if [[ "$IMU_STATS" == "1" ]]; then
     echo ""
-    echo "▶ 统计每天每个IMU的抓挠情况（$ML_CONF_FIELD>=$ML_MIN_CONF才算抓挠，供C值计算网页读取）..."
+    echo "▶ 统计每天每个IMU的情况（$ML_CONF_FIELD>=$ML_MIN_CONF才算数，供C值计算网页读取）..."
     # 只写本次实际跑的那几天的统计文件——基线那边会自己去读root下全部
     # 已有的天(见compute_stats的注释)，但"写哪几天的文件"必须严格限制在
     # 本次INCLUDE_DAYS，不然会在所有历史日期目录下都生成一份统计文件，
     # 网页上就分不清"哪些天是我真的处理过的"了
     days_arg=$(IFS=,; echo "${days[*]}")
-    python src/imu_scratch_daily_stats.py \
+    for label in "${labels[@]}"; do
+      echo "  类别: $label"
+      python src/imu_scratch_daily_stats.py \
         --infer_root "$RESULT_ROOT" \
         --days "$days_arg" \
+        --label "$label" \
         --min_conf "$ML_MIN_CONF" \
         --conf_field "$ML_CONF_FIELD"
+    done
 fi
 
 # ── 复制 CSV/MP4 到 Nginx 媒体目录 ──────────────────────
@@ -316,29 +367,36 @@ if [[ "$SYMLINK_CSV" == "1" ]]; then
     }
 
     for day in "${days[@]}"; do
-        out_dir="$RESULT_ROOT/$day"
-        # BIN_BY=both 时只扫 by_conf_max/（canonical，实际文件所在地），
-        # by_conf_mean/ 下都是指向同一批文件的软链接，同名文件复制一次就够，
-        # 扫两遍只会重复拷贝相同内容、把 n_copied 算重复。
-        if [[ "$BIN_BY" == "both" ]]; then
-            clips_root="$out_dir/by_conf_max"
-        else
-            clips_root="$out_dir"
-        fi
-        # clips_*/ 里的 CSV → MEDIA_DIR/，MP4 → MEDIA_DIR/transcoded/
-        while IFS= read -r -d '' f; do
-            ext="${f##*.}"
-            if [[ "${ext,,}" == "csv" ]]; then
-                _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
+        # clips现在按类别分目录（RESULT_ROOT/{day}/{label}/），每个类别各扫
+        # 一遍自己的clips_*/——不同类别裁出来的clip文件名各不相同（片段时间
+        # 段不一样），不会重复拷贝，扫多个label目录也不会把n_copied算重复
+        for label in "${labels[@]}"; do
+            label_dir="$RESULT_ROOT/$day/$label"
+            # BIN_BY=both 时只扫 by_conf_max/（canonical，实际文件所在地），
+            # by_conf_mean/ 下都是指向同一批文件的软链接，同名文件复制一次就够，
+            # 扫两遍只会重复拷贝相同内容、把 n_copied 算重复。
+            if [[ "$BIN_BY" == "both" ]]; then
+                clips_root="$label_dir/by_conf_max"
             else
-                _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
+                clips_root="$label_dir"
             fi
-        done < <(find "$clips_root"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+            # clips_*/ 里的 CSV → MEDIA_DIR/，MP4 → MEDIA_DIR/transcoded/
+            while IFS= read -r -d '' f; do
+                ext="${f##*.}"
+                if [[ "${ext,,}" == "csv" ]]; then
+                    _copy_file "$f" "$MEDIA_DIR/$(basename "$f")"
+                else
+                    _copy_file "$f" "$MEDIA_DIR/transcoded/$(basename "$f")"
+                fi
+            done < <(find "$clips_root"/clips_* -maxdepth 1 \( -name "*.csv" -o -name "*.mp4" -o -name "*.MP4" \) -print0 2>/dev/null)
+        done
 
         # ML_PRELABEL引用的是原始完整录制视频(不是裁剪出来的clip)，上面
         # 那段只同步了clips_*/里的文件，这里额外把DATA_ROOT/$day下的原始
         # CSV/MP4也同步一份过去，不然ML预标注JSON里的URL会404（同样的
-        # 文件名，同步一次两边都能用，不冲突）
+        # 文件名，同步一次两边都能用，不冲突）。这一步跟label无关（原始
+        # 录制文件对所有类别都是同一批），只需要在day层级做一次，不要放进
+        # 上面的label循环里重复同步同一批文件。
         if [[ "$ML_PRELABEL" == "1" ]]; then
             while IFS= read -r -d '' f; do
                 ext="${f##*.}"
@@ -358,33 +416,38 @@ echo ""
 echo "=============================================="
 echo "  汇总"
 echo "=============================================="
-total_scratch=0
-total_files=0
-for day in "${days[@]}"; do
-    out_dir="$RESULT_ROOT/$day"
-    n_files=$(find "$out_dir" -name "*_infer.json" | wc -l)
-    n_scratch=$(python -c "
+# 按类别分开汇总——不同类别的片段数不该加在一起变成一个模糊的总数，
+# 每个类别各自一行才能看出"这个类别检出了多少"
+for label in "${labels[@]}"; do
+    echo "  【$label】"
+    total_scratch=0
+    total_files=0
+    for day in "${days[@]}"; do
+        label_dir="$RESULT_ROOT/$day/$label"
+        n_files=$(find "$label_dir" -name "*_infer.json" 2>/dev/null | wc -l)
+        n_scratch=$(python -c "
 import glob, json, sys
 total = 0
-for f in glob.glob('$out_dir/**/*_infer.json', recursive=True):
+for f in glob.glob('$label_dir/**/*_infer.json', recursive=True):
     d = json.load(open(f))
     total += len(d.get('scratch_segments', []))
 print(total)
 " 2>/dev/null || echo 0)
-    echo "  $day: $n_files 个文件，检测到 $n_scratch 段抓挠"
-    total_scratch=$((total_scratch + n_scratch))
-    total_files=$((total_files + n_files))
+        echo "    $day: $n_files 个文件，检测到 $n_scratch 段"
+        total_scratch=$((total_scratch + n_scratch))
+        total_files=$((total_files + n_files))
+    done
+    echo "    ────────────────"
+    echo "    合计: $total_files 个文件，$total_scratch 段"
 done
-echo "  ────────────────"
-echo "  合计: $total_files 个文件，$total_scratch 段抓挠"
 echo ""
 echo "Label Studio 导入方式:"
 if [[ "$BIN_BY" == "both" ]]; then
-    echo "  BIN_BY=both：每个日期目录下有两份，分别导入："
-    echo "    <日期>/by_conf_max/labelstudio_review.json"
-    echo "    <日期>/by_conf_mean/labelstudio_review.json"
+    echo "  BIN_BY=both：每个日期/类别目录下有两份，分别导入："
+    echo "    <日期>/<类别>/by_conf_max/labelstudio_review.json"
+    echo "    <日期>/<类别>/by_conf_mean/labelstudio_review.json"
 else
-    echo "  每个日期目录下的 labelstudio_review.json 可直接导入 Label Studio"
+    echo "  每个日期/类别目录下的 labelstudio_review.json 可直接导入 Label Studio"
 fi
 echo "  Label Studio → Import → 选择 JSON 文件"
 echo ""
