@@ -151,94 +151,122 @@ def main(args):
         classes = classes_new
         print(f"[ml/train] 重映射后类别: {classes}")
 
-    # 合成数据注入（如抓挠伪数据）
-    if args.synthetic:
-        syn = np.load(args.synthetic)
-        X_syn = syn["X"]                          # (N, window_size, 6) 原始未对齐 acc+gyro
-        # 合成数据历史上从未做过重力对齐，真实数据现在是 8 通道（对齐acc/gyro + 原始tilt），
-        # 这里补齐同样的处理，否则和真实数据的特征空间不一致，且通道数拼接会直接报错
-        gravity_aligned_meta = str(meta.get("gravity_aligned", "True")).lower() == "true"
-        tilt_syn = append_raw_tilt_batch(X_syn)[:, :, 6:8]
-        if gravity_aligned_meta:
-            X_syn = gravity_align_batch(X_syn)
-        X_syn = np.concatenate([X_syn, tilt_syn], axis=2)
-        syn_label    = args.synthetic_label
-        if syn_label in classes:
-            syn_label_id = classes.index(syn_label)   # 合并到已有类别
-            print(f"[ml/train] 合成数据合并到已有类别 '{syn_label}'(id={syn_label_id})")
-        else:
-            syn_label_id = len(classes)               # 追加为新类别
-            classes      = classes + [syn_label]
+    # 合成数据注入（如抓挠伪数据）——支持一次注入多个类别的合成数据
+    # （--synthetic_spec LABEL:PATH[:HZ]，可重复传），也兼容旧的单个
+    # --synthetic/--synthetic_label 用法（只传一个类别时两种写法等价）
+    if args.synthetic_spec:
+        synthetic_specs = []
+        for spec in args.synthetic_spec:
+            parts = spec.split(":")
+            if len(parts) == 2:
+                label, path = parts
+                hz = 0
+            elif len(parts) == 3:
+                label, path, hz = parts
+                hz = int(hz)
+            else:
+                raise ValueError(f"--synthetic_spec 格式应为 LABEL:PATH 或 LABEL:PATH:HZ，收到: {spec}")
+            synthetic_specs.append((label, path, hz))
+    elif args.synthetic:
+        synthetic_specs = [(args.synthetic_label, args.synthetic, args.synthetic_hz)]
+    else:
+        synthetic_specs = []
 
-        # 按与真实数据相同的比例分配合成数据到 train/val/test。
-        # 必须按"原始片段"分组划分，不能纯随机打乱窗口——合成数据是由少量真实
-        # 片段增强放大出来的（同一片段可能产生几十个近乎重复的窗口），纯随机
-        # 划分会让同一片段的窗口分散到train和val/test里，造成数据泄漏（验证集
-        # 分数虚高但不代表真实泛化能力）。
+    is_synthetic_val = np.zeros(len(X_val), dtype=bool)
+    is_synthetic_te  = np.zeros(len(X_te),  dtype=bool)
+    syn_label_ids = []  # [(label, label_id), ...]，eval阶段按类别拆真实/合成用
+
+    if synthetic_specs:
+        gravity_aligned_meta = str(meta.get("gravity_aligned", "True")).lower() == "true"
         syn_train_r = float(meta.get("train_ratio", 0.8))
         syn_val_r   = float(meta.get("val_ratio",   0.1))
-        n = len(X_syn)
-        if "seg_ids" in syn:
-            syn_seg_ids = syn["seg_ids"]
-        else:
-            print("[ml/train] [警告] 合成数据文件缺少 seg_ids（旧版 synthesize_scratch.py 生成），"
-                  "无法按片段分组，退化为按窗口随机划分，可能有数据泄漏。建议重新跑一遍"
-                  "synthesize_scratch.py 生成带 seg_ids 的新文件。")
-            syn_seg_ids = np.arange(n)  # 退化：每个窗口自成一组，等价于旧的纯随机划分
-        dummy_y     = np.zeros(n, dtype=np.int64)
-        dummy_y_seq = np.zeros((n, X_syn.shape[1]), dtype=np.int64)
-        (X_syn_tr, _, _, X_syn_val, _, _, X_syn_te, _, _) = split_windows_by_segment(
-            X_syn, dummy_y, dummy_y_seq, syn_seg_ids, syn_train_r, syn_val_r, seed=42)
-        n_tr, n_val, n_te = len(X_syn_tr), len(X_syn_val), len(X_syn_te)
-        y_syn_tr  = np.full(n_tr,  syn_label_id, dtype=np.int64)
-        y_syn_val = np.full(n_val, syn_label_id, dtype=np.int64)
-        y_syn_te  = np.full(n_te,  syn_label_id, dtype=np.int64)
 
-        # 降采样对齐 window_size（合成数据 Hz 与训练 Hz 不同时才处理）
-        src_hz = args.synthetic_hz if args.synthetic_hz > 0 else args.hz
-        if src_hz != args.hz:
-            from math import gcd
-            g = gcd(src_hz, args.hz)
-            up, down = args.hz // g, src_hz // g
-            if up == 1:
-                step = down
-                X_syn_tr  = X_syn_tr[:,  ::step, :]
-                X_syn_val = X_syn_val[:, ::step, :]
-                X_syn_te  = X_syn_te[:,  ::step, :]
+        X_syn_tr_all, y_syn_tr_all = [], []
+        X_syn_val_all, y_syn_val_all = [], []
+        X_syn_te_all, y_syn_te_all = [], []
+
+        for syn_label, syn_path, syn_hz in synthetic_specs:
+            syn = np.load(syn_path)
+            X_syn = syn["X"]                          # (N, window_size, 6) 原始未对齐 acc+gyro
+            # 合成数据历史上从未做过重力对齐，真实数据现在是 8 通道（对齐acc/gyro + 原始tilt），
+            # 这里补齐同样的处理，否则和真实数据的特征空间不一致，且通道数拼接会直接报错
+            tilt_syn = append_raw_tilt_batch(X_syn)[:, :, 6:8]
+            if gravity_aligned_meta:
+                X_syn = gravity_align_batch(X_syn)
+            X_syn = np.concatenate([X_syn, tilt_syn], axis=2)
+
+            if syn_label in classes:
+                syn_label_id = classes.index(syn_label)   # 合并到已有类别
+                print(f"[ml/train] 合成数据合并到已有类别 '{syn_label}'(id={syn_label_id})")
             else:
-                from scipy.signal import resample_poly
-                X_syn_tr  = resample_poly(X_syn_tr,  up, down, axis=1).astype(np.float32)
-                X_syn_val = resample_poly(X_syn_val, up, down, axis=1).astype(np.float32)
-                X_syn_te  = resample_poly(X_syn_te,  up, down, axis=1).astype(np.float32)
+                syn_label_id = len(classes)               # 追加为新类别
+                classes      = classes + [syn_label]
+            syn_label_ids.append((syn_label, syn_label_id))
+
+            # 按与真实数据相同的比例分配合成数据到 train/val/test。
+            # 必须按"原始片段"分组划分，不能纯随机打乱窗口——合成数据是由少量真实
+            # 片段增强放大出来的（同一片段可能产生几十个近乎重复的窗口），纯随机
+            # 划分会让同一片段的窗口分散到train和val/test里，造成数据泄漏（验证集
+            # 分数虚高但不代表真实泛化能力）。
+            n = len(X_syn)
+            if "seg_ids" in syn:
+                syn_seg_ids = syn["seg_ids"]
+            else:
+                print("[ml/train] [警告] 合成数据文件缺少 seg_ids（旧版 synthesize_scratch.py 生成），"
+                      "无法按片段分组，退化为按窗口随机划分，可能有数据泄漏。建议重新跑一遍"
+                      "synthesize_scratch.py 生成带 seg_ids 的新文件。")
+                syn_seg_ids = np.arange(n)  # 退化：每个窗口自成一组，等价于旧的纯随机划分
+            dummy_y     = np.zeros(n, dtype=np.int64)
+            dummy_y_seq = np.zeros((n, X_syn.shape[1]), dtype=np.int64)
+            (X_syn_tr, _, _, X_syn_val, _, _, X_syn_te, _, _) = split_windows_by_segment(
+                X_syn, dummy_y, dummy_y_seq, syn_seg_ids, syn_train_r, syn_val_r, seed=42)
+
+            # 降采样对齐 window_size（合成数据 Hz 与训练 Hz 不同时才处理）
+            src_hz = syn_hz if syn_hz > 0 else args.hz
+            if src_hz != args.hz:
+                from math import gcd
+                g = gcd(src_hz, args.hz)
+                up, down = args.hz // g, src_hz // g
+                if up == 1:
+                    step = down
+                    X_syn_tr  = X_syn_tr[:,  ::step, :]
+                    X_syn_val = X_syn_val[:, ::step, :]
+                    X_syn_te  = X_syn_te[:,  ::step, :]
+                else:
+                    from scipy.signal import resample_poly
+                    X_syn_tr  = resample_poly(X_syn_tr,  up, down, axis=1).astype(np.float32)
+                    X_syn_val = resample_poly(X_syn_val, up, down, axis=1).astype(np.float32)
+                    X_syn_te  = resample_poly(X_syn_te,  up, down, axis=1).astype(np.float32)
+
+            X_syn_tr_all.append(X_syn_tr);   y_syn_tr_all.append(np.full(len(X_syn_tr),   syn_label_id, dtype=np.int64))
+            X_syn_val_all.append(X_syn_val); y_syn_val_all.append(np.full(len(X_syn_val), syn_label_id, dtype=np.int64))
+            X_syn_te_all.append(X_syn_te);   y_syn_te_all.append(np.full(len(X_syn_te),   syn_label_id, dtype=np.int64))
+            print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
 
         # 记录哪些 val/test 样本是合成的（拼接前的长度就是真实样本数），
         # 后面单独拆开算一遍指标，避免"整体分数好看"掩盖"合成数据虚高、真实数据其实很差"
         n_val_real = len(X_val)
         n_te_real  = len(X_te)
 
-        X_tr  = np.concatenate([X_tr,  X_syn_tr],  axis=0)
-        X_val = np.concatenate([X_val, X_syn_val], axis=0)
-        X_te  = np.concatenate([X_te,  X_syn_te],  axis=0)
-        y_tr  = np.concatenate([y_tr,  y_syn_tr],  axis=0)
-        y_val = np.concatenate([y_val, y_syn_val], axis=0)
-        y_te  = np.concatenate([y_te,  y_syn_te],  axis=0)
+        X_tr  = np.concatenate([X_tr]  + X_syn_tr_all,  axis=0)
+        X_val = np.concatenate([X_val] + X_syn_val_all, axis=0)
+        X_te  = np.concatenate([X_te]  + X_syn_te_all,  axis=0)
+        y_tr  = np.concatenate([y_tr]  + y_syn_tr_all,  axis=0)
+        y_val = np.concatenate([y_val] + y_syn_val_all, axis=0)
+        y_te  = np.concatenate([y_te]  + y_syn_te_all,  axis=0)
 
         is_synthetic_val = np.zeros(len(X_val), dtype=bool)
         is_synthetic_val[n_val_real:] = True
         is_synthetic_te = np.zeros(len(X_te), dtype=bool)
         is_synthetic_te[n_te_real:] = True
-        print(f"[ml/train] 注入合成数据: {n} 窗口 → 类别 '{syn_label}'(id={syn_label_id})")
         print(f"[ml/train] 更新后类别: {classes}")
         print(f"[ml/train] 训练集大小: {len(X_tr)}  val: {len(X_val)}  test: {len(X_te)}")
-    else:
-        is_synthetic_val = np.zeros(len(X_val), dtype=bool)
-        is_synthetic_te = np.zeros(len(X_te), dtype=bool)
 
     # 打印注入后的完整类别分布
     counts_tr  = np.bincount(y_tr.astype(int),  minlength=len(classes))
     counts_val = np.bincount(y_val.astype(int), minlength=len(classes))
     counts_te  = np.bincount(y_te.astype(int),  minlength=len(classes))
-    dist_title = "含合成数据" if args.synthetic else "纯标注数据"
+    dist_title = "含合成数据" if synthetic_specs else "纯标注数据"
     print(f"\n[ml/train] ── 数据集类别分布（{dist_title}）──")
     print(f"  {'类别':<10} {'训练':>8} {'验证':>8} {'测试':>8} {'合计':>8}")
     print(f"  {'-'*42}")
@@ -341,19 +369,20 @@ def main(args):
     # 真实 vs 合成样本分开算指标：如果整体分数好看但只是因为合成样本占多数、
     # 合成样本"太好认"，这里能直接看出来（不能只看合成数据训练是否让整体分数
     # 变好看，得看它对真实样本有没有真实帮助）
-    if args.synthetic and is_synthetic_eval.sum() > 0 and (~is_synthetic_eval).sum() > 0:
-        syn_class_mask = (y_eval == syn_label_id)
-        real_mask = syn_class_mask & (~is_synthetic_eval)
-        fake_mask = syn_class_mask & is_synthetic_eval
-        print(f"\n  ── '{syn_label}' 类别按来源拆分（不能只看整体分数）──")
-        for tag, mask in (("真实样本", real_mask), ("合成样本", fake_mask)):
-            n = int(mask.sum())
-            if n == 0:
-                print(f"    {tag}: 0 个，跳过")
-                continue
-            recall = float((y_pred[mask] == syn_label_id).mean())
-            print(f"    {tag}: {n:>5} 个  recall={recall:.4f}"
-                  f"{'  ⚠️ 明显低于合成样本，说明模型对真实抓挠泛化不够' if tag == '真实样本' and recall < 0.7 else ''}")
+    if syn_label_ids and is_synthetic_eval.sum() > 0 and (~is_synthetic_eval).sum() > 0:
+        for syn_label, syn_label_id in syn_label_ids:
+            syn_class_mask = (y_eval == syn_label_id)
+            real_mask = syn_class_mask & (~is_synthetic_eval)
+            fake_mask = syn_class_mask & is_synthetic_eval
+            print(f"\n  ── '{syn_label}' 类别按来源拆分（不能只看整体分数）──")
+            for tag, mask in (("真实样本", real_mask), ("合成样本", fake_mask)):
+                n = int(mask.sum())
+                if n == 0:
+                    print(f"    {tag}: 0 个，跳过")
+                    continue
+                recall = float((y_pred[mask] == syn_label_id).mean())
+                print(f"    {tag}: {n:>5} 个  recall={recall:.4f}"
+                      f"{f'  ⚠️ 明显低于合成样本，说明模型对真实{syn_label}泛化不够' if tag == '真实样本' and recall < 0.7 else ''}")
     print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
 
@@ -396,7 +425,7 @@ def main(args):
 
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
-    syn_tag     = "_syn" if args.synthetic else ""
+    syn_tag     = "_syn" if synthetic_specs else ""
     out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}{syn_tag}")
     os.makedirs(out_dir, exist_ok=True)
     per_class = classification_report(y_eval, y_pred, labels=present_labels,
@@ -442,11 +471,18 @@ if __name__ == "__main__":
     parser.add_argument("--remap", default="",
                         help="标签重映射 YAML 文件路径（用于合并类别，如 6类→2类）")
     parser.add_argument("--synthetic", default="",
-                        help="合成数据 npz 路径（X 字段为窗口数组，追加为新类别）")
+                        help="合成数据 npz 路径（X 字段为窗口数组，追加为新类别）。"
+                             "只能注入一个类别，多个类别用--synthetic_spec")
     parser.add_argument("--synthetic_label", default="抓挠",
-                        help="合成数据的类别名称（默认：抓挠）")
+                        help="合成数据的类别名称（默认：抓挠），配合--synthetic用")
     parser.add_argument("--synthetic_hz", type=int, default=0,
-                        help="合成数据的采样率（默认0=与--hz相同，无需降采样）")
+                        help="合成数据的采样率（默认0=与--hz相同，无需降采样），配合--synthetic用")
+    parser.add_argument("--synthetic_spec", action="append", default=None,
+                        help="LABEL:PATH[:HZ]，可重复传，一次注入多个类别的合成数据"
+                             "（比如同时给抓挠和甩身体都补合成数据）。HZ留空=跟--hz相同。"
+                             "传了这个就不再看--synthetic/--synthetic_label/--synthetic_hz。"
+                             "例: --synthetic_spec 抓挠:data/synthetic/scratch.npz "
+                             "--synthetic_spec 甩身体:data/synthetic/shake.npz")
     parser.add_argument("--dry_run", action="store_true",
                         help="只打印数据集分布，不训练模型")
     main(parser.parse_args())
