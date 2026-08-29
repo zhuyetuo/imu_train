@@ -43,6 +43,11 @@ from features import extract_features
 import joblib
 import json
 
+# 默认目标类别只有"抓挠"——保持旧调用方式（不传 --target_labels / 不设
+# TARGET_LABELS 环境变量）时行为跟改造前完全一致，不会因为这次多类别
+# 改造而意外多出别的类别的输出目录，也不会改变旧版脚本/流水线的产出结构。
+DEFAULT_TARGET_LABELS = ["抓挠"]
+
 ACC_CANDIDATES  = [["acc_x","acc_y","acc_z"],["AccX","AccY","AccZ"],["AX","AY","AZ"],["ax","ay","az"]]
 GYRO_CANDIDATES = [["gyro_x","gyro_y","gyro_z"],["gyr_x","gyr_y","gyr_z"],["GyroX","GyroY","GyroZ"],["GX","GY","GZ"]]
 TS_KEYWORDS     = ["time", "timestamp", "datetime", "chip_time", "pc_ms"]
@@ -125,10 +130,47 @@ def sliding_windows(data, window_size, stride):
     return np.stack(windows) if windows else np.empty((0, window_size, data.shape[1])), indices
 
 
+def _extract_label_segments(preds, confs, start_indices, classes, window_bounds, idx_to_ts,
+                            label, confidence_threshold):
+    """从逐窗口预测里抽出某一个目标类别（比如"抓挠"或"甩身体"）的连续片段。
+    以前这段逻辑写死判断 label=="抓挠"，现在改成单类别提取的独立函数，每个
+    目标类别各自调用一次——一个窗口序列里完全可能同时含多个类别的片段
+    （一段抓挠、另一段甩身体），必须分别扫描、分别产出，不能只扫一遍、
+    混在一个列表里（下游按类别分文件输出时会分不清）。"""
+    segs = []
+    in_run = False
+    run_first_i = None
+    run_last_i = None
+    for pred_id, conf, start_i in zip(preds, confs, start_indices):
+        is_hit = (classes[pred_id] == label) and (conf >= confidence_threshold)
+        if is_hit:
+            if not in_run:
+                in_run = True
+                run_first_i = start_i
+            run_last_i = start_i
+        elif in_run:
+            in_run = False
+            s0, _ = window_bounds(run_first_i)
+            _, e1 = window_bounds(run_last_i)
+            segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
+    if in_run:
+        s0, _ = window_bounds(run_first_i)
+        _, e1 = window_bounds(run_last_i)
+        segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
+    return segs
+
+
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", **kwargs):
+               resample_method="poly", target_labels=None, **kwargs):
+    # target_labels：要独立统计/输出的目标类别列表，默认只有"抓挠"，跟改造前
+    # 行为完全一致。多个类别时，output_dir 下会按类别各建一个子目录，互不
+    # 混淆（见函数末尾"保存 JSON 结果"部分）——CSV读取/降采样/重力对齐/特征
+    # 提取/模型预测这些步骤全部只做一遍，只有"从逐窗口预测里抽片段"这一步
+    # 按类别各跑一次，避免多类别时重复读CSV、重复跑模型（那部分才是真正
+    # 耗时的部分，跟类别数无关的这些步骤没有理由跑N遍）。
+    target_labels = target_labels or DEFAULT_TARGET_LABELS
     display_name = path.split("/")[-1].split("?")[0]  # works for both file paths and URLs
     if not scratch_only:
         print(f"\n── {display_name} ──")
@@ -193,111 +235,102 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             return center - half_pad, center + half_pad
         return s, s + window_size
 
-    # 打印逐窗口结果
-    scratch_segs = []
-    in_scratch   = False
-    run_first_i  = None
-    run_last_i   = None
-
+    # 打印逐窗口结果（多类别时，一个窗口只可能是argmax出来的那一个类别，
+    # marker标出它是不是命中了target_labels里的某一个，不再写死"抓挠"）
     if not quiet:
         print(f"  {'时间':<22} {'预测':<6} {'置信度':>6}")
         print(f"  {'-'*38}")
-
-    for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
-        label = classes[pred_id]
-        # 置信度低于阈值时，将抓挠预测视为非抓挠
-        if label == "抓挠" and conf < confidence_threshold:
-            label = f"({classes[pred_id]}?)"
-        t = idx_to_ts(start_i)
-        if not quiet:
+        for pred_id, conf, start_i in zip(preds, confs, start_indices):
+            label = classes[pred_id]
+            t = idx_to_ts(start_i)
             t_str = t.strftime("%Y-%m-%d %H:%M:%S") if t is not None else f"帧{start_i}"
-            marker = " ⬅ 抓挠" if label == "抓挠" else ""
+            is_target = label in target_labels and conf >= confidence_threshold
+            marker = f" ⬅ {label}" if is_target else ""
             print(f"  {t_str:<22} {label:<6} {conf:>6.2f}{marker}")
-
-        # 合并连续抓挠片段
-        if label == "抓挠":
-            if not in_scratch:
-                in_scratch  = True
-                run_first_i = start_i
-            run_last_i = start_i
-        elif in_scratch:
-            in_scratch = False
-            s0, _ = window_bounds(run_first_i)
-            _, e1 = window_bounds(run_last_i)
-            scratch_segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
-
-    if in_scratch:
-        s0, _ = window_bounds(run_first_i)
-        _, e1 = window_bounds(run_last_i)
-        scratch_segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
-
-    # 汇总
-    n_scratch = int((preds == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
-    # 之前这里 scratch_only 且没检测到抓挠时会直接return，连下面"保存JSON结果"
-    # 那块都被跳过了——批量推理时某个文件如果真的一段抓挠都没有（比如模型
-    # 误报率低了之后完全正常出现的情况），会导致它压根没有对应的 {stem}_infer.json，
-    # 后续 extract_clips.py 找不到文件、甚至在"这一批全部文件都零检出"时报错
-    # 说 _infer 目录下没有任何 *_infer.json。改成不提前return，只在没检出时
-    # 跳过下面的逐窗口/汇总打印（scratch_only本来的目的就是减少输出噪音），
-    # JSON该保存还是要保存。
-    skip_print = scratch_only and not scratch_segs
-
-    # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）
-    merged = []
-    for t0, t1, i0, i1 in scratch_segs:
-        if merged and t0 is not None and merged[-1][1] is not None:
-            gap = (t0 - merged[-1][1]).total_seconds()
-            if gap <= merge_gap_s:
-                merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
-                continue
-        merged.append([t0, t1, i0, i1])
-
-    # 计算每段实际窗口数（合并后重新统计）
-    def count_windows(s):
-        return sum(1 for k in range(len(preds))
-                   if start_indices[k] >= s[2] and start_indices[k] <= s[3])
-
-    # 过滤孤立单窗口片段（前后均不是抓挠）
-    if not keep_isolated:
-        before = len(merged)
-        merged = [s for s in merged if count_windows(s) > 1]
-        if before != len(merged):
-            dropped = before - len(merged)
-            msg = f"  [过滤] 丢弃 {dropped} 段孤立单窗口（keep_isolated=False）"
-            if scratch_only:
-                print(msg)
-            elif not quiet:
-                print(msg)
-
-    # 过滤窗口数不足的短片段
-    if min_windows > 1:
-        before = len(merged)
-        merged = [s for s in merged if count_windows(s) >= min_windows]
-        if not scratch_only and before != len(merged):
-            print(f"  [过滤] 丢弃 {before - len(merged)} 段（窗口数 < {min_windows}）")
 
     def fmt(t, i, suffix=""):
         return t.strftime(f"%H:%M:%S{suffix}") if t else f"帧{i}"
 
-    seg_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in scratch_segs) \
-              if scratch_segs else "未检测到抓挠"
-    merged_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
-                 if merged else "未检测到抓挠"
+    def count_windows(s):
+        return sum(1 for k in range(len(preds))
+                   if start_indices[k] >= s[2] and start_indices[k] <= s[3])
 
-    if not skip_print:
-        if scratch_only:
-            print(f"\n── {display_name} ──")
-        print(f"  【汇总】总窗口={len(preds)}  抓挠窗口={n_scratch}  ({n_scratch/len(preds)*100:.1f}%)")
-        print(f"  【片段】{seg_str}")
-        print(f"  【合并】{merged_str}")
+    ts_fmt = lambda t: t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if t is not None else None
+
+    # 每个目标类别独立扫描/合并/过滤/输出——一个窗口序列里完全可能同时含
+    # 多个类别的片段（一段抓挠、另一段甩身体），必须分开处理，不能只跑
+    # 一遍、混在同一份结果里（下游按类别拆目录就无从下手了）
+    merged_by_label = {}
+    for target_label in target_labels:
+        raw_segs = _extract_label_segments(preds, confs, start_indices, classes,
+                                           window_bounds, idx_to_ts,
+                                           target_label, confidence_threshold)
+
+        # 之前这里 scratch_only 且没检测到目标类别时会直接return，连下面
+        # "保存JSON结果"那块都被跳过了——批量推理时某个文件如果真的一段
+        # 目标行为都没有（比如模型误报率低了之后完全正常出现的情况），会
+        # 导致它压根没有对应的 {stem}_infer.json，后续 extract_clips.py
+        # 找不到文件、甚至在"这一批全部文件都零检出"时报错说 _infer 目录下
+        # 没有任何 *_infer.json。改成不提前return，只在没检出时跳过下面的
+        # 汇总打印（scratch_only本来的目的就是减少输出噪音），JSON该保存
+        # 还是要保存。
+        skip_print = scratch_only and not raw_segs
+
+        # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）
+        merged = []
+        for t0, t1, i0, i1 in raw_segs:
+            if merged and t0 is not None and merged[-1][1] is not None:
+                gap = (t0 - merged[-1][1]).total_seconds()
+                if gap <= merge_gap_s:
+                    merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
+                    continue
+            merged.append([t0, t1, i0, i1])
+
+        # 过滤孤立单窗口片段（前后均不是目标类别）
+        if not keep_isolated:
+            before = len(merged)
+            merged = [s for s in merged if count_windows(s) > 1]
+            if before != len(merged):
+                dropped = before - len(merged)
+                msg = f"  [过滤][{target_label}] 丢弃 {dropped} 段孤立单窗口（keep_isolated=False）"
+                if scratch_only:
+                    print(msg)
+                elif not quiet:
+                    print(msg)
+
+        # 过滤窗口数不足的短片段
+        if min_windows > 1:
+            before = len(merged)
+            merged = [s for s in merged if count_windows(s) >= min_windows]
+            if not scratch_only and before != len(merged):
+                print(f"  [过滤][{target_label}] 丢弃 {before - len(merged)} 段（窗口数 < {min_windows}）")
+
+        merged_by_label[target_label] = merged
+
+        n_hit = int(sum(1 for pid, c in zip(preds, confs)
+                        if classes[pid] == target_label and c >= confidence_threshold))
+        if not skip_print:
+            if scratch_only:
+                print(f"\n── {display_name} [{target_label}] ──")
+            seg_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in raw_segs) \
+                      if raw_segs else f"未检测到{target_label}"
+            merged_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
+                         if merged else f"未检测到{target_label}"
+            print(f"  【汇总:{target_label}】总窗口={len(preds)}  {target_label}窗口={n_hit}  "
+                  f"({n_hit/len(preds)*100:.1f}%)")
+            print(f"  【片段】{seg_str}")
+            print(f"  【合并】{merged_str}")
 
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
+    # 每个目标类别各写一份 JSON，落在 output_dir/{label}/ 下——不同类别的
+    # 片段绝不能混进同一个 *_infer.json，否则下游 extract_clips.py/
+    # review_to_labelstudio.py 没法区分"这段是抓挠还是甩身体"。逐窗口全
+    # 概率(windows)是模型一次预测算出来的、跟具体目标类别无关，每个类别
+    # 的文件里都完整存一份——好处是单看某个类别的_infer.json时仍能查到
+    # 当时模型对其它类别的判断，代价是同一次推理的windows在多个类别目录
+    # 下重复存了一份，用磁盘换清晰度（数据量本身不大，可接受）。
     if output_dir:
         import json as _json
-        os.makedirs(output_dir, exist_ok=True)
-        ts_fmt = lambda t: t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if t is not None else None
-
-        # 逐窗口全概率
         windows_out = []
         for i, (pred_id, start_i) in enumerate(zip(preds, start_indices)):
             t = idx_to_ts(start_i)
@@ -309,35 +342,51 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
                 "probs": prob_vec,
             })
 
-        # 抓挠片段（合并后）
-        segs_out = []
-        for t0, t1, i0, i1 in merged:
-            seg_probs = [probs[k, classes.index("抓挠")]
-                         for k in range(len(preds))
-                         if start_indices[k] >= i0 and start_indices[k] <= i1
-                         and "抓挠" in classes]
-            segs_out.append({
-                "start_ts":  ts_fmt(t0),
-                "end_ts":    ts_fmt(t1),
-                "conf_max":  float(max(seg_probs)) if seg_probs else 0.0,
-                "conf_mean": float(sum(seg_probs) / len(seg_probs)) if seg_probs else 0.0,
-                "n_windows": len(seg_probs),
-            })
-
-        out = {
-            "csv_file":        os.path.abspath(path),
-            "csv_basename":    os.path.basename(path),
-            "n_windows":       len(preds),
-            "n_scratch":       n_scratch,
-            "windows":         windows_out,
-            "scratch_segments": segs_out,
-        }
         stem = os.path.splitext(os.path.basename(path))[0]
-        out_path = os.path.join(output_dir, f"{stem}_infer.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            _json.dump(out, f, ensure_ascii=False, indent=2)
+        for target_label in target_labels:
+            merged = merged_by_label[target_label]
+            segs_out = []
+            for t0, t1, i0, i1 in merged:
+                seg_probs = [probs[k, classes.index(target_label)]
+                             for k in range(len(preds))
+                             if start_indices[k] >= i0 and start_indices[k] <= i1
+                             and target_label in classes]
+                segs_out.append({
+                    "start_ts":  ts_fmt(t0),
+                    "end_ts":    ts_fmt(t1),
+                    "conf_max":  float(max(seg_probs)) if seg_probs else 0.0,
+                    "conf_mean": float(sum(seg_probs) / len(seg_probs)) if seg_probs else 0.0,
+                    "n_windows": len(seg_probs),
+                })
 
-    return preds, classes, scratch_segs
+            n_hit = int(sum(1 for pid, c in zip(preds, confs)
+                            if classes[pid] == target_label and c >= confidence_threshold))
+            out = {
+                "csv_file":        os.path.abspath(path),
+                "csv_basename":    os.path.basename(path),
+                "n_windows":       len(preds),
+                "n_scratch":       n_hit,  # 字段名沿用旧版（曾经只有"抓挠"一个类别），
+                                            # 语义变成"本文件所在label子目录对应类别的命中窗口数"，
+                                            # 不改字段名是为了不用同步改review_to_labelstudio.py/
+                                            # imu_scratch_daily_stats.py/extract_clips.py里所有
+                                            # 读这个字段的地方——它们本来读的就是"目标类别的片段"，
+                                            # 现在目标类别通过目录结构区分，字段语义不需要变
+                "windows":         windows_out,
+                "scratch_segments": segs_out,
+            }
+            # output_dir 是"这一天"这一级的目录，每个类别的_infer.json落在
+            # output_dir/{label}/_infer/ 下——跟以前"--output_dir直接就是
+            # 落盘目录"不同（以前只有一个类别，调用方/bash脚本自己拼好
+            # .../_infer再传进来）；现在一次调用要覆盖多个类别，"往哪个
+            # label子目录、要不要_infer这一层"必须由这里统一决定，不能再
+            # 依赖调用方每个类别各传一次不同路径
+            label_out_dir = os.path.join(output_dir, target_label, "_infer")
+            os.makedirs(label_out_dir, exist_ok=True)
+            out_path = os.path.join(label_out_dir, f"{stem}_infer.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                _json.dump(out, f, ensure_ascii=False, indent=2)
+
+    return preds, classes, merged_by_label
 
 
 def main():
@@ -370,8 +419,19 @@ def main():
     parser.add_argument("--workers", type=int, default=-1,
                         help="并行进程数（默认-1=用全部CPU核，1=单进程）")
     parser.add_argument("--output_dir", default="",
-                        help="保存每个文件推理结果 JSON 的目录（留空不保存）")
+                        help="保存每个文件推理结果 JSON 的目录（留空不保存），通常传当天的"
+                             "结果根目录（比如 RESULT_ROOT/{day}）。每个目标类别会各自落在"
+                             "output_dir/{label}/_infer/{stem}_infer.json——注意跟旧版不同，"
+                             "旧版output_dir就是json直接落盘的目录（调用方自己拼好.../_infer"
+                             "再传进来）；现在一次调用要覆盖多个类别，'{label}/_infer'这一层"
+                             "统一由本脚本自己拼，不用调用方每个类别各传一次不同路径")
     parser.add_argument("--no_gravity_align", action="store_true")
+    parser.add_argument("--target_labels", default="抓挠",
+                        help="要独立检测/统计/输出的目标类别，逗号分隔，比如'抓挠,甩身体'"
+                             "（默认只有'抓挠'，保持跟改造前完全一致的行为——不传这个参数的"
+                             "旧调用方式不受影响，也不会多出别的类别子目录）。CSV只读一次、"
+                             "特征只提一次、模型只预测一次，只有片段提取/合并/JSON输出这几步"
+                             "按类别各跑一次，不是每个类别重新推理一遍")
     parser.add_argument("--resample_method", default="poly", choices=["poly", "training_match"],
                         help="device_hz != model_hz 时用哪种降采样算法（默认poly=scipy "
                              "resample_poly）。training_match 复刻 witmotion_imu 生成训练数据"
@@ -379,6 +439,10 @@ def main():
                              "差异（src/eval/compare_resample_methods.py），源数据不是已经"
                              "预先降采样好的16Hz witmotion文件时（比如TF设备）值得两种都试试")
     args = parser.parse_args()
+
+    target_labels = [t.strip() for t in args.target_labels.split(",") if t.strip()]
+    if not target_labels:
+        target_labels = list(DEFAULT_TARGET_LABELS)
 
     # 加载模型 + 元数据
     model = joblib.load(args.model)
@@ -413,8 +477,10 @@ def main():
 
     print(f"[推理] 设备Hz={device_hz}  模型Hz={model_hz}  窗口={window_s}s  步长={stride_s}s")
 
-    if "抓挠" not in classes:
-        print(f"[警告] 模型类别中没有'抓挠': {classes}")
+    print(f"[推理] 目标类别: {target_labels}")
+    for tl in target_labels:
+        if tl not in classes:
+            print(f"[警告] 模型类别中没有'{tl}': {classes}")
 
     # 收集文件列表
     files = []
@@ -444,7 +510,8 @@ def main():
                               keep_isolated=not args.no_keep_isolated,
                               label_mode=label_mode,
                               output_dir=out_dir,
-                              resample_method=args.resample_method)
+                              resample_method=args.resample_method,
+                              target_labels=target_labels)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None
@@ -454,17 +521,26 @@ def main():
         delayed(_run_one)(p) for p in tqdm(files, desc="推理进度", unit="文件")
     )
 
-    all_scratch = 0
-    all_total   = 0
+    # 每个目标类别独立累计窗口命中数——以前只认"抓挠"一个类别，现在每个
+    # target_label各自一份计数器，不能混在一起
+    all_hits  = {tl: 0 for tl in target_labels}
+    all_total = 0
     for result in results:
         if result:
-            preds, _, _ = result
-            all_scratch += int((np.array(preds) == classes.index("抓挠")).sum()) if "抓挠" in classes else 0
-            all_total   += len(preds)
+            preds, _, _merged_by_label = result
+            for tl in target_labels:
+                if tl in classes:
+                    all_hits[tl] += int((np.array(preds) == classes.index(tl)).sum())
+            all_total += len(preds)
 
     if len(files) > 1:
         print(f"\n{'='*50}")
-        print(f"批量汇总: 总窗口={all_total}  抓挠窗口={all_scratch}  ({all_scratch/all_total*100:.1f}%)" if all_total else "无有效数据")
+        if all_total:
+            for tl in target_labels:
+                print(f"批量汇总[{tl}]: 总窗口={all_total}  {tl}窗口={all_hits[tl]}  "
+                      f"({all_hits[tl]/all_total*100:.1f}%)")
+        else:
+            print("无有效数据")
 
 
 if __name__ == "__main__":

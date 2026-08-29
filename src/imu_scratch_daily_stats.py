@@ -9,10 +9,12 @@
 三条不同狗的CSV。按cam分组会把好几条狗的数据合并成一条，佩戴时长和抓挠
 次数都会翻好几倍（实测8-14那天IMU1的佩戴时长算出40.7小时，一天才24小时）。
 
-输入: infer_result_xxx/{day}/_infer/*_infer.json（infer_csv_scratch.py的产出）
-输出: 每天一份CSV，写在 infer_result_xxx/{day}/imu_daily_scratch_stats.csv，
-      每行是这天某个IMU的统计量。按天分开存是为了不互相覆盖——所有天共用
-      root下一个文件的话，跑完8-14再跑8-15就把8-14那份冲掉了。
+输入: infer_result_xxx/{day}/{label}/_infer/*_infer.json（infer_csv_scratch.py的产出，
+      label默认"抓挠"，见--label/infer_csv_scratch.py的--target_labels）
+输出: 每天一份CSV，写在 infer_result_xxx/{day}/{label}/imu_daily_scratch_stats.csv，
+      每行是这天某个IMU的统计量。按天+类别分开存是为了不互相覆盖——所有天
+      共用root下一个文件的话，跑完8-14再跑8-15就把8-14那份冲掉了；不同类别
+      （比如"抓挠"和"甩身体"）也不能共用一份，否则事件次数会混在一起分不清。
 
 基线跟输出范围是两回事：--days 只限制"输出哪几天"，基线永远拿root下全部
 已跑过推理的天来算。只读请求那一天的话永远算不出基线（第一次跑8-19就只有
@@ -235,10 +237,18 @@ def _delta_score(current_count, baseline_count, current_dur_min, baseline_dur_mi
     return max(one(current_count, baseline_count, False), one(current_dur_min, baseline_dur_min, True))
 
 
-def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
+def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean", label="抓挠"):
     """返回按(date, imu_label)排序的统计行列表。min_conf/conf_field跟
     ML_PRELABEL那边筛"算不算抓挠"用的是同一个标准，默认conf_mean>=0.8
     （跟ML_CONF_FIELD/ML_MIN_CONF保持一致，不是conf_max）。
+
+    label：要统计哪个目标类别，默认"抓挠"（保持旧行为不变）。
+    infer_csv_scratch.py 现在按类别把 *_infer.json 分别放进
+    {infer_root}/{day}/{label}/_infer/ 子目录（见其DEFAULT_TARGET_LABELS/
+    --target_labels），所以这里也要按label定位对应的_infer目录，不能再
+    直接找{infer_root}/{day}/_infer——不同类别的_infer.json内容(scratch_
+    segments字段)本来就只代表各自那个类别的片段，混着读会把"抓挠"和
+    "甩身体"的事件算到一起。
 
     days 只筛"输出哪几天"，不限制"读哪几天"——基线是拿这只狗别的日子
     的数据算中位数，只读请求的那一天的话永远算不出基线（第一次跑8-19
@@ -248,14 +258,14 @@ def compute_stats(infer_root, days=None, min_conf=0.8, conf_field="conf_mean"):
     几天的基线会自动变准，重跑一次就能拿到更新后的数字。"""
     day_dirs = []
     for d in sorted(os.listdir(infer_root)):
-        infer_dir = os.path.join(infer_root, d, "_infer")
+        infer_dir = os.path.join(infer_root, d, label, "_infer")
         if os.path.isdir(infer_dir):
             day_dirs.append((d, infer_dir))
 
     if days:
         missing = [d for d in days if d not in {day for day, _ in day_dirs}]
         for d in missing:
-            print(f"[跳过] {os.path.join(infer_root, d, '_infer')} 不存在")
+            print(f"[跳过] {os.path.join(infer_root, d, label, '_infer')} 不存在")
 
     # 先把每个(imu, date)的原始特征都算出来，再统一算基线/持续天数——
     # 基线需要看同一个IMU在别的日子的数据，必须等所有天都读完才能算
@@ -385,10 +395,17 @@ def main():
     parser.add_argument("--conf_field", default="conf_mean", choices=["conf_max", "conf_mean"],
                         help="用哪个置信度字段判断（默认conf_mean，不是conf_max——"
                              "跟ML_CONF_FIELD保持一致）")
+    parser.add_argument("--label", default="抓挠",
+                        help="要统计的目标类别（默认'抓挠'，保持跟改造前完全一致的行为）。"
+                             "infer_csv_scratch.py按类别把_infer.json分别放进"
+                             "{infer_root}/{day}/{label}/_infer/，这里要传同一个label才能"
+                             "找到对应的推理结果，输出的CSV也会落在"
+                             "{infer_root}/{day}/{label}/imu_daily_scratch_stats.csv下")
     args = parser.parse_args()
 
     days = [d.strip() for d in args.days.split(",") if d.strip()] or None
-    rows = compute_stats(args.infer_root, days, min_conf=args.min_conf, conf_field=args.conf_field)
+    rows = compute_stats(args.infer_root, days, min_conf=args.min_conf,
+                         conf_field=args.conf_field, label=args.label)
 
     if not rows:
         print(f"[警告] 没有统计出任何数据，检查--infer_root/--days是否正确")
@@ -403,7 +420,10 @@ def main():
 
     for day in sorted(by_day):
         day_rows = by_day[day]
-        out_path = os.path.join(args.infer_root, day, OUTPUT_BASENAME)
+        # 落在{infer_root}/{day}/{label}/下，不是{infer_root}/{day}/——
+        # 跟infer_csv_scratch.py按类别分出来的目录结构对齐，"抓挠"和
+        # "甩身体"的统计CSV各自放在自己的类别子目录里，不会互相覆盖
+        out_path = os.path.join(args.infer_root, day, args.label, OUTPUT_BASENAME)
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=COLUMNS)
