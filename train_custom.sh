@@ -79,6 +79,11 @@ TAG=""                    # 输出目录后缀（留空=不加，跟原来路径
                            # 同一个DATE想同时保留majority/center两个版本的模型时，
                            # 各自传一个不同的--tag，避免第二次跑把第一次的processed_dir/
                            # results覆盖掉（两次跑的PROCESSED_DIR/结果目录名都会带上这个后缀）
+SKIP_SYN=0                 # 1=只训练方案A(纯标注)，跳过生成合成数据和方案B。
+                           # 已经确认合成数据在短窗口下会让活动/甩身体的误判
+                           # 变多（见pm_skin_scoring/docs或对话记录），不想用
+                           # 合成数据时加这个参数，省掉合成数据生成+方案B训练
+                           # 的时间
 CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓存(processed_dir/
                            # results/合成数据npz)再重新生成，默认0=不删（复用已有的）。
                            # 数据处理逻辑改了但没删缓存，新旧代码生成的中间产物混用，
@@ -109,6 +114,7 @@ while [[ $# -gt 0 ]]; do
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
+    --skip_syn)       SKIP_SYN=1;          shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
@@ -392,45 +398,54 @@ python src/ml/train.py --hz "$HZ" --model rf \
   > "$LOG_NO_SYN" 2>&1 &
 PID_A=$!
 
-# ── 生成合成数据（每个--label各自生成一份）──────────────────────────
-# --window_s/--stride_s要跟上面预处理真实数据用的保持一致，不然合成
-# 窗口跟真实窗口点数对不上，train.py合并训练集时特征维度会对不齐
-SYNTHETIC_SPEC_ARGS=()
-for _i in "${!LABELS[@]}"; do
-  _lbl="${LABELS[$_i]}"
-  _sp="${SYNTHETIC_PATHS[$_i]}"
-  echo "▶ 生成合成数据（${_lbl}，n_aug=${N_AUG}）..."
-  python src/data/synthesize_scratch.py \
-    --json "$JSON" \
-    --csv_dir "$CSV_DIR" \
-    --output "$_sp" \
+if [[ "$SKIP_SYN" == "1" ]]; then
+  echo ""
+  echo "▶ --skip_syn：跳过生成合成数据和方案B，只训练方案A"
+else
+  # ── 生成合成数据（每个--label各自生成一份）──────────────────────────
+  # --window_s/--stride_s要跟上面预处理真实数据用的保持一致，不然合成
+  # 窗口跟真实窗口点数对不上，train.py合并训练集时特征维度会对不齐
+  SYNTHETIC_SPEC_ARGS=()
+  for _i in "${!LABELS[@]}"; do
+    _lbl="${LABELS[$_i]}"
+    _sp="${SYNTHETIC_PATHS[$_i]}"
+    echo "▶ 生成合成数据（${_lbl}，n_aug=${N_AUG}）..."
+    python src/data/synthesize_scratch.py \
+      --json "$JSON" \
+      --csv_dir "$CSV_DIR" \
+      --output "$_sp" \
+      --processed_dir "$PROCESSED_DIR" \
+      --remap "$REMAP" \
+      --label "$_lbl" \
+      --hz "$HZ" \
+      --n_aug "$N_AUG" \
+      $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
+      $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
+    SYNTHETIC_SPEC_ARGS+=(--synthetic_spec "${_lbl}:${_sp}")
+  done
+
+  # ── 方案 B：带合成数据模型（后台运行）───────────────────
+  echo ""
+  echo "▶ 方案 B：带合成数据模型（后台运行，合成类别: ${LABELS[*]}）..."
+  python src/ml/train.py --hz "$HZ" --model rf \
     --processed_dir "$PROCESSED_DIR" \
     --remap "$REMAP" \
-    --label "$_lbl" \
-    --hz "$HZ" \
-    --n_aug "$N_AUG" \
-    $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
-    $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
-  SYNTHETIC_SPEC_ARGS+=(--synthetic_spec "${_lbl}:${_sp}")
-done
-
-# ── 方案 B：带合成数据模型（后台运行）───────────────────
-echo ""
-echo "▶ 方案 B：带合成数据模型（后台运行，合成类别: ${LABELS[*]}）..."
-python src/ml/train.py --hz "$HZ" --model rf \
-  --processed_dir "$PROCESSED_DIR" \
-  --remap "$REMAP" \
-  "${SYNTHETIC_SPEC_ARGS[@]}" \
-  --results_dir "$RESULTS_DIR" \
-  --feat_workers "$FEAT_WORKERS" \
-  > "$LOG_WITH_SYN" 2>&1 &
-PID_B=$!
+    "${SYNTHETIC_SPEC_ARGS[@]}" \
+    --results_dir "$RESULTS_DIR" \
+    --feat_workers "$FEAT_WORKERS" \
+    > "$LOG_WITH_SYN" 2>&1 &
+  PID_B=$!
+fi
 
 # ── 等待两个训练完成，实时把两边的日志打到当前终端（加[A]/[B]前缀区分）──
 # 之前这里是纯等待，进度条/特征提取日志全写进/tmp的文件里，只能另开
 # 终端手动tail -f才看得到；现在直接在这个终端里实时滚动显示，不用切窗口。
 echo ""
-echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志，[A]=纯标注 [B]=带合成）..."
+if [[ "$SKIP_SYN" == "1" ]]; then
+  echo "⏳ 等待方案A训练完成（下面实时滚动的是训练日志）..."
+else
+  echo "⏳ 等待两个模型训练完成（下面实时滚动的是训练日志，[A]=纯标注 [B]=带合成）..."
+fi
 # tqdm进度条是靠\r（回车不换行）原地刷新的，不是每次都换行；sed要等到\n
 # 才会把攒的内容当一整行输出，\r的更新会一直卡在缓冲区里，直到最后进度条
 # 跑完打印真正的\n才一次性冒出来，等于白等——这也是之前"卡住不动，跑完
@@ -462,14 +477,18 @@ _throttle() {
 }
 tail -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[A] /' &
 TAIL_A=$!
-tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[B] /' &
-TAIL_B=$!
+if [[ "$SKIP_SYN" != "1" ]]; then
+  tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[B] /' &
+  TAIL_B=$!
+fi
 
 wait $PID_A && echo "  ✅ 方案 A 完成" || echo "  ❌ 方案 A 失败，见 $LOG_NO_SYN"
-wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 $LOG_WITH_SYN"
+if [[ "$SKIP_SYN" != "1" ]]; then
+  wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 $LOG_WITH_SYN"
+fi
 
-kill "$TAIL_A" "$TAIL_B" 2>/dev/null
-wait "$TAIL_A" "$TAIL_B" 2>/dev/null
+kill "$TAIL_A" "${TAIL_B:-}" 2>/dev/null || true
+wait "$TAIL_A" "${TAIL_B:-}" 2>/dev/null || true
 
 # ── 打印结果对比（过滤进度条噪音）────────────────────────
 _show_log() {
@@ -485,11 +504,15 @@ echo "=================================================="
 echo ""
 echo "── 方案 A（纯标注）──"
 _show_log "$LOG_NO_SYN"
-echo ""
-echo "── 方案 B（带合成）──"
-_show_log "$LOG_WITH_SYN"
+if [[ "$SKIP_SYN" != "1" ]]; then
+  echo ""
+  echo "── 方案 B（带合成）──"
+  _show_log "$LOG_WITH_SYN"
+fi
 
 echo ""
 echo "模型路径:"
 echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
-echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
+if [[ "$SKIP_SYN" != "1" ]]; then
+  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
+fi
