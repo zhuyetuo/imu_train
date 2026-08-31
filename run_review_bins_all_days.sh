@@ -83,6 +83,16 @@
 
 set -e
 
+# 全靠环境变量驱动、没有位置参数，之前没接-h/--help，直接跑到下面
+# DATA_ROOT/MODEL的必填检查就退出了，看不到任何说明——退出码非0，
+# 用${VAR:?...}这种语法在没设-h专门判断时没法优雅打印帮助。这里在
+# 必填检查前拦一下，打印文件头这段环境变量说明(sed提取第2~82行的
+# 注释块，跟train_custom.sh的_print_help()是同一个套路)
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,82p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 # sklearn新版本把force_all_finite改名成ensure_all_finite了，旧版本
 # 训出来的模型/依赖库内部还在用旧参数名，每个worker进程都会打印一遍
 # FutureWarning，WORKERS开多的时候刷屏刷得很厉害——纯粹是版本过渡期的
