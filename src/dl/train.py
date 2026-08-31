@@ -129,6 +129,21 @@ def main(args):
     n_classes   = len(classes)
     print(f"[dl/train] 数据形状: {X_tr.shape}, 类别数: {n_classes}")
 
+    # 原始窗口数据里如果混了NaN/Inf（这个项目的自采数据管线上游出过好几次
+    # 数据质量问题：空文件、缺列、重采样异常……），树模型(ml/train.py)大多
+    # 数实现能容忍/绕过，但下面标准化一算均值/方差，NaN会直接传染到整个
+    # 数组，"标准化"等于白做，还会把问题伪装成"看起来跑起来了、实际全是
+    # 垃圾"——不能让它悄悄过去，训练前必须先挡住并报出来，不然debug起来
+    # 很难定位到底是哪一步出的问题。
+    for _name, _arr in (("X_tr", X_tr), ("X_val", X_val), ("X_te", X_te)):
+        if len(_arr) and not np.isfinite(_arr).all():
+            n_bad = int((~np.isfinite(_arr)).sum())
+            raise ValueError(
+                f"[dl/train] {_name} 里有 {n_bad} 个非法值(NaN/Inf)，不是标准化能解决的问题——"
+                f"说明预处理/合并阶段的原始数据本身就有问题，需要往前查是哪批数据、"
+                f"哪几个窗口坏的（可以用np.isnan(X).any(axis=(1,2))对着record_id/窗口"
+                f"索引定位），不能带着非法值继续训练")
+
     # 逐通道标准化（z-score，用训练集自己的均值/方差）——树模型(ml/train.py
     # 那边)对特征量纲不敏感，但CNN/LSTM这类梯度下降训练的模型很敏感：
     # 加速度/陀螺仪/姿态角这8个通道数值范围差异很大，不做标准化容易训练
@@ -199,6 +214,11 @@ def main(args):
                 yb = batch[1].to(device)
                 loss = criterion(logits, yb)
             loss.backward()
+            # 梯度裁剪：不管nan/inf是输入脏数据引起的还是单纯学习率/架构
+            # 导致的梯度爆炸，都先用这个兜底防止某一步梯度突然爆炸把权重
+            # 冲成nan（一旦权重变nan，后面每一步loss都是nan，训练等于
+            # 全部作废，只能靠这一步提前防住）
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
             total_loss += loss.item()
 
