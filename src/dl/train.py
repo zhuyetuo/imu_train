@@ -199,6 +199,33 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     best_model_path = os.path.join(out_dir, f"dl_{args.model}_best.pt")
 
+    # 推理端(src/infer_csv_scratch.py)要能直接load这个.pt跑实时推理，
+    # 但torch.save(model.state_dict(),...)只存了权重，没有：(1)怎么
+    # 重建模型结构（model_name+超参cfg）(2)输出的n个logit对应哪个类别、
+    # 顺序是什么(3)推理输入要用哪套window_size/hz/gravity_align(4)最关键的——
+    # 训练时对输入做了逐通道z-score标准化(ch_mean/ch_std)，推理端如果不用
+    # 完全相同的均值方差重新标准化，输入分布跟训练时对不上，模型效果会
+    # 明显下降但不会报错，是那种很难定位的隐性bug。所以单独存一份
+    # dl_{model}_best.json，路径命名跟ml/train.py的.pkl+.json配对方式
+    # 保持一致，推理端认出.pt后缀就去找同名.json。
+    infer_meta = {
+        "model": args.model,
+        "hz": args.hz,
+        "window_size": window_size,
+        "stride": int(meta["stride"]),
+        "n_channels": n_channels,
+        "classes": classes,
+        "gravity_aligned": str(meta.get("gravity_aligned", "True")) == "True",
+        "label_mode": meta.get("label_mode", "majority"),
+        "m2m": m2m,
+        "ch_mean": ch_mean.tolist(),
+        "ch_std": ch_std.tolist(),
+        "model_cfg": cfg[args.model],
+        "remap": args.remap,
+    }
+    with open(os.path.join(out_dir, f"dl_{args.model}_best.json"), "w", encoding="utf-8") as f:
+        json.dump(infer_meta, f, ensure_ascii=False, indent=2)
+
     pbar = tqdm(range(1, cfg["epochs"] + 1), desc="训练", unit="epoch")
     for epoch in pbar:
         model.train()
