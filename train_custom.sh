@@ -60,10 +60,13 @@ trap cleanup INT TERM
 # ── 默认参数 ──────────────────────────────────────────────
 DATE=""
 HZ=16
-MISSING_STRATEGY="drop"    # drop(默认)/ffill/none——acc/gyro缺失值(蓝牙断联)
-                           # 怎么处理，见src/data/labelstudio_to_custom.py的
-                           # --missing_strategy说明。想对比不同处理方式训出来
-                           # 的模型效果，配合--tag分别跑几个版本
+MISSING_STRATEGY="drop"    # drop(默认)/ffill/none/drop_window——acc/gyro缺失值
+                           # (蓝牙断联)怎么处理，见src/data/labelstudio_to_custom.py的
+                           # --missing_strategy说明。drop_window是行级不处理(保留原始
+                           # NaN，等价none)，改成在切窗口那一步整窗丢弃(见
+                           # src/data/preprocess.py的--drop_nan_windows)，跟drop
+                           # (丢NaN那一行、窗口其它帧还留着)不是一回事——想对比不同
+                           # 处理方式训出来的模型效果，配合--tag分别跑几个版本
 MODEL_TYPE="rf"            # rf(默认)/xgb/lgbm/catboost/extratrees/histgb，
                            # 对应src/ml/train.py的--model，见该文件MODELS字典
 N_AUG=50
@@ -117,7 +120,8 @@ _print_help() {
                           默认等于--hz，见上面用法示例的说明）
   --hz HZ                训练目标采样率（默认16）
   --model TYPE           rf(默认)/xgb/lgbm/catboost/extratrees/histgb
-  --missing_strategy S   drop(默认)/ffill/none，acc/gyro缺失值(蓝牙断联)处理方式
+  --missing_strategy S   drop(默认)/ffill/none/drop_window，acc/gyro缺失值(蓝牙断联)
+                          处理方式：drop_window=整窗丢弃(不是丢行)，见上面说明
   --label_mode MODE      majority(默认，多数投票)/center(窗口中心帧)
   --window_s SEC         训练窗口长度秒数（默认用configs/data.yaml的2秒）
   --stride_s SEC         训练窗口步长秒数（默认用configs/data.yaml的1秒）
@@ -176,6 +180,16 @@ fi
 if [[ -z "$DATE" ]]; then
   echo "用法: bash train_custom.sh --date <DATE>  (例: --date 2026_7_23，--help 查看全部参数)"
   exit 1
+fi
+
+# drop_window是preprocess.py那边的概念（整窗丢弃），labelstudio_to_custom.py
+# 本身不认这个值——它只负责行级处理，要传"none"让它原样保留NaN，不然NaN在
+# 行级就被drop/ffill处理掉了，preprocess.py那边根本看不到、没法按窗口过滤
+LS_MISSING_STRATEGY="$MISSING_STRATEGY"
+DROP_NAN_WINDOWS_FLAG=""
+if [[ "$MISSING_STRATEGY" == "drop_window" ]]; then
+  LS_MISSING_STRATEGY="none"
+  DROP_NAN_WINDOWS_FLAG="--drop_nan_windows"
 fi
 
 PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
@@ -284,7 +298,7 @@ if [[ ! -f "$CSV" || "$CLEAN" == "1" ]]; then
     --json "$JSON" \
     --output "$CSV" \
     --csv_dir "$CSV_DIR" \
-    --missing_strategy "$MISSING_STRATEGY" \
+    --missing_strategy "$LS_MISSING_STRATEGY" \
     --keep_labels
 fi
 
@@ -348,7 +362,7 @@ print(f'  合并完成，共 {len(merged)} 条任务')
         --json "$_ejson" \
         --output "$_ecsv" \
         --csv_dir "$CSV_DIR" \
-        --missing_strategy "$MISSING_STRATEGY" \
+        --missing_strategy "$LS_MISSING_STRATEGY" \
         --keep_labels
     fi
 
@@ -458,6 +472,7 @@ else
     --label_mode "$LABEL_MODE" \
     $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
     $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
+    $DROP_NAN_WINDOWS_FLAG \
     --hz "$HZ"
 fi
 
