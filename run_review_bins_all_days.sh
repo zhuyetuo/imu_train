@@ -86,6 +86,24 @@ set -e
 # ── 参数与默认值 ──────────────────────────────────────────
 DATA_ROOT="${DATA_ROOT:?请设置 DATA_ROOT 环境变量，例: DATA_ROOT=data/multicam_multiimu}"
 MODEL="${MODEL:?请设置 MODEL 环境变量，例: MODEL=results/processed_2026_7_23/16hz_remap_custom_3class/ml_rf.pkl}"
+# 支持传通配符（比如某个目录下只有一个.pkl，懒得写全名的话直接
+# MODEL="results/.../lgbm/*.pkl"）——shopt nullglob避免匹配不到时
+# $MODEL 原样当成字面量传给python报"文件不存在"这种更难懂的报错，
+# 直接在这里就报清楚到底匹配到几个文件
+if [[ "$MODEL" == *'*'* ]]; then
+  shopt -s nullglob
+  _model_matches=($MODEL)
+  shopt -u nullglob
+  if [[ ${#_model_matches[@]} -eq 0 ]]; then
+    echo "[错误] MODEL 通配符 \"$MODEL\" 没有匹配到任何文件"
+    exit 1
+  elif [[ ${#_model_matches[@]} -gt 1 ]]; then
+    echo "[错误] MODEL 通配符 \"$MODEL\" 匹配到多个文件，写具体文件名指定用哪个:"
+    printf '  %s\n' "${_model_matches[@]}"
+    exit 1
+  fi
+  MODEL="${_model_matches[0]}"
+fi
 RESULT_ROOT="${RESULT_ROOT:-infer_result}"
 TARGET_LABELS="${TARGET_LABELS:-抓挠}"   # 逗号分隔，默认只有"抓挠"，向后兼容旧用法
 EXCLUDE_DAYS="${EXCLUDE_DAYS:-}"
