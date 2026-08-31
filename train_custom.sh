@@ -421,22 +421,37 @@ print(f'合并完成: {len(frames)}个批次, 共{len(merged)}行 -> ${MERGED_CS
   CSV="$MERGED_CSV"
 fi
 
-# ── 预处理（自动清除旧缓存）──────────────────────────────
-echo ""
-echo "▶ 预处理数据..."
-python src/data/preprocess.py \
-  --dataset custom \
-  --raw_csv_custom "$CSV" \
-  --output_dir "$PROCESSED_DIR" \
-  --config configs/data.yaml \
-  --split_strategy "$SPLIT_STRATEGY" \
-  --train_ratio "$TRAIN_RATIO" \
-  --val_ratio "$VAL_RATIO" \
-  --test_ratio "$TEST_RATIO" \
-  --label_mode "$LABEL_MODE" \
-  $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
-  $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
-  --hz "$HZ"
+# ── 预处理（复用已有缓存，--clean才强制重新生成）─────────────────
+# preprocess.py本身不认--clean/不会自己判断"要不要重新处理"，每次调用
+# 都会无条件重新切分train/val/test.npz、顺带删掉ml_features.npz特征缓存
+# （逼着train.py重新提特征）。之前这里没有跳过判断，每次跑（哪怕只是
+# 换个--model重新训练、预处理这步的输出根本没变）都要重新预处理+重新
+# 提特征，白白浪费好几分钟。预处理的产出（train/val/test.npz、特征）
+# 只跟数据本身+hz/窗口/划分这些参数有关，跟--model完全无关，没必要
+# 因为换模型就重新跑。跟前面步骤0/1一样，用文件是否已存在做跳过判断，
+# --clean时才强制重新生成。
+PREPROCESSED_MARKER="${PROCESSED_DIR}/${HZ}hz/train.npz"
+if [[ -f "$PREPROCESSED_MARKER" && "$CLEAN" != "1" ]]; then
+  echo ""
+  echo "▶ 预处理数据：$PREPROCESSED_MARKER 已存在，跳过（换--model不需要重新预处理；"
+  echo "  改过预处理/特征相关代码、或者数据有更新，加--clean强制重新生成）"
+else
+  echo ""
+  echo "▶ 预处理数据..."
+  python src/data/preprocess.py \
+    --dataset custom \
+    --raw_csv_custom "$CSV" \
+    --output_dir "$PROCESSED_DIR" \
+    --config configs/data.yaml \
+    --split_strategy "$SPLIT_STRATEGY" \
+    --train_ratio "$TRAIN_RATIO" \
+    --val_ratio "$VAL_RATIO" \
+    --test_ratio "$TEST_RATIO" \
+    --label_mode "$LABEL_MODE" \
+    $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
+    $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
+    --hz "$HZ"
+fi
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
 echo ""
