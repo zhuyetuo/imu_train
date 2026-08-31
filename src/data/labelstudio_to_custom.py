@@ -100,8 +100,21 @@ def parse_ts(df: pd.DataFrame, ts_col: str) -> pd.Series:
 
 
 # ── 主转换逻辑 ────────────────────────────────────────────────────────────────
-def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str):
-    """加载单个传感器 CSV，返回 (df, acc_cols, gyro_cols, ts_col) 或 None。"""
+def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str, missing_strategy: str = "drop"):
+    """加载单个传感器 CSV，返回 (df, acc_cols, gyro_cols, ts_col) 或 None。
+
+    missing_strategy：acc/gyro里蓝牙断联留下的缺失值(NaN)怎么处理：
+      "drop"（默认）——丢掉缺失的那几行，不编造数据。真实数据不该有缺失，
+        训练数据（不像实时推理要求时间连续不能有空隙）能承受丢几行造成
+        的小缺口。
+      "ffill"——用前后值填充（旧版本一度用过这个，跟infer_csv_scratch.py
+        实时推理那边保持一致），会"编造"出这几个点本来没采集到的数值。
+      "none"——完全不处理，保留原始NaN（这是最早、改动之前一直用的方式，
+        NaN会一路带进CSV/预处理/最终npz。RF/XGBoost/LightGBM大多原生
+        兼容NaN不会报错，但神经网络完全不能容忍，训练会直接loss变nan）。
+    做成可选项是因为不确定NaN会不会影响树模型的效果——之前一直是"none"
+    这个状态训出来的树模型，万一效果反而更好，能重新跑一版对比，而不是
+    直接替换掉、没法回头验证。"""
     if not url_or_none:
         return None
     try:
@@ -120,21 +133,26 @@ def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str):
     if df["_ts"].isna().all():
         print(f"  [错误] {sensor_name}: 时间戳解析失败")
         return None
-    # 蓝牙断联等原因，原始CSV里acc/gyro偶尔会有缺失行（NaN）——
-    # infer_csv_scratch.py（实时推理）读CSV时早就用ffill().bfill()填过
-    # 这个坑了，这里（生成训练数据）之前没做同样处理，NaN会原样混进训练
-    # CSV，一路带到预处理/窗口/最终npz里。RF/XGBoost/LightGBM这些树模型
-    # 大多原生兼容NaN(当成缺失值处理)，没报错，掩盖了这个问题；神经网络
-    # 完全不能容忍NaN，训练直接loss变nan——本质是这里数据没洗干净，跟
-    # 用什么模型训练无关，两边（训练/推理）处理逻辑不一致更是隐患，统一
-    # 成跟推理那边一样的填充方式
-    n_nan_before = int(df[acc_cols + (gyro_cols or [])].isna().sum().sum())
-    if n_nan_before:
-        print(f"  [警告] {sensor_name}: acc/gyro有{n_nan_before}个缺失值（蓝牙断联？），"
-              f"前后值填充")
-        df[acc_cols] = df[acc_cols].ffill().bfill()
-        if gyro_cols:
-            df[gyro_cols] = df[gyro_cols].ffill().bfill()
+    # 蓝牙断联等原因，原始CSV里acc/gyro偶尔会有缺失行（NaN），处理方式见
+    # missing_strategy——丢弃的是整行(该行所有acc/gyro列)，不是只丢NaN的
+    # 那一列，避免同一行里部分列是真实值、部分列因为其它列缺失被迫也丢掉
+    # 这种不必要的浪费：ACC_CANDIDATES/GYRO_CANDIDATES匹配到的每组列本来
+    # 就是同一颗传感器的同一次采样，缺一个通道这一行本来就不完整。
+    all_cols = acc_cols + (gyro_cols or [])
+    n_nan_before = int(df[all_cols].isna().any(axis=1).sum())
+    if n_nan_before and missing_strategy != "none":
+        action = "丢弃这些行（不做前后值填充，避免编造数据）" if missing_strategy == "drop" \
+                 else "前后值填充"
+        print(f"  [警告] {sensor_name}: acc/gyro有{n_nan_before}行缺失（蓝牙断联？），{action}")
+        if missing_strategy == "drop":
+            df = df.dropna(subset=all_cols)
+        elif missing_strategy == "ffill":
+            df[acc_cols] = df[acc_cols].ffill().bfill()
+            if gyro_cols:
+                df[gyro_cols] = df[gyro_cols].ffill().bfill()
+    elif n_nan_before:
+        print(f"  [警告] {sensor_name}: acc/gyro有{n_nan_before}行缺失（蓝牙断联？），"
+              f"--missing_strategy=none，原样保留NaN不处理")
     return df, acc_cols, gyro_cols
 
 
@@ -168,7 +186,7 @@ def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
 
 
 def convert(tasks: list, csv_dir: str, acc_unit: str,
-            keep_labels: list = None) -> pd.DataFrame:
+            keep_labels: list = None, missing_strategy: str = "drop") -> pd.DataFrame:
     keep_set = set(keep_labels) if keep_labels else None
     rows = []
 
@@ -190,7 +208,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
             for idx in ("1", "2"):
                 url = data.get(f"csv{idx}", "")
                 if url:
-                    res = _load_sensor_df(url, csv_dir, f"imu{idx}")
+                    res = _load_sensor_df(url, csv_dir, f"imu{idx}", missing_strategy)
                     if res:
                         sensor_map[f"label{idx}"] = (res[0], res[1], res[2],
                                                       f"task{task_id}_imu{idx}")
@@ -222,7 +240,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
             csv_url = data.get("csv", "")
             if not csv_url:
                     continue
-            res = _load_sensor_df(csv_url, csv_dir, "imu")
+            res = _load_sensor_df(csv_url, csv_dir, "imu", missing_strategy)
             if not res:
                 continue
             df, acc_cols, gyro_cols = res
@@ -261,6 +279,11 @@ def main():
                         help="加速度单位：ms2=m/s²（默认），g=重力单位（自动×9.81）")
     parser.add_argument("--keep_labels", nargs="*", default=["活动", "睡觉", "抓挠"],
                         help="只保留这些标签（默认: 活动 睡觉 抓挠）")
+    parser.add_argument("--missing_strategy", default="drop", choices=["drop", "ffill", "none"],
+                        help="acc/gyro缺失值(蓝牙断联)怎么处理：drop(默认)=丢掉缺失的行，"
+                             "不编造数据；ffill=前后值填充；none=不处理，保留原始NaN"
+                             "（这是最早改动之前一直用的方式）。想对比不同处理方式训出来的"
+                             "模型效果，改这个参数配合--tag分别跑")
     args = parser.parse_args()
 
     json_stem = os.path.splitext(os.path.basename(args.json))[0]
@@ -274,7 +297,8 @@ def main():
     print(f"共 {len(tasks)} 个 task")
     print(f"只保留标签: {args.keep_labels}")
 
-    out_df = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels)
+    out_df = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels,
+                      missing_strategy=args.missing_strategy)
 
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
     out_df.to_csv(output, index=False)
