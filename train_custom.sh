@@ -98,10 +98,13 @@ WINDOW_S=""               # 训练窗口长度秒数（留空=用 configs/data.y
                            # 窗口、直接被跳过，试着调小（比如--window_s 1 --stride_s 0.5）
                            # 能不能把这类短片段也纳入训练
 FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
-TAG=""                    # 输出目录后缀（留空=不加，跟原来路径一致）。
-                           # 同一个DATE想同时保留majority/center两个版本的模型时，
-                           # 各自传一个不同的--tag，避免第二次跑把第一次的processed_dir/
-                           # results覆盖掉（两次跑的PROCESSED_DIR/结果目录名都会带上这个后缀）
+TAG=""                    # 输出目录后缀。留空时不是真的不加后缀，而是自动用
+                           # missing_${MISSING_STRATEGY}（见下面解析完参数后的
+                           # 兜底逻辑）——不同missing_strategy的数据不该共用
+                           # 同一个processed_dir。同一个DATE+missing_strategy下
+                           # 还想同时保留majority/center等其它版本时，显式传
+                           # --tag会覆盖这个自动值（两次跑的PROCESSED_DIR/结果
+                           # 目录名都会带上最终生效的这个后缀）
 SKIP_SYN=0                 # 1=只训练方案A(纯标注)，跳过生成合成数据和方案B。
                            # 已经确认合成数据在短窗口下会让活动/甩身体的误判
                            # 变多（见pm_skin_scoring/docs或对话记录），不想用
@@ -152,7 +155,9 @@ _print_help() {
   --label LABEL          可重复传，要合成数据的类别（不传默认只合成"抓挠"）
   --skip_syn             跳过生成合成数据和方案B，只训练方案A(纯标注)
   --feat_workers N        特征提取并行进程数（默认1，传-1用全部核心）
-  --tag TAG               输出目录后缀，同一个DATE想保留多个版本时用
+  --tag TAG               输出目录后缀（不传=自动用missing_${MISSING_STRATEGY}，
+                          显式传会覆盖这个自动值），同一个DATE想同时保留多个
+                          版本时用
   --clean                 先删掉这个DATE+TAG对应的旧缓存再全新生成
   -h, --help              打印这份帮助
 HELPEOF
@@ -191,6 +196,17 @@ for _ed in "${EXTRA_DATES[@]:-}"; do
     exit 1
   fi
 done
+
+# 没显式传--tag时，自动用missing_strategy当后缀——不同missing_strategy
+# 跑出来的train.npz本来就是不同的数据（none保留NaN/drop丢行/ffill填充/
+# drop_window丢窗口，见--missing_strategy说明），不该共用同一个
+# processed_dir互相覆盖。之前必须手动传--tag missing_xxx才能避免覆盖，
+# 容易忘，干脆自动化：想同时对比几种策略，直接换--missing_strategy跑
+# 就行，目录自动分开；真需要在同一个missing_strategy下再细分几个版本
+# （比如同策略但--window_s不同），显式传--tag会覆盖这个自动值
+if [[ -z "$TAG" ]]; then
+  TAG="missing_${MISSING_STRATEGY}"
+fi
 
 if [[ ${#LABELS[@]} -eq 0 ]]; then
   LABELS=("抓挠")
