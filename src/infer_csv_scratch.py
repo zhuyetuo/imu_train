@@ -43,6 +43,78 @@ from features import extract_features
 import joblib
 import json
 
+
+def _load_dl_model(model_path):
+    """加载DL模型(.pt，src/dl/train.py训出来的state_dict)+同名.json推理
+    元数据，包装成一个有predict_proba(X)接口的对象——这样main()/infer_file()
+    里"加载模型→predict_proba"这条主流程不用为了兼容DL模型整个重写，
+    ML(.pkl，joblib+sklearn predict_proba)和DL(.pt，torch state_dict)
+    两条分支在“怎么产出probs”这一步就统一了。
+
+    DL模型和ML模型吃的输入完全不是一回事：ML走src/ml/features.py手工
+    提取统计特征，DL直接吃重力对齐+tilt拼接后的原始窗口(N,window_size,
+    n_channels)——所以调用方(infer_file)要知道is_dl，对DL跳过
+    extract_features()那一步，直接把窗口数组传给这里的predict_proba。
+
+    还原模型结构需要model_name+超参cfg（跟src/dl/train.py用的是同一份
+    load_model()，不重复写一份模型工厂函数）；标准化必须用训练时保存的
+    ch_mean/ch_std重新做，不能用这批推理数据自己的统计量——否则输入分布
+    跟训练时对不上，这是src/dl/train.py训练那次修好的NaN/loss坍缩问题
+    的同一类坑（分布不匹配不会报错，只会让效果悄悄变差）。见
+    src/dl/train.py里infer_meta的注释。
+    """
+    import torch
+    import torch.nn.functional as F
+
+    dl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dl")
+    if dl_dir not in sys.path:
+        sys.path.insert(0, dl_dir)
+    from train import load_model as _build_model  # noqa: E402
+
+    meta_path = model_path.replace(".pt", ".json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"找不到DL模型的推理元数据: {meta_path}（需要跟{model_path}同目录同名，"
+            f"src/dl/train.py训练完会自动生成，旧版训出来的.pt没有这个文件，得重新训一次）")
+    with open(meta_path, encoding="utf-8") as f:
+        dl_meta = json.load(f)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_name = dl_meta["model"]
+    cfg_wrapped = {model_name: dl_meta["model_cfg"]}
+    net = _build_model(model_name, dl_meta["n_channels"], dl_meta["window_size"],
+                       len(dl_meta["classes"]), cfg_wrapped)
+    net.load_state_dict(torch.load(model_path, map_location=device))
+    net.to(device)
+    net.eval()
+
+    ch_mean = np.array(dl_meta["ch_mean"], dtype=np.float32)
+    ch_std  = np.array(dl_meta["ch_std"],  dtype=np.float32)
+    m2m     = bool(dl_meta["m2m"])
+
+    class _DLModelWrapper:
+        classes_ = dl_meta["classes"]
+
+        def predict_proba(self, X):
+            # X: (N, window_size, n_channels) 原始窗口，重力对齐+tilt拼接后、
+            # 还没标准化——用训练时的ch_mean/ch_std做同样的z-score
+            Xs = (X.astype(np.float32) - ch_mean) / ch_std
+            xb = torch.from_numpy(Xs).permute(0, 2, 1).to(device)  # (N, C, T)
+            with torch.no_grad():
+                logits = net(xb)
+                if m2m:
+                    # (N, n_classes, T) 逐帧softmax后按时间维取平均得到窗口级
+                    # 概率——训练时评估用逐帧多数投票选类别，是离散的、没有
+                    # 自然的置信度；这里下游要用置信度做阈值过滤/片段合并，
+                    # 换成连续的时间维平均概率，跟多数投票在大多数情况下
+                    # 结果一致，但能给出一个有意义的置信度数值
+                    probs = F.softmax(logits, dim=1).mean(dim=2)
+                else:
+                    probs = F.softmax(logits, dim=1)
+            return probs.cpu().numpy()
+
+    return _DLModelWrapper(), dl_meta
+
 # 默认目标类别只有"抓挠"——保持旧调用方式（不传 --target_labels / 不设
 # TARGET_LABELS 环境变量）时行为跟改造前完全一致，不会因为这次多类别
 # 改造而意外多出别的类别的输出目录，也不会改变旧版脚本/流水线的产出结构。
@@ -163,7 +235,7 @@ def _extract_label_segments(preds, confs, start_indices, classes, window_bounds,
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", target_labels=None, **kwargs):
+               resample_method="poly", target_labels=None, is_dl=False, **kwargs):
     # target_labels：要独立统计/输出的目标类别列表，默认只有"抓挠"，跟改造前
     # 行为完全一致。多个类别时，output_dir 下会按类别各建一个子目录，互不
     # 混淆（见函数末尾"保存 JSON 结果"部分）——CSV读取/降采样/重力对齐/特征
@@ -215,8 +287,13 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         X_aligned = X
     X_aligned = np.concatenate([X_aligned, tilt], axis=2)
 
-    # 提取特征 + 预测
-    feats = extract_features(X_aligned, model_hz, show_progress=not quiet and not scratch_only)
+    # 提取特征 + 预测——DL模型直接吃X_aligned这个原始窗口数组（模型内部
+    # 自己学卷积/时序特征，不需要ml/features.py那套手工统计特征），
+    # 标准化(ch_mean/ch_std)在_DLModelWrapper.predict_proba()内部做
+    if is_dl:
+        feats = X_aligned
+    else:
+        feats = extract_features(X_aligned, model_hz, show_progress=not quiet and not scratch_only)
     probs = model.predict_proba(feats)
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
@@ -444,26 +521,42 @@ def main():
     if not target_labels:
         target_labels = list(DEFAULT_TARGET_LABELS)
 
-    # 加载模型 + 元数据
-    model = joblib.load(args.model)
-    meta_path = args.model.replace(".pkl", ".json")
+    # 加载模型 + 元数据——.pt是DL模型(src/dl/train.py训出来的state_dict)，
+    # .pkl是ML模型(src/ml/train.py, joblib)，两者元数据格式和推理输入
+    # 都不一样，靠后缀名分流
+    is_dl = args.model.endswith(".pt")
     classes, gravity_aligned, t_hz, t_window_s, t_stride_s = [], True, 16, 2.0, 1.0
     label_mode = "majority"
-    if os.path.exists(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
-        classes        = meta.get("classes", [])
-        gravity_aligned= meta.get("gravity_aligned", True)
-        t_hz           = int(meta.get("hz", 16))
-        t_window_s     = float(meta.get("window_s", 2.0))
-        t_stride_s     = float(meta.get("stride_s", 1.0))
-        label_mode     = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
-        print(f"[模型] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s  "
-              f"重力对齐={gravity_aligned}  label_mode={label_mode}")
+    if is_dl:
+        model, dl_meta = _load_dl_model(args.model)
+        classes         = dl_meta["classes"]
+        gravity_aligned = dl_meta["gravity_aligned"]
+        t_hz            = int(dl_meta["hz"])
+        t_window_s      = dl_meta["window_size"] / t_hz
+        t_stride_s      = dl_meta["stride"] / t_hz
+        label_mode      = dl_meta.get("label_mode", "majority")
+        print(f"[模型] DL模型: {dl_meta['model']}  训练参数: 采样率={t_hz}Hz  "
+              f"窗口={t_window_s}s  步长={t_stride_s}s  重力对齐={gravity_aligned}  "
+              f"label_mode={label_mode}  many-to-many={dl_meta['m2m']}")
         print(f"[模型] 类别: {classes}")
     else:
-        classes = list(model.classes_) if hasattr(model, "classes_") else []
-        print(f"[模型] 未找到元数据 JSON，类别: {classes}")
+        model = joblib.load(args.model)
+        meta_path = args.model.replace(".pkl", ".json")
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                meta = json.load(f)
+            classes        = meta.get("classes", [])
+            gravity_aligned= meta.get("gravity_aligned", True)
+            t_hz           = int(meta.get("hz", 16))
+            t_window_s     = float(meta.get("window_s", 2.0))
+            t_stride_s     = float(meta.get("stride_s", 1.0))
+            label_mode     = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
+            print(f"[模型] 训练参数: 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s  "
+                  f"重力对齐={gravity_aligned}  label_mode={label_mode}")
+            print(f"[模型] 类别: {classes}")
+        else:
+            classes = list(model.classes_) if hasattr(model, "classes_") else []
+            print(f"[模型] 未找到元数据 JSON，类别: {classes}")
 
     if args.no_gravity_align:
         gravity_aligned = False
@@ -511,12 +604,19 @@ def main():
                               label_mode=label_mode,
                               output_dir=out_dir,
                               resample_method=args.resample_method,
-                              target_labels=target_labels)
+                              target_labels=target_labels,
+                              is_dl=is_dl)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None
 
-    n_jobs = args.workers if args.workers > 0 else -1
+    # DL模型(torch.nn.Module)跨进程传给loky worker既慢（每个任务都要
+    # 重新pickle整个模型+权重）又容易因为动态定义的_DLModelWrapper类
+    # 序列化不稳定而出问题，ML路径没有这个包袱（sklearn模型走joblib
+    # 本来就是为了多进程设计的）。DL强制单进程——神经网络单窗口推理本身
+    # 很快，真正的批量瓶颈在ML的手工特征提取那步，DL跳过了那步，
+    # 单进程也不会明显慢
+    n_jobs = 1 if is_dl else (args.workers if args.workers > 0 else -1)
     results = Parallel(n_jobs=n_jobs, backend="loky")(
         delayed(_run_one)(p) for p in tqdm(files, desc="推理进度", unit="文件")
     )
