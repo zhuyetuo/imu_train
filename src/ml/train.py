@@ -431,7 +431,13 @@ def main(args):
     dataset_tag = os.path.basename(args.processed_dir.rstrip("/"))
     remap_tag   = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
     syn_tag     = "_syn" if synthetic_specs else ""
-    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}{syn_tag}")
+    # 模型类型单独一层子目录——之前不同--model训练出来的.pkl/.json文件名
+    # 已经带了模型名（ml_xgb.pkl跟ml_rf.pkl不会互相覆盖），但--clean是按
+    # 目录整个删的，train_custom.sh之前删的是这一层的上级目录，等于换个
+    # --model重新训练时会把同一个hz/remap/syn组合下其它模型类型的产出
+    # 也一起删掉。加这层model子目录后，--clean只删自己这个模型类型的，
+    # 其它模型训练出来的结果不受影响。
+    out_dir = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}{syn_tag}", args.model)
     os.makedirs(out_dir, exist_ok=True)
     per_class = classification_report(y_eval, y_pred, labels=present_labels,
                                       target_names=present_names,

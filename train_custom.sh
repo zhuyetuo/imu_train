@@ -27,8 +27,11 @@
 #   # 单独--date不加--extra_date/--source_hz时完全是原来的行为，不受影响。
 #
 # 输出:
-#   results/processed_<DATE>/16hz_remap_custom_3class/ml_rf.pkl      ← 纯标注
-#   results/processed_<DATE>/16hz_remap_custom_3class_syn/ml_rf.pkl  ← 带合成
+#   results/processed_<DATE>/16hz_remap_custom_3class/<model>/ml_<model>.pkl      ← 纯标注
+#   results/processed_<DATE>/16hz_remap_custom_3class_syn/<model>/ml_<model>.pkl  ← 带合成
+#   <model>是rf(默认)/xgb/lgbm/catboost/extratrees/histgb，见--model参数。
+#   每个模型类型各自一层子目录，同一份数据+不同--model训练互不覆盖，
+#   --clean只清同一个模型类型自己的目录，不影响其它模型训练好的结果
 
 set -e
 
@@ -100,7 +103,7 @@ SOURCE_HZ=""               # 主--date数据自己真实的采样率，留空默
                            # 不传会被静默当成已经是16Hz，不做重采样，时间轴是错的）
 
 _print_help() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'HELPEOF'
 
 全部参数:
@@ -213,8 +216,21 @@ if [[ "$CLEAN" == "1" ]]; then
   echo "▶ --clean：删除旧缓存..."
   echo "  rm -rf $PROCESSED_DIR"
   rm -rf "$PROCESSED_DIR"
-  echo "  rm -rf $RESULTS_DIR/$DATASET_TAG"
-  rm -rf "${RESULTS_DIR:?}/$DATASET_TAG"
+  # 只删这次要训练的模型类型($MODEL_TYPE)自己的输出子目录，不删整个
+  # DATASET_TAG——train.py现在把模型类型作为out_dir最后一层子目录
+  # （.../{hz}hz_remap.../{model}/ml_{model}.pkl），删整个DATASET_TAG会
+  # 把之前用别的--model训练好、保留着的结果也一起删掉，之前踩过这个坑
+  # （换个--model重新--clean跑一次，之前rf训练出来的模型文件全没了）
+  # train.py的remap_tag是"_"+remap文件名(不含扩展名)，比如
+  # configs/remap_custom_3class.yaml → "_remap_custom_3class"，拼出来是
+  # "16hz_remap_custom_3class"——这里要跟train.py的拼法完全一致，不能
+  # 多加"remap_"前缀
+  remap_stem=$(basename "$REMAP" .yaml)
+  for _variant in "${HZ}hz_${remap_stem}" "${HZ}hz_${remap_stem}_syn"; do
+    _model_out_dir="$RESULTS_DIR/$DATASET_TAG/$_variant/$MODEL_TYPE"
+    echo "  rm -rf $_model_out_dir"
+    rm -rf "$_model_out_dir"
+  done
   for _sp in "${SYNTHETIC_PATHS[@]}"; do
     echo "  rm -f  $_sp"
     rm -f "$_sp"
@@ -544,7 +560,7 @@ fi
 
 echo ""
 echo "模型路径:"
-echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_${MODEL_TYPE}.pkl"
+echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
 if [[ "$SKIP_SYN" != "1" ]]; then
-  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_${MODEL_TYPE}.pkl"
+  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
 fi
