@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from dataset import load_all_splits
+from remap_utils import load_remap_yaml, apply_remap, apply_remap_seq
 
 M2M_MODELS = {"filternet_m2m"}
 
@@ -93,6 +94,36 @@ def main(args):
         load_all_splits(args.hz, args.processed_dir)
 
     classes = eval(meta["classes"]) if isinstance(meta["classes"], str) else meta["classes"]
+
+    # 标签重映射（用于合并类别，如16类原始细分动作→4类行为）——之前这里
+    # 完全没有remap支持，只能拿16个原始细分类别直接训练，跟ml/train.py
+    # 那边训出来的4类模型不是同一个任务，没法对比。跟ml/train.py共用
+    # src/data/remap_utils.py的同一份逻辑，避免两边各写一份、改一边漏改
+    # 另一边。
+    if args.remap:
+        remap_cfg = load_remap_yaml(args.remap)
+        print(f"\n[dl/train] 标签重映射: {args.remap}")
+        for k, v in remap_cfg.items():
+            print(f"  {k} → {v}")
+        y_tr,  classes_new, keep_tr  = apply_remap(y_tr,  classes, remap_cfg)
+        y_val, _,           keep_val = apply_remap(y_val, classes, remap_cfg)
+        y_te,  _,           keep_te  = apply_remap(y_te,  classes, remap_cfg)
+        X_tr, X_val, X_te = X_tr[keep_tr], X_val[keep_val], X_te[keep_te]
+        # y_seq是逐帧标签，只给many-to-many模型用，但不管是不是m2m这里都
+        # 统一处理，保持train/val/te三个y_seq数组形状跟对应X/y一致，避免
+        # 后面代码要分m2m/非m2m两套长度检查逻辑
+        if y_seq_tr is not None:
+            y_seq_tr  = apply_remap_seq(y_seq_tr[keep_tr],   classes, remap_cfg, classes_new)
+            y_seq_val = apply_remap_seq(y_seq_val[keep_val], classes, remap_cfg, classes_new)
+            y_seq_te  = apply_remap_seq(y_seq_te[keep_te],   classes, remap_cfg, classes_new)
+        n_dropped = int((~keep_tr).sum() + (~keep_val).sum() + (~keep_te).sum())
+        if n_dropped:
+            print(f"[dl/train] 重映射: 丢弃了{n_dropped}个remap配置没覆盖到的样本"
+                  f"（比如'未佩戴'这类不该当行为标签训练的类别，不是预期的话检查"
+                  f"一下{args.remap}是不是漏配了某个类别）")
+        classes = classes_new
+        print(f"[dl/train] 重映射后类别: {classes}")
+
     n_channels  = X_tr.shape[2]
     window_size = X_tr.shape[1]
     n_classes   = len(classes)
@@ -107,7 +138,13 @@ def main(args):
 
     train_loader = make_loader(X_tr, y_tr, y_seq_tr, cfg["batch_size"], shuffle=True,  m2m=m2m)
     val_loader   = make_loader(X_val, y_val, y_seq_val, cfg["batch_size"], shuffle=False, m2m=m2m)
-    test_loader  = make_loader(X_te,  y_te,  y_seq_te,  cfg["batch_size"], shuffle=False, m2m=m2m)
+    # test_ratio=0（train_custom.sh纠错循环阶段的默认值，不专门切测试集）
+    # 时X_te是空的，最后"测试"这步直接拿去评估会得到一份没有意义的空结果
+    # ——改成用验证集代替测试集评估，跟ml/train.py的eval_tag处理方式一致
+    has_test = len(X_te) > 0
+    eval_tag = "测试集" if has_test else "验证集（无测试集，仅供参考）"
+    test_loader = make_loader(X_te, y_te, y_seq_te, cfg["batch_size"], shuffle=False, m2m=m2m) \
+        if has_test else make_loader(X_val, y_val, y_seq_val, cfg["batch_size"], shuffle=False, m2m=m2m)
 
     model     = load_model(args.model, n_channels, window_size, n_classes, cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["learning_rate"])
@@ -122,7 +159,12 @@ def main(args):
     no_improve   = 0
 
     dataset_tag     = os.path.basename(args.processed_dir.rstrip("/"))
-    out_dir         = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz")
+    # remap_tag跟ml/train.py保持一致的拼法——用没用remap、用的哪份remap
+    # 配置，产出目录要分开，不然16类原始模型和4类重映射模型会被放到
+    # 同一个{hz}hz/目录下，dl_{model}.pt文件名又一样，后训练的直接覆盖
+    # 先训练的
+    remap_tag = f"_{os.path.splitext(os.path.basename(args.remap))[0]}" if args.remap else ""
+    out_dir         = os.path.join(args.results_dir, dataset_tag, f"{args.hz}hz{remap_tag}")
     os.makedirs(out_dir, exist_ok=True)
     best_model_path = os.path.join(out_dir, f"dl_{args.model}_best.pt")
 
@@ -188,7 +230,7 @@ def main(args):
     from sklearn.metrics import accuracy_score, f1_score, classification_report
     acc = accuracy_score(all_true, all_preds)
     f1  = f1_score(all_true, all_preds, average="macro", zero_division=0)
-    print(f"\n[dl/train] 测试集结果 ({mode_str}, best val model):")
+    print(f"\n[dl/train] {eval_tag}结果 ({mode_str}, best val model):")
     print(f"  Accuracy: {acc:.4f}  Macro F1: {f1:.4f}")
     present_labels = sorted(set(all_true) | set(all_preds))
     present_names  = [classes[i] for i in present_labels]
@@ -220,4 +262,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/dl.yaml")
     parser.add_argument("--processed_dir", default="data/processed_a")
     parser.add_argument("--results_dir", default="results")
+    parser.add_argument("--remap", default="",
+                        help="标签重映射 YAML 文件路径（用于合并类别，如16类原始细分"
+                             "动作→4类行为，见configs/remap_custom_3class.yaml），"
+                             "跟ml/train.py的--remap是同一份格式")
     main(parser.parse_args())
