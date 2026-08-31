@@ -59,7 +59,7 @@ def compute_segment_ids(labels, next_id=0):
 
 
 def sliding_window(data, labels, window_size, stride, keep_label_set=None,
-                   label_mode="majority", seg_id_labels=None):
+                   label_mode="majority", seg_id_labels=None, drop_nan_windows=False):
     """返回 (X, y, y_seq, y_seg)：
       y_seq 是每窗口内的逐帧标签，供 many-to-many 模型使用；
       y_seg 是每个窗口所属的"连续标注片段"编号，供按片段分组划分数据集、
@@ -72,11 +72,22 @@ def sliding_window(data, labels, window_size, stride, keep_label_set=None,
       "center"：窗口标签取窗口正中心那一帧的标签，代表"这个窗口的特征描述
         的是中心点这一瞬间"，不做多数投票压制。要真正发挥效果需要配合更密的
         步长（否则中心点之间会有大段没有预测覆盖的空隙）。
+
+    drop_nan_windows：配合--missing_strategy drop_window用。true时，只要窗口
+      内任意一帧acc/gyro有NaN（蓝牙断联留下的、labelstudio_to_custom.py用
+      --missing_strategy none原样保留没处理掉），整个窗口直接丢弃，不是丢
+      NaN那一行、也不是不管——按src/data/analyze_missing.py --windows统计过，
+      同样缺失率下NaN可能只污染窗口边缘一两帧，也可能整段覆盖，没法一概
+      而论用行级drop/ffill处理，干脆在切窗这一步按窗口为单位过滤，训练拿到
+      的窗口要么完整、要么不存在，不会有掺了NaN、又被行级drop/ffill悄悄
+      改动过内容的中间状态。
     """
     X, y, y_seq, y_seg = [], [], [], []
     n = len(data)
     for start in range(0, n - window_size + 1, stride):
         end = start + window_size
+        if drop_nan_windows and np.isnan(data[start:end]).any():
+            continue
         frame_labels = labels[start:end]
         if label_mode == "center":
             label = frame_labels[window_size // 2]
@@ -182,7 +193,8 @@ def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_
             X_all[i_test],  y_all[i_test],  y_seq_all[i_test])
 
 
-def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True):
+def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True,
+                         drop_nan_windows=False):
     """按类别汇总所有片段的窗口：每个连续片段内部各自滑窗，汇总后合并。
     不跨片段边界取窗口，避免不同时间/动物的数据拼接产生无意义的假窗口。
 
@@ -221,7 +233,10 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
         wins, seg_ids = [], []
         for seg_id, seg in label_segs[lbl_id]:
             for start in range(0, len(seg) - window_size + 1, stride):
-                wins.append(seg[start:start + window_size])
+                win = seg[start:start + window_size]
+                if drop_nan_windows and np.isnan(win).any():
+                    continue
+                wins.append(win)
                 seg_ids.append(seg_id)
         if not wins:
             continue
@@ -244,7 +259,7 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
 
 
 def process_split(records, record_ids_set, window_size, stride, le, keep_label_set=None,
-                  use_gravity_align=True, label_mode="majority"):
+                  use_gravity_align=True, label_mode="majority", drop_nan_windows=False):
     X_all, y_all, y_seq_all, y_seg_all = [], [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     next_seg_id = 0
@@ -257,7 +272,7 @@ def process_split(records, record_ids_set, window_size, stride, le, keep_label_s
         labels_enc[mask] = le.transform(labels[mask])
         seg_id_labels, next_seg_id = compute_segment_ids(labels, next_seg_id)
         X, y, y_seq, y_seg = sliding_window(data, labels_enc, window_size, stride, valid_encoded,
-                                            label_mode, seg_id_labels)
+                                            label_mode, seg_id_labels, drop_nan_windows)
         if len(X) == 0:
             continue
         tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
@@ -392,21 +407,26 @@ def main(args):
 
         ga = not args.no_gravity_align
 
+        if args.drop_nan_windows:
+            print(f"[preprocess] --drop_nan_windows：窗口内任意一帧acc/gyro含NaN就整窗丢弃"
+                  f"（需要配合 labelstudio_to_custom.py --missing_strategy none 保留原始NaN，"
+                  f"否则NaN已经在行级被drop/ffill处理掉，这里检测不到）")
+
         if strategy == "subject":
             # 按狗分组划分，狗与狗之间本来就不会共享同一个连续片段，天然无泄漏，seg_id 不需要
-            X_train, y_train, y_seq_train, _ = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
-            X_val,   y_val,   y_seq_val,   _ = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode)
-            X_test,  y_test,  y_seq_test,  _ = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_train, y_train, y_seq_train, _ = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
+            X_val,   y_val,   y_seq_val,   _ = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
+            X_test,  y_test,  y_seq_test,  _ = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
         elif strategy == "label_concat":
             # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别（label_mode 在这里没有意义，不传）
-            X_all, y_all, y_seq_all, y_seg_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga)
+            X_all, y_all, y_seq_all, y_seg_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga, args.drop_nan_windows)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
         else:
             # 先把所有窗口提取出来，再按连续片段分组划分（避免高度重叠窗口跨集合泄漏）
             all_ids = set(r["record_id"] for r in ds_records)
-            X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode)
+            X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
@@ -489,4 +509,8 @@ if __name__ == "__main__":
                              "（默认2秒窗口比它们的真实时长还长，短片段建不成窗口、"
                              "直接被跳过），但窗口变短后频域特征可用的采样点变少，"
                              "特征精度会略微下降")
+    parser.add_argument("--drop_nan_windows", action="store_true",
+                        help="窗口内任意一帧acc/gyro含NaN就整窗丢弃（配合"
+                             "labelstudio_to_custom.py --missing_strategy none一起用，"
+                             "行级要保留原始NaN不处理，这里才检测得到）")
     main(parser.parse_args())
