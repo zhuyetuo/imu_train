@@ -47,7 +47,13 @@ def apply_remap_seq(y_seq, classes, remap: dict, new_class_names: list) -> np.nd
     make_loader()/m2m_loss()本来就是按这个惯例设计的（"-1 表示未映射帧，
     训练时忽略"）——一个窗口内大部分帧是目标行为、边界处夹杂了几帧
     别的动作，没必要整个窗口作废，只忽略那几帧就行。"""
+    # test_ratio=0（train_custom.sh常用配置）时y_seq_te是空数组，
+    # np.vectorize在空输入且没指定otypes时会直接报ValueError
+    # ("cannot call `vectorize` on size 0 inputs")——空数组本来就不需要
+    # 真的映射，直接短路返回同形状的空int64数组
+    if y_seq.size == 0:
+        return y_seq.astype(np.int64)
     new_class2id = {c: i for i, c in enumerate(new_class_names)}
     mapping = {i: new_class2id[remap[c]] for i, c in enumerate(classes) if c in remap}
-    vmapped = np.vectorize(lambda v: mapping.get(int(v), -1))
-    return vmapped(y_seq).astype(np.int64)
+    vmapped = np.vectorize(lambda v: mapping.get(int(v), -1), otypes=[np.int64])
+    return vmapped(y_seq)
