@@ -60,13 +60,24 @@ trap cleanup INT TERM
 # ── 默认参数 ──────────────────────────────────────────────
 DATE=""
 HZ=16
-MISSING_STRATEGY="drop"    # drop(默认)/ffill/none/drop_window——acc/gyro缺失值
+MISSING_STRATEGY="none"    # none(默认)/drop/ffill/drop_window——acc/gyro缺失值
                            # (蓝牙断联)怎么处理，见src/data/labelstudio_to_custom.py的
-                           # --missing_strategy说明。drop_window是行级不处理(保留原始
-                           # NaN，等价none)，改成在切窗口那一步整窗丢弃(见
-                           # src/data/preprocess.py的--drop_nan_windows)，跟drop
-                           # (丢NaN那一行、窗口其它帧还留着)不是一回事——想对比不同
-                           # 处理方式训出来的模型效果，配合--tag分别跑几个版本
+                           # --missing_strategy说明。默认none是为了跟这个选项加之前
+                           # 所有历史模型的实际行为一致（那时候labelstudio_to_custom.py
+                           # 根本没处理过NaN，等价于现在的none，是个隐藏bug）——不传
+                           # 这个参数训出来的模型，效果基准跟以前能直接比。想用修复后
+                           # 的处理方式，显式传drop/ffill/drop_window。四种方式：
+                           #   none        原样保留NaN，不处理（历史行为，树模型大多能
+                           #               容忍，DL不能，会loss变nan）
+                           #   drop        丢弃含NaN的那一整行，不做前后值填充
+                           #   ffill       前后值填充（编造数值，跟实时推理infer_csv_
+                           #               scratch.py的处理方式一致）
+                           #   drop_window 行级不处理(等价none)，改成切窗口那一步整窗
+                           #               丢弃(src/data/preprocess.py的--drop_nan_windows)，
+                           #               窗口内哪怕只有一帧NaN也整窗不要，比drop(只丢
+                           #               NaN那一行、窗口其它帧留着)更严格
+                           # 配合--tag分别跑几个版本，能直接对比这几种处理方式训出来的
+                           # 模型效果
 MODEL_TYPE="rf"            # rf(默认)/xgb/lgbm/catboost/extratrees/histgb，
                            # 对应src/ml/train.py的--model，见该文件MODELS字典
 N_AUG=50
@@ -120,8 +131,16 @@ _print_help() {
                           默认等于--hz，见上面用法示例的说明）
   --hz HZ                训练目标采样率（默认16）
   --model TYPE           rf(默认)/xgb/lgbm/catboost/extratrees/histgb
-  --missing_strategy S   drop(默认)/ffill/none/drop_window，acc/gyro缺失值(蓝牙断联)
-                          处理方式：drop_window=整窗丢弃(不是丢行)，见上面说明
+  --missing_strategy S   acc/gyro缺失值(蓝牙断联)处理方式，四选一:
+                            none(默认)  原样保留NaN不处理（历史行为，树模型
+                                        大多能容忍，DL不能，会loss变nan）
+                            drop        丢弃含NaN的那一整行，不编造数值
+                            ffill       前后值填充（编造数值，跟实时推理
+                                        infer_csv_scratch.py处理方式一致）
+                            drop_window 行级不处理，改成切窗口那一步整窗
+                                        丢弃（哪怕只有一帧NaN也整窗不要，
+                                        比drop更严格，见src/data/preprocess.py
+                                        的--drop_nan_windows）
   --label_mode MODE      majority(默认，多数投票)/center(窗口中心帧)
   --window_s SEC         训练窗口长度秒数（默认用configs/data.yaml的2秒）
   --stride_s SEC         训练窗口步长秒数（默认用configs/data.yaml的1秒）
