@@ -57,6 +57,8 @@ trap cleanup INT TERM
 # ── 默认参数 ──────────────────────────────────────────────
 DATE=""
 HZ=16
+MODEL_TYPE="rf"            # rf(默认)/xgb/lgbm/catboost/extratrees/histgb，
+                           # 对应src/ml/train.py的--model，见该文件MODELS字典
 N_AUG=50
 LABELS=()                 # 要合成的类别，--label可重复传（比如--label 抓挠 --label 甩身体
                            # 同时给两个类别都补合成数据）。不传时默认只合成"抓挠"（见下面
@@ -102,6 +104,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --date)           DATE="$2";           shift 2 ;;
     --hz)             HZ="$2";             shift 2 ;;
+    --model)          MODEL_TYPE="$2";      shift 2 ;;
     --n_aug)          N_AUG="$2";          shift 2 ;;
     --label)          LABELS+=("$2");      shift 2 ;;
     --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
@@ -390,7 +393,7 @@ python src/data/preprocess.py \
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
 echo ""
 echo "▶ 方案 A：纯标注模型（后台运行）..."
-python src/ml/train.py --hz "$HZ" --model rf \
+python src/ml/train.py --hz "$HZ" --model "$MODEL_TYPE" \
   --processed_dir "$PROCESSED_DIR" \
   --remap "$REMAP" \
   --results_dir "$RESULTS_DIR" \
@@ -427,7 +430,7 @@ else
   # ── 方案 B：带合成数据模型（后台运行）───────────────────
   echo ""
   echo "▶ 方案 B：带合成数据模型（后台运行，合成类别: ${LABELS[*]}）..."
-  python src/ml/train.py --hz "$HZ" --model rf \
+  python src/ml/train.py --hz "$HZ" --model "$MODEL_TYPE" \
     --processed_dir "$PROCESSED_DIR" \
     --remap "$REMAP" \
     "${SYNTHETIC_SPEC_ARGS[@]}" \
@@ -512,7 +515,7 @@ fi
 
 echo ""
 echo "模型路径:"
-echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_rf.pkl"
+echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/ml_${MODEL_TYPE}.pkl"
 if [[ "$SKIP_SYN" != "1" ]]; then
-  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_rf.pkl"
+  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/ml_${MODEL_TYPE}.pkl"
 fi
