@@ -31,6 +31,20 @@ catboost:
   learning_rate: 0.05
   random_state: 42
 
+extra_trees:
+  n_estimators: 300
+  max_depth: null
+  n_jobs: -1
+  random_state: 42
+
+histgb:
+  n_estimators: 300      # HistGradientBoostingClassifier内部叫max_iter，
+                          # 这里统一叫n_estimators跟其它模型的配置键保持一致，
+                          # build_histgb()里转换成max_iter传给sklearn
+  max_depth: null
+  learning_rate: 0.1
+  random_state: 42
+
 # 手工特征配置
 features:
   time_domain: [mean, std, min, max, range, rms, skewness, kurtosis, zero_crossing_rate]

@@ -21,13 +21,17 @@ from models.random_forest import build_rf
 from models.xgboost_model import build_xgb
 from models.lightgbm_model import build_lgbm
 from models.catboost_model import build_catboost
+from models.extra_trees import build_et
+from models.histgb import build_histgb
 
 
 MODELS = {
-    "rf":       (build_rf,       "random_forest"),
-    "xgb":      (build_xgb,      "xgboost"),
-    "lgbm":     (build_lgbm,     "lightgbm"),
-    "catboost": (build_catboost, "catboost"),
+    "rf":         (build_rf,       "random_forest"),
+    "xgb":        (build_xgb,      "xgboost"),
+    "lgbm":       (build_lgbm,     "lightgbm"),
+    "catboost":   (build_catboost, "catboost"),
+    "extratrees": (build_et,       "extra_trees"),
+    "histgb":     (build_histgb,   "histgb"),
 }
 
 
@@ -331,14 +335,15 @@ def main(args):
     model_cfg = dict(cfg[cfg_key])
     if args.n_jobs is not None:
         model_cfg["n_jobs"] = args.n_jobs
-    # RF / XGB / LightGBM / CatBoost 都支持 class_weight 或 sample_weight
-    if args.model in ("rf",):
+    # RF / ExtraTrees 走 class_weight="balanced"；XGB/LGBM/CatBoost/HistGB
+    # 不支持class_weight构造参数（HistGradientBoostingClassifier是sklearn
+    # 没实现，xgb/lgbm/catboost是各自库的设计），统一走下面的sample_weight
+    if args.model in ("rf", "extratrees"):
         model_cfg["class_weight"] = "balanced"
     model = build_fn(model_cfg)
 
     print(f"[ml/train] 训练中...")
-    # XGB / LGBM / CatBoost 通过 sample_weight 传入权重
-    if args.model in ("xgb", "lgbm", "catboost"):
+    if args.model in ("xgb", "lgbm", "catboost", "histgb"):
         model = fit_with_progress(model, args, cfg, X_tr_f, y_tr, sample_weight=sample_weights)
     else:
         model = fit_with_progress(model, args, cfg, X_tr_f, y_tr)
