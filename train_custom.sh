@@ -110,6 +110,10 @@ SKIP_SYN=0                 # 1=只训练方案A(纯标注)，跳过生成合成�
                            # 变多（见pm_skin_scoring/docs或对话记录），不想用
                            # 合成数据时加这个参数，省掉合成数据生成+方案B训练
                            # 的时间
+SKIP_ML=0                   # 1=只做到预处理这步（生成CSV/train.npz等），不
+                           # 训练ML模型，也不生成合成数据。给src/dl/train.py
+                           # 用的——DL训练复用这里预处理好的npz，不需要这个
+                           # 脚本顺带训一个ML模型，加这个参数纯粹省时间
 CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓存(processed_dir/
                            # results/合成数据npz)再重新生成，默认0=不删（复用已有的）。
                            # 数据处理逻辑改了但没删缓存，新旧代码生成的中间产物混用，
@@ -154,6 +158,8 @@ _print_help() {
   --n_aug N              每个原始片段生成的合成增强数量（默认50，配合--label用）
   --label LABEL          可重复传，要合成数据的类别（不传默认只合成"抓挠"）
   --skip_syn             跳过生成合成数据和方案B，只训练方案A(纯标注)
+  --skip_ml               只做到预处理这步，不训练ML模型/不生成合成数据
+                          （给src/dl/train.py按需触发预处理用）
   --feat_workers N        特征提取并行进程数（默认1，传-1用全部核心）
   --tag TAG               输出目录后缀（不传=自动用missing_${MISSING_STRATEGY}，
                           显式传会覆盖这个自动值），同一个DATE想同时保留多个
@@ -184,6 +190,7 @@ while [[ $# -gt 0 ]]; do
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
     --skip_syn)       SKIP_SYN=1;          shift 1 ;;
+    --skip_ml)        SKIP_ML=1;           shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
@@ -509,6 +516,12 @@ else
     $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
     $DROP_NAN_WINDOWS_FLAG \
     --hz "$HZ"
+fi
+
+if [[ "$SKIP_ML" == "1" ]]; then
+  echo ""
+  echo "▶ --skip_ml：预处理已完成，跳过ML训练（$PROCESSED_DIR 下的train.npz可以直接给src/dl/train.py用）"
+  exit 0
 fi
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
