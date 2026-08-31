@@ -129,6 +129,22 @@ def main(args):
     n_classes   = len(classes)
     print(f"[dl/train] 数据形状: {X_tr.shape}, 类别数: {n_classes}")
 
+    # 逐通道标准化（z-score，用训练集自己的均值/方差）——树模型(ml/train.py
+    # 那边)对特征量纲不敏感，但CNN/LSTM这类梯度下降训练的模型很敏感：
+    # 加速度/陀螺仪/姿态角这8个通道数值范围差异很大，不做标准化容易训练
+    # 不稳定，实测直接表现为loss变nan、模型坍缩成只会预测样本最多的那个
+    # 类别（比如这次val_acc卡在0.4710，正好等于"活动"类占比）。统计量
+    # 只用训练集算，不能用val/test算（会造成信息泄漏），val/test套用
+    # 训练集的均值方差做同样的变换。
+    ch_mean = X_tr.reshape(-1, n_channels).mean(axis=0)
+    ch_std  = X_tr.reshape(-1, n_channels).std(axis=0)
+    ch_std[ch_std < 1e-6] = 1.0  # 避免除以接近0的标准差（比如某个通道基本不变化）
+    X_tr  = (X_tr  - ch_mean) / ch_std
+    X_val = (X_val - ch_mean) / ch_std
+    if len(X_te) > 0:
+        X_te = (X_te - ch_mean) / ch_std
+    X_tr, X_val, X_te = X_tr.astype(np.float32), X_val.astype(np.float32), X_te.astype(np.float32)
+
     # val 为空时（小数据集）用训练集末尾 10% 代替
     if len(X_val) == 0:
         n_fallback = max(1, len(X_tr) // 10)
