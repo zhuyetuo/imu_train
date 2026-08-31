@@ -17,6 +17,7 @@ from dataset import load_all_splits
 from features import extract_features
 from gravity_align import gravity_align_batch, append_raw_tilt_batch
 from preprocess import split_windows_by_segment
+from remap_utils import load_remap_yaml, apply_remap
 from models.random_forest import build_rf
 from models.xgboost_model import build_xgb
 from models.lightgbm_model import build_lgbm
@@ -89,27 +90,6 @@ def fit_with_progress(model, args, cfg, X_tr_f, y_tr, sample_weight=None):
     return model
 
 
-def apply_remap(y, classes, remap: dict) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """
-    remap: {"Lying chest": "睡觉", "Walking": "活动", ...}
-    返回重映射后的 y、新 classes 列表、keep_mask。
-
-    remap配置里没覆盖到的原始类别（比如自采数据里的"未佩戴"——这个不是
-    行为，是设备没戴在狗身上，训练行为分类器不该把这类样本也塞进去，见
-    src/data/wear_state.py专门的未佩戴/静置检测）会被过滤掉，不是直接
-    KeyError崩溃：mapping字典本来就只收录remap覆盖到的类别(`if c in
-    remap`)，但之前这里对y的每个样本都无条件查表，没有同步过滤，遇到
-    没覆盖的类别就崩了。keep_mask标记哪些样本被保留，调用方要用同一个
-    mask去过滤对应的X，保持X/y行数一致。
-    """
-    new_class_names = list(dict.fromkeys(remap.values()))  # 保序去重
-    new_class2id = {c: i for i, c in enumerate(new_class_names)}
-    mapping = {i: new_class2id[remap[c]] for i, c in enumerate(classes) if c in remap}
-    keep_mask = np.array([int(label) in mapping for label in y], dtype=bool)
-    new_y = np.array([mapping[int(label)] for label in y[keep_mask]], dtype=np.int64)
-    return new_y, new_class_names, keep_mask
-
-
 def main(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -134,10 +114,7 @@ def main(args):
     # 标签重映射（用于合并类别，如 6类→2类）
     remap_cfg = None
     if args.remap:
-        with open(args.remap) as f:
-            remap_cfg = yaml.safe_load(f)
-        # 过滤掉注释行（以 # 开头的 key）
-        remap_cfg = {k: v for k, v in remap_cfg.items() if not str(k).startswith("#")}
+        remap_cfg = load_remap_yaml(args.remap)
         print(f"\n[ml/train] 标签重映射: {args.remap}")
         for k, v in remap_cfg.items():
             print(f"  {k} → {v}")
