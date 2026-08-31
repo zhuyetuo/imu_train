@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import argparse
 import json
+import subprocess
 import yaml
 import numpy as np
 import torch
@@ -21,6 +22,55 @@ from dataset import load_all_splits
 from remap_utils import load_remap_yaml, apply_remap, apply_remap_seq
 
 M2M_MODELS = {"filternet_m2m"}
+
+
+def _resolve_processed_dir(args):
+    """--processed_dir没显式传、但传了--date时，跟train_custom.sh用完全
+    相同的命名规则算出processed_dir（data/processed_<DATE>_<TAG>，TAG
+    默认missing_<MISSING_STRATEGY>，见train_custom.sh里TAG的自动派生
+    逻辑），两边不用再手动对齐目录名。目录下对应hz的train.npz已经存在
+    就直接用；不存在就自动调train_custom.sh --skip_ml去生成（只做
+    预处理，不训练ML模型/不生成合成数据，DL不需要那些），不用每次先
+    手动跑一遍train_custom.sh再跑dl/train.py。
+    """
+    if args.processed_dir:
+        return args.processed_dir
+    if not args.date:
+        raise SystemExit("[dl/train] 必须传 --processed_dir，或者传 --date"
+                          "（配合--missing_strategy/--tag等，自动定位/生成预处理数据）")
+
+    tag = args.tag or f"missing_{args.missing_strategy}"
+    processed_dir = f"data/processed_{args.date}_{tag}"
+    marker = os.path.join(processed_dir, f"{args.hz}hz", "train.npz")
+    if os.path.exists(marker):
+        print(f"[dl/train] 找到已有预处理数据: {marker}")
+        return processed_dir
+
+    print(f"[dl/train] {marker} 不存在，先调用 train_custom.sh --skip_ml 生成预处理数据...")
+    cmd = ["bash", "train_custom.sh", "--date", args.date, "--hz", str(args.hz),
+           "--missing_strategy", args.missing_strategy, "--skip_ml"]
+    if args.tag:
+        cmd += ["--tag", args.tag]
+    if args.source_hz:
+        cmd += ["--source_hz", str(args.source_hz)]
+    for ed in args.extra_date:
+        cmd += ["--extra_date", ed]
+    if args.window_s:
+        cmd += ["--window_s", str(args.window_s)]
+    if args.stride_s:
+        cmd += ["--stride_s", str(args.stride_s)]
+    if args.label_mode:
+        cmd += ["--label_mode", args.label_mode]
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    print(f"[dl/train] 执行: {' '.join(cmd)}  (cwd={repo_root})")
+    result = subprocess.run(cmd, cwd=repo_root)
+    if result.returncode != 0:
+        raise SystemExit(f"[dl/train] train_custom.sh 预处理失败 (exit={result.returncode})")
+    if not os.path.exists(marker):
+        raise SystemExit(f"[dl/train] train_custom.sh 跑完了但 {marker} 还是不存在，"
+                          f"检查上面train_custom.sh输出的报错")
+    return processed_dir
 
 
 def load_model(model_name, n_channels, window_size, n_classes, cfg):
@@ -83,6 +133,8 @@ def m2m_predict(logits):
 def main(args):
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    args.processed_dir = _resolve_processed_dir(args)
 
     m2m = args.model in M2M_MODELS
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -323,10 +375,34 @@ if __name__ == "__main__":
                         choices=["cnn", "collar_cnn", "cnn_lstm", "transformer",
                                  "filternet", "filternet_m2m"])
     parser.add_argument("--config", default="configs/dl.yaml")
-    parser.add_argument("--processed_dir", default="data/processed_a")
+    parser.add_argument("--processed_dir", default="",
+                        help="预处理数据目录，直接指定的话跳过下面--date/--missing_strategy"
+                             "自动定位/生成那一套逻辑")
     parser.add_argument("--results_dir", default="results")
     parser.add_argument("--remap", default="",
                         help="标签重映射 YAML 文件路径（用于合并类别，如16类原始细分"
                              "动作→4类行为，见configs/remap_custom_3class.yaml），"
                              "跟ml/train.py的--remap是同一份格式")
+    # 以下几个参数不直接使用，只在--processed_dir留空时，用来跟
+    # train_custom.sh用同一套规则算出processed_dir路径、以及在数据
+    # 还没预处理过时自动调train_custom.sh --skip_ml生成（见
+    # _resolve_processed_dir()），参数含义和train_custom.sh完全一致
+    parser.add_argument("--date", default="",
+                        help="主批次日期目录名，配合下面几个参数自动定位/生成预处理数据"
+                             "（跟train_custom.sh的--date是同一个概念）")
+    parser.add_argument("--missing_strategy", default="none",
+                        choices=["none", "drop", "ffill", "drop_window"],
+                        help="acc/gyro缺失值处理方式（默认none=历史行为，见"
+                             "train_custom.sh的--missing_strategy说明），只在"
+                             "--processed_dir留空、需要自动定位/生成数据时用得上，"
+                             "同时也决定自动派生的--tag后缀（missing_<S>）")
+    parser.add_argument("--tag", default="",
+                        help="跟train_custom.sh的--tag一样，不传时自动等于"
+                             "missing_<missing_strategy>")
+    parser.add_argument("--source_hz", type=int, default=0)
+    parser.add_argument("--extra_date", action="append", default=[],
+                        help="DATE:HZ，可重复传，跟train_custom.sh的--extra_date一样")
+    parser.add_argument("--window_s", type=float, default=0.0)
+    parser.add_argument("--stride_s", type=float, default=0.0)
+    parser.add_argument("--label_mode", default="")
     main(parser.parse_args())

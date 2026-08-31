@@ -98,15 +98,22 @@ WINDOW_S=""               # 训练窗口长度秒数（留空=用 configs/data.y
                            # 窗口、直接被跳过，试着调小（比如--window_s 1 --stride_s 0.5）
                            # 能不能把这类短片段也纳入训练
 FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
-TAG=""                    # 输出目录后缀（留空=不加，跟原来路径一致）。
-                           # 同一个DATE想同时保留majority/center两个版本的模型时，
-                           # 各自传一个不同的--tag，避免第二次跑把第一次的processed_dir/
-                           # results覆盖掉（两次跑的PROCESSED_DIR/结果目录名都会带上这个后缀）
+TAG=""                    # 输出目录后缀。留空时不是真的不加后缀，而是自动用
+                           # missing_${MISSING_STRATEGY}（见下面解析完参数后的
+                           # 兜底逻辑）——不同missing_strategy的数据不该共用
+                           # 同一个processed_dir。同一个DATE+missing_strategy下
+                           # 还想同时保留majority/center等其它版本时，显式传
+                           # --tag会覆盖这个自动值（两次跑的PROCESSED_DIR/结果
+                           # 目录名都会带上最终生效的这个后缀）
 SKIP_SYN=0                 # 1=只训练方案A(纯标注)，跳过生成合成数据和方案B。
                            # 已经确认合成数据在短窗口下会让活动/甩身体的误判
                            # 变多（见pm_skin_scoring/docs或对话记录），不想用
                            # 合成数据时加这个参数，省掉合成数据生成+方案B训练
                            # 的时间
+SKIP_ML=0                   # 1=只做到预处理这步（生成CSV/train.npz等），不
+                           # 训练ML模型，也不生成合成数据。给src/dl/train.py
+                           # 用的——DL训练复用这里预处理好的npz，不需要这个
+                           # 脚本顺带训一个ML模型，加这个参数纯粹省时间
 CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓存(processed_dir/
                            # results/合成数据npz)再重新生成，默认0=不删（复用已有的）。
                            # 数据处理逻辑改了但没删缓存，新旧代码生成的中间产物混用，
@@ -151,8 +158,12 @@ _print_help() {
   --n_aug N              每个原始片段生成的合成增强数量（默认50，配合--label用）
   --label LABEL          可重复传，要合成数据的类别（不传默认只合成"抓挠"）
   --skip_syn             跳过生成合成数据和方案B，只训练方案A(纯标注)
+  --skip_ml               只做到预处理这步，不训练ML模型/不生成合成数据
+                          （给src/dl/train.py按需触发预处理用）
   --feat_workers N        特征提取并行进程数（默认1，传-1用全部核心）
-  --tag TAG               输出目录后缀，同一个DATE想保留多个版本时用
+  --tag TAG               输出目录后缀（不传=自动用missing_${MISSING_STRATEGY}，
+                          显式传会覆盖这个自动值），同一个DATE想同时保留多个
+                          版本时用
   --clean                 先删掉这个DATE+TAG对应的旧缓存再全新生成
   -h, --help              打印这份帮助
 HELPEOF
@@ -179,6 +190,7 @@ while [[ $# -gt 0 ]]; do
     --tag)            TAG="$2";            shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
     --skip_syn)       SKIP_SYN=1;          shift 1 ;;
+    --skip_ml)        SKIP_ML=1;           shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
@@ -191,6 +203,17 @@ for _ed in "${EXTRA_DATES[@]:-}"; do
     exit 1
   fi
 done
+
+# 没显式传--tag时，自动用missing_strategy当后缀——不同missing_strategy
+# 跑出来的train.npz本来就是不同的数据（none保留NaN/drop丢行/ffill填充/
+# drop_window丢窗口，见--missing_strategy说明），不该共用同一个
+# processed_dir互相覆盖。之前必须手动传--tag missing_xxx才能避免覆盖，
+# 容易忘，干脆自动化：想同时对比几种策略，直接换--missing_strategy跑
+# 就行，目录自动分开；真需要在同一个missing_strategy下再细分几个版本
+# （比如同策略但--window_s不同），显式传--tag会覆盖这个自动值
+if [[ -z "$TAG" ]]; then
+  TAG="missing_${MISSING_STRATEGY}"
+fi
 
 if [[ ${#LABELS[@]} -eq 0 ]]; then
   LABELS=("抓挠")
@@ -493,6 +516,12 @@ else
     $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
     $DROP_NAN_WINDOWS_FLAG \
     --hz "$HZ"
+fi
+
+if [[ "$SKIP_ML" == "1" ]]; then
+  echo ""
+  echo "▶ --skip_ml：预处理已完成，跳过ML训练（$PROCESSED_DIR 下的train.npz可以直接给src/dl/train.py用）"
+  exit 0
 fi
 
 # ── 方案 A：纯标注模型（后台运行）────────────────────────
