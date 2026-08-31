@@ -120,21 +120,19 @@ def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str):
     if df["_ts"].isna().all():
         print(f"  [错误] {sensor_name}: 时间戳解析失败")
         return None
-    # 蓝牙断联等原因，原始CSV里acc/gyro偶尔会有缺失行（NaN）——
-    # infer_csv_scratch.py（实时推理）读CSV时早就用ffill().bfill()填过
-    # 这个坑了，这里（生成训练数据）之前没做同样处理，NaN会原样混进训练
-    # CSV，一路带到预处理/窗口/最终npz里。RF/XGBoost/LightGBM这些树模型
-    # 大多原生兼容NaN(当成缺失值处理)，没报错，掩盖了这个问题；神经网络
-    # 完全不能容忍NaN，训练直接loss变nan——本质是这里数据没洗干净，跟
-    # 用什么模型训练无关，两边（训练/推理）处理逻辑不一致更是隐患，统一
-    # 成跟推理那边一样的填充方式
-    n_nan_before = int(df[acc_cols + (gyro_cols or [])].isna().sum().sum())
+    # 蓝牙断联等原因，原始CSV里acc/gyro偶尔会有缺失行（NaN）——训练数据
+    # 不像实时推理那样要求时间上连续不能有空隙，缺失的行直接丢掉，不用
+    # ffill/bfill这种"拿前后值顶替"的填充方式去编造这几个点本来没有采集
+    # 到的数据（真实数据本来就不该有缺失，补出来的终究是假的）。丢掉的
+    # 是一整行(该行所有acc/gyro列)，不是只丢NaN的那一列，避免同一行里
+    # 部分列是真实值、部分列是"因为其它列缺失而被迫也丢掉"这种不必要的
+    # 浪费——ACC_CANDIDATES/GYRO_CANDIDATES匹配到的每组列本来就是同一颗
+    # 传感器的同一次采样，缺一个通道这一行本来就不完整，整行丢弃是对的。
+    n_nan_before = int(df[acc_cols + (gyro_cols or [])].isna().any(axis=1).sum())
     if n_nan_before:
-        print(f"  [警告] {sensor_name}: acc/gyro有{n_nan_before}个缺失值（蓝牙断联？），"
-              f"前后值填充")
-        df[acc_cols] = df[acc_cols].ffill().bfill()
-        if gyro_cols:
-            df[gyro_cols] = df[gyro_cols].ffill().bfill()
+        print(f"  [警告] {sensor_name}: acc/gyro有{n_nan_before}行缺失（蓝牙断联？），"
+              f"丢弃这些行（不做前后值填充，避免编造数据）")
+        df = df.dropna(subset=acc_cols + (gyro_cols or []))
     return df, acc_cols, gyro_cols
 
 
