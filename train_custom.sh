@@ -192,9 +192,12 @@ DATASET_TAG=$(basename "$PROCESSED_DIR")
 # 是哪次登录、哪个系统临时目录）
 TMP_DIR="tmp"
 mkdir -p "$TMP_DIR"
-LOG_NO_SYN="${TMP_DIR}/train_no_syn_${DATASET_TAG}.log"
-LOG_WITH_SYN="${TMP_DIR}/train_with_syn_${DATASET_TAG}.log"
-LOG_FULL="${TMP_DIR}/train_full_${DATASET_TAG}.log"
+# 文件名带上$MODEL_TYPE——之前只带DATASET_TAG，同一份数据先跑rf再跑
+# xgb，第二次会把第一次的训练日志覆盖掉，跟--clean误删结果目录是同一类
+# 问题（模型类型没体现在产出文件名里）
+LOG_NO_SYN="${TMP_DIR}/train_no_syn_${DATASET_TAG}_${MODEL_TYPE}.log"
+LOG_WITH_SYN="${TMP_DIR}/train_with_syn_${DATASET_TAG}_${MODEL_TYPE}.log"
+LOG_FULL="${TMP_DIR}/train_full_${DATASET_TAG}_${MODEL_TYPE}.log"
 
 # 把这个脚本自己打印的全部内容（步骤0/1/1.5的合并/转CSV/重采样日志、
 # 预处理输出、每一行echo的进度提示……）也整份记下来，不只是后台跑的
