@@ -470,6 +470,112 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
     return tasks
 
 
+def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_url_prefix,
+                                    min_conf=0.8, conf_field="conf_max", cam_mode="auto"):
+    """
+    跟build_tasks_from_infer_ml是同一个"全录制视频+ML预标注"的思路，区别是
+    这个函数一次性合并多个类别（比如活动/睡觉/抓挠/未佩戴）的检测结果到
+    同一批task里，每个类别的片段各自打上自己的timeserieslabels——之前
+    build_tasks_from_infer_ml一次只认一个label_name，多类别时每个类别
+    各自输出一份独立的_full_ml_IMU*.json，同一个IMU要点开4个文件才能
+    分别看到4个类别的检测结果；这个函数让同一条狗的同一份录制在Label
+    Studio里一个task、一条时间轴上就能同时看到4个类别各自标出来的片段，
+    不用来回切文件对照。
+
+    infer_root: RESULT_ROOT/{day}这一级目录，下面按类别各有一个子目录
+    （RESULT_ROOT/{day}/{label}/_infer/*.json，跟run_review_bins_all_days.sh
+    的目录结构一致），不是某一个类别自己的_infer目录。
+    labels: 要合并的类别列表，比如["活动","睡觉","抓挠","未佩戴"]。
+    """
+    # 每个session+每条IMU收集来自多个类别的infer数据：
+    # sessions[sess]["imus"][imu_num][label] = 该类别这条IMU的infer json内容
+    sessions = {}
+    all_cam_nums_seen = set()
+
+    for label in labels:
+        label_dir = os.path.join(infer_root, label, "_infer")
+        infer_jsons = sorted(glob.glob(os.path.join(label_dir, "*_infer.json")))
+        for infer_path in infer_jsons:
+            with open(infer_path, encoding="utf-8") as f:
+                data = json.load(f)
+            csv_basename = data["csv_basename"]
+            sess = session_key(csv_basename)
+            stem = os.path.splitext(csv_basename)[0]
+
+            entry = sessions.setdefault(sess, {"imus": {}, "cam_nums_seen": set(), "any_stem": stem})
+
+            imu_num = parse_imu_num(stem)
+            if imu_num is not None:
+                entry["imus"].setdefault(imu_num, {})[label] = data
+
+            cam = parse_cam(csv_basename)
+            if cam:
+                cam_num = int(re.search(r"\d+", cam).group())
+                entry["cam_nums_seen"].add(cam_num)
+                all_cam_nums_seen.add(cam_num)
+
+    tasks = []
+    task_id = 1
+
+    for sess in sorted(sessions):
+        imus_data = sessions[sess]["imus"]
+        any_stem = sessions[sess]["any_stem"]
+
+        if cam_mode == "auto":
+            slot_count = max(sessions[sess]["cam_nums_seen"]) if sessions[sess]["cam_nums_seen"] else 1
+        else:
+            slot_count = int(cam_mode)
+
+        video_urls = {}
+        for n in range(1, slot_count + 1):
+            if n in all_cam_nums_seen:
+                cam_stem = camera_video_stem_of(any_stem, n)
+                video_urls[f"video{n}"] = f"{video_url_prefix.rstrip('/')}/{cam_stem}.mp4"
+            else:
+                video_urls[f"video{n}"] = ""
+
+        for imu_num in sorted(imus_data):
+            by_label = imus_data[imu_num]
+            # 同一条IMU的csv_basename在各个类别下应该完全一样(同一份原始
+            # 录制文件)，随便取一个类别的就行，不需要每个类别各自核对
+            cam_csv = next(iter(by_label.values()))["csv_basename"]
+            imu_label = f"IMU{imu_num}"
+
+            task_data = {"csv1": csv_url(cam_csv, csv_url_prefix)}
+            task_data.update(video_urls)
+
+            results = []
+            note_parts = []
+            for label in labels:
+                data = by_label.get(label)
+                scratch_segs = data.get("scratch_segments", []) if data else []
+                kept = [seg for seg in scratch_segs
+                       if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
+                results.extend(make_annotation(seg["start_ts"], seg["end_ts"], label) for seg in kept)
+                note_parts.append(f"{label}:{len(kept)}/{len(scratch_segs)}段达标")
+
+            note = f"模型ML自动检测(多类别合并)，{conf_field}>={min_conf}，" + "  ".join(note_parts)
+            annotations = [{
+                "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
+                "result": results,
+            }] if results else []
+
+            tasks.append({
+                "id": task_id,
+                "data": task_data,
+                "annotations": annotations,
+                "meta": {
+                    "session": sess, "csv_file": cam_csv,
+                    "imu_label": imu_label,
+                    "labeled_by": "ML",
+                    "note": note,
+                }
+            })
+            task_id += 1
+
+    return tasks
+
+
 # ── 入口 ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -534,22 +640,46 @@ def main():
                              "模式筛选具体标注哪些片段用的）")
     parser.add_argument("--ml_conf_field", default="conf_max", choices=["conf_max", "conf_mean"],
                         help="--ml_full_video模式下用哪个置信度字段判断，默认conf_max")
+    parser.add_argument("--ml_multi_labels", default="",
+                        help="传逗号分隔的多个类别（比如'活动,睡觉,抓挠,未佩戴'）时，"
+                             "--ml_full_video会切换成合并模式：同一条IMU、同一条时间轴"
+                             "上同时标出这几个类别各自检测到的片段，而不是每个类别各自"
+                             "生成一份独立文件。这时--infer_dir要指向RESULT_ROOT/{day}"
+                             "这一级目录（下面按类别各有一个子目录，run_review_bins_"
+                             "all_days.sh的标准结构），不是某个类别自己的_infer目录。"
+                             "--label参数在这个模式下不生效")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
 
     if args.ml_full_video:
-        infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
-        infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
-        infer_jsons = sorted(set(infer_jsons))
-        if not infer_jsons:
-            print(f"[错误] {args.infer_dir} 下没有找到 *_infer.json")
+        multi_labels = [l.strip() for l in args.ml_multi_labels.split(",") if l.strip()]
+
+        if multi_labels:
+            print(f"模式: 全录制文件+ML自动预标注(多类别合并: {multi_labels})，"
+                  f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
+            ml_tasks = build_tasks_from_infer_ml_multi(
+                args.infer_dir, multi_labels, args.csv_url_prefix, video_prefix,
+                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
+            suffix = "_full_ml_multi_"
+        else:
+            infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
+            infer_jsons += glob.glob(os.path.join(args.infer_dir, "*_infer.json"))
+            infer_jsons = sorted(set(infer_jsons))
+            if not infer_jsons:
+                print(f"[错误] {args.infer_dir} 下没有找到 *_infer.json")
+                return
+            print(f"模式: 全录制文件+ML自动预标注，找到 {len(infer_jsons)} 个推理结果，"
+                  f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
+            ml_tasks = build_tasks_from_infer_ml(
+                infer_jsons, args.csv_url_prefix, video_prefix, args.label,
+                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
+            suffix = "_full_ml_"
+
+        if not ml_tasks:
+            print(f"[错误] 没有生成任何task，检查--infer_dir路径是不是对的"
+                  f"{'（多类别合并模式--infer_dir要指向day这一级目录）' if multi_labels else ''}")
             return
-        print(f"模式: 全录制文件+ML自动预标注，找到 {len(infer_jsons)} 个推理结果，"
-              f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
-        ml_tasks = build_tasks_from_infer_ml(
-            infer_jsons, args.csv_url_prefix, video_prefix, args.label,
-            min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
 
         base, ext = os.path.splitext(args.output)
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
@@ -562,7 +692,7 @@ def main():
 
         for imu_label in sorted(by_imu):
             sub_tasks = by_imu[imu_label]
-            out_path = f"{base}_full_ml_{imu_label}{ext}"
+            out_path = f"{base}{suffix}{imu_label}{ext}"
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(sub_tasks, f, ensure_ascii=False, indent=2)
             n_hit = sum(1 for t in sub_tasks if t["annotations"])

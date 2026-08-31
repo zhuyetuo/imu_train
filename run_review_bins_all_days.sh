@@ -47,7 +47,13 @@
 #                 场次不管有没有检测到达标片段都会生成task(没检测到的标注结果
 #                 为空)，让复查的人能看到全部录制数据，方便顺便核查模型有没有
 #                 漏检，不是只导出命中的部分
-#   ML_MIN_CONF   ML_PRELABEL=1或IMU_STATS=1时，只有置信度>=这个值的抓挠片段才算数
+#   ML_PRELABEL_MULTI 传1时，跟ML_PRELABEL类似但TARGET_LABELS里的所有类别
+#                 （比如"活动,睡觉,抓挠,未佩戴"）合并标在同一条时间轴上，
+#                 每个机位一个文件(labelstudio_review_full_ml_multi_IMU1.json等)，
+#                 落在RESULT_ROOT/{day}/下（不是{day}/{label}/下）。跟ML_PRELABEL
+#                 可以同时开，互不影响，只是多生成一份合并视图，方便复查时不用在
+#                 各个类别的文件之间来回切换对照（默认0=不生成）
+#   ML_MIN_CONF   ML_PRELABEL=1/ML_PRELABEL_MULTI=1/IMU_STATS=1时，置信度>=这个值的片段才算数
 #                 （默认0.8，跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件
 #                 用的，这个是给ML预标注/IMU统计筛"算不算抓挠"用的，两处共用同一个
 #                 阈值和字段，保证网页上看到的C值统计跟Label Studio里实际标注出来
@@ -140,6 +146,7 @@ CAM_MODE="${CAM_MODE:-auto}"
 SPLIT_BY_IMU="${SPLIT_BY_IMU:-0}"
 MIN_CONF="${MIN_CONF:-}"
 ML_PRELABEL="${ML_PRELABEL:-0}"
+ML_PRELABEL_MULTI="${ML_PRELABEL_MULTI:-0}"
 ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
 ML_CONF_FIELD="${ML_CONF_FIELD:-conf_mean}"
 IMU_STATS="${IMU_STATS:-0}"
@@ -357,6 +364,30 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
                 --label "$label"
             echo "  $day [$label] → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
         done
+    done
+fi
+
+# ── ML自动预标注，多类别合并到同一条时间轴（可选）──────────
+# 跟上面ML_PRELABEL是同一套底层逻辑，区别是不按类别拆文件，同一个IMU
+# 的同一条时间轴上一次性标出TARGET_LABELS里所有类别各自的检测片段，
+# 复查时不用在活动/睡觉/抓挠/未佩戴四份文件之间来回切换对照
+if [[ "$ML_PRELABEL_MULTI" == "1" ]]; then
+    echo ""
+    echo "▶ 生成 ML 自动预标注任务（全录制视频，多类别合并: ${labels[*]}，$ML_CONF_FIELD>=$ML_MIN_CONF）..."
+    for day in "${days[@]}"; do
+        day_dir="$RESULT_ROOT/$day"
+        ls_json="$day_dir/labelstudio_review.json"
+        python src/review_to_labelstudio.py \
+            --infer_dir "$day_dir" \
+            --output "$ls_json" \
+            --csv_url_prefix "$LS_URL_PREFIX" \
+            $video_prefix_arg \
+            --ml_full_video \
+            --ml_multi_labels "$TARGET_LABELS" \
+            --ml_min_conf "$ML_MIN_CONF" \
+            --ml_conf_field "$ML_CONF_FIELD" \
+            --cam_mode "$CAM_MODE"
+        echo "  $day → ${ls_json%.json}_full_ml_multi_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done
 fi
 
