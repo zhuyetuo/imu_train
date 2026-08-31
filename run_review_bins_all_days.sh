@@ -83,6 +83,13 @@
 
 set -e
 
+# sklearn新版本把force_all_finite改名成ensure_all_finite了，旧版本
+# 训出来的模型/依赖库内部还在用旧参数名，每个worker进程都会打印一遍
+# FutureWarning，WORKERS开多的时候刷屏刷得很厉害——纯粹是版本过渡期的
+# 噪音，不影响推理结果，默认压掉。只在没有显式设置PYTHONWARNINGS时才
+# 给默认值，不覆盖用户自己的设置（比如想看到别的警告）
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::FutureWarning}"
+
 # ── 参数与默认值 ──────────────────────────────────────────
 DATA_ROOT="${DATA_ROOT:?请设置 DATA_ROOT 环境变量，例: DATA_ROOT=data/multicam_multiimu}"
 MODEL="${MODEL:?请设置 MODEL 环境变量，例: MODEL=results/processed_2026_7_23/16hz_remap_custom_3class/ml_rf.pkl}"
