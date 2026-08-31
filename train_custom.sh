@@ -60,6 +60,10 @@ trap cleanup INT TERM
 # ── 默认参数 ──────────────────────────────────────────────
 DATE=""
 HZ=16
+MISSING_STRATEGY="drop"    # drop(默认)/ffill/none——acc/gyro缺失值(蓝牙断联)
+                           # 怎么处理，见src/data/labelstudio_to_custom.py的
+                           # --missing_strategy说明。想对比不同处理方式训出来
+                           # 的模型效果，配合--tag分别跑几个版本
 MODEL_TYPE="rf"            # rf(默认)/xgb/lgbm/catboost/extratrees/histgb，
                            # 对应src/ml/train.py的--model，见该文件MODELS字典
 N_AUG=50
@@ -113,6 +117,7 @@ _print_help() {
                           默认等于--hz，见上面用法示例的说明）
   --hz HZ                训练目标采样率（默认16）
   --model TYPE           rf(默认)/xgb/lgbm/catboost/extratrees/histgb
+  --missing_strategy S   drop(默认)/ffill/none，acc/gyro缺失值(蓝牙断联)处理方式
   --label_mode MODE      majority(默认，多数投票)/center(窗口中心帧)
   --window_s SEC         训练窗口长度秒数（默认用configs/data.yaml的2秒）
   --stride_s SEC         训练窗口步长秒数（默认用configs/data.yaml的1秒）
@@ -137,6 +142,7 @@ while [[ $# -gt 0 ]]; do
     --date)           DATE="$2";           shift 2 ;;
     --hz)             HZ="$2";             shift 2 ;;
     --model)          MODEL_TYPE="$2";      shift 2 ;;
+    --missing_strategy) MISSING_STRATEGY="$2"; shift 2 ;;
     --n_aug)          N_AUG="$2";          shift 2 ;;
     --label)          LABELS+=("$2");      shift 2 ;;
     --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
@@ -278,6 +284,7 @@ if [[ ! -f "$CSV" || "$CLEAN" == "1" ]]; then
     --json "$JSON" \
     --output "$CSV" \
     --csv_dir "$CSV_DIR" \
+    --missing_strategy "$MISSING_STRATEGY" \
     --keep_labels
 fi
 
@@ -341,6 +348,7 @@ print(f'  合并完成，共 {len(merged)} 条任务')
         --json "$_ejson" \
         --output "$_ecsv" \
         --csv_dir "$CSV_DIR" \
+        --missing_strategy "$MISSING_STRATEGY" \
         --keep_labels
     fi
 
