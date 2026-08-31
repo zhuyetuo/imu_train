@@ -99,9 +99,38 @@ SOURCE_HZ=""               # 主--date数据自己真实的采样率，留空默
                            # 是50Hz原始采集，--hz 16是训练目标，就要传--source_hz 50，
                            # 不传会被静默当成已经是16Hz，不做重采样，时间轴是错的）
 
+_print_help() {
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'HELPEOF'
+
+全部参数:
+  --date DATE            必填，主批次日期目录名（data/raw_custom/<DATE>/）
+  --extra_date DATE:HZ   可重复传，额外合并的批次，HZ填该批次自己真实采样率
+  --source_hz HZ         主批次自己真实的采样率（跟--extra_date配合用，不传
+                          默认等于--hz，见上面用法示例的说明）
+  --hz HZ                训练目标采样率（默认16）
+  --model TYPE           rf(默认)/xgb/lgbm/catboost/extratrees/histgb
+  --label_mode MODE      majority(默认，多数投票)/center(窗口中心帧)
+  --window_s SEC         训练窗口长度秒数（默认用configs/data.yaml的2秒）
+  --stride_s SEC         训练窗口步长秒数（默认用configs/data.yaml的1秒）
+  --split_strategy S     random(默认)/subject/label_concat
+  --train_ratio R        训练集比例（默认0.9）
+  --val_ratio R          验证集比例（默认0.1）
+  --test_ratio R         测试集比例（默认0）
+  --n_aug N              每个原始片段生成的合成增强数量（默认50，配合--label用）
+  --label LABEL          可重复传，要合成数据的类别（不传默认只合成"抓挠"）
+  --skip_syn             跳过生成合成数据和方案B，只训练方案A(纯标注)
+  --feat_workers N        特征提取并行进程数（默认1，传-1用全部核心）
+  --tag TAG               输出目录后缀，同一个DATE想保留多个版本时用
+  --clean                 先删掉这个DATE+TAG对应的旧缓存再全新生成
+  -h, --help              打印这份帮助
+HELPEOF
+}
+
 # ── 解析参数 ──────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
+    -h|--help)        _print_help;          exit 0 ;;
     --date)           DATE="$2";           shift 2 ;;
     --hz)             HZ="$2";             shift 2 ;;
     --model)          MODEL_TYPE="$2";      shift 2 ;;
@@ -120,7 +149,7 @@ while [[ $# -gt 0 ]]; do
     --skip_syn)       SKIP_SYN=1;          shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
-    *) echo "未知参数: $1"; exit 1 ;;
+    *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
   esac
 done
 
@@ -136,7 +165,7 @@ if [[ ${#LABELS[@]} -eq 0 ]]; then
 fi
 
 if [[ -z "$DATE" ]]; then
-  echo "用法: bash train_custom.sh --date <DATE>  (例: --date 2026_7_23)"
+  echo "用法: bash train_custom.sh --date <DATE>  (例: --date 2026_7_23，--help 查看全部参数)"
   exit 1
 fi
 
