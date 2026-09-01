@@ -75,6 +75,10 @@
 #                 人工直接手动整段标一次，比删除几百个碎片段快得多。真实的短促行为
 #                 （比如抓挠只有几秒钟）如果比这个值还短也会被一起滤掉，几个类别
 #                 共用同一个阈值，没法按类别分别设置
+#   ML_MERGE_GAP_S ML_PRELABEL_MULTI=1时，多类别合并视图最后一步收尾清理：排序后
+#                 紧邻、label相同的两段最多间隔多少秒还会合并成一段（默认2秒）。
+#                 覆盖窗口重叠效应/低置信度孤立噪声窗口造成的碎片化，但不会把间隔
+#                 更长、真正独立的两次同类别事件（比如两次分开的抓挠）误合并成一段
 #   IMU_STATS     传1时，全部天推理完之后额外跑一遍src/imu_scratch_daily_stats.py，
 #                 用ML_MIN_CONF/ML_CONF_FIELD同一套置信度标准筛"算不算抓挠"，统计
 #                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，每天各产出一份
@@ -165,6 +169,7 @@ ML_BLANK="${ML_BLANK:-0}"
 ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
 ML_CONF_FIELD="${ML_CONF_FIELD:-conf_mean}"
 ML_MIN_SEG_S="${ML_MIN_SEG_S:-0}"
+ML_MERGE_GAP_S="${ML_MERGE_GAP_S:-2.0}"
 IMU_STATS="${IMU_STATS:-0}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
@@ -404,6 +409,7 @@ if [[ "$ML_PRELABEL_MULTI" == "1" ]]; then
             --ml_min_conf "$ML_MIN_CONF" \
             --ml_conf_field "$ML_CONF_FIELD" \
             --ml_min_seg_s "$ML_MIN_SEG_S" \
+            --ml_merge_gap_s "$ML_MERGE_GAP_S" \
             --cam_mode "$CAM_MODE"
         echo "  $day → ${ls_json%.json}_full_ml_multi_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done

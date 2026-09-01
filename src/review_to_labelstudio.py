@@ -157,22 +157,32 @@ def seg_duration_s(seg):
         return 0.0
 
 
-def merge_adjacent_same_label(results):
-    """多类别合并视图专用的收尾清理：按开始时间排序后，只要时间上连续的
-    两段annotation是同一个label，就无条件合并成一段——不管中间隔了多久。
+def merge_adjacent_same_label(results, max_gap_s=2.0):
+    """多类别合并视图专用的收尾清理：按开始时间排序后，紧挨着的两段
+    annotation如果是同一个label、且间隔不超过max_gap_s，就合并成一段。
 
-    "不管隔多久"是关键：能落到这个列表里的，是ML_MIN_CONF/--ml_min_seg_s
-    筛选过后还留下来的片段，如果两段"睡觉"中间原本夹着一个别的类别的
-    片段（不管置信度多低），排序后那个片段会作为独立的一项出现在它们
-    中间，天然就会挡住合并（因为不是"紧邻的两项"）；如果中间那个别的
-    类别的片段因为置信度/时长不够被筛掉了，显示出来的就是"两段睡觉之间
-    什么都没有"——这种情况下，从人工复查者的视角看，这就是同一段连续的
-    "睡觉"，之前因为一堆置信度/合并阈值这些内部细节被拆成了两截，展示
-    层面理应看成一段。这一步只在多类别合并视图里做（跟merge_gap_s/
-    other_label_conf_threshold那套"要不要相信某个窗口"的判断完全无关，
-    是纯粹基于"最终展示出来的相邻两段是不是同一个label"的收尾），单类别
-    模式(build_tasks_from_infer_ml)因为整个列表本来就只有一个label，
-    不适用这个逻辑——那样会把全部片段合并成一段。"""
+    能落到这个列表里的，是ML_MIN_CONF/--ml_min_seg_s筛选过后还留下来的
+    片段，如果两段"睡觉"中间原本夹着一个别的类别的片段（不管置信度
+    多低），排序后那个片段会作为独立的一项出现在它们中间，天然就会
+    挡住合并（因为不是"紧邻的两项"）；如果中间那个别的类别的片段因为
+    置信度/时长不够被筛掉了，显示出来的就是"两段睡觉之间什么都没有"——
+    这种情况下，从人工复查者的视角看，这就是同一段连续的"睡觉"，之前
+    因为一堆置信度/合并阈值这些内部细节被拆成了两截，展示层面理应看成
+    一段。
+
+    max_gap_s这个上限是真实需要的，不能"不管隔多久都合并"——之前那版
+    这么做过，实测会把两次真正独立发生、中间隔了几十秒的同类别事件
+    （比如两次分开的"抓挠"，中间那段时间因为置信度不够/根本没检测到
+    任何类别而完全空白）错误融合成一段，误导复查人员以为是一次连续
+    事件。默认2秒——覆盖"窗口重叠效应/低置信度孤立噪声窗口造成的碎片
+    化"这类应该被吞掉的间隙（量级在一个window_size左右），但挡住真正
+    独立的、间隔更长的重复事件被误合并。
+
+    这一步只在多类别合并视图里做（跟merge_gap_s/other_label_conf_threshold
+    那套"要不要相信某个窗口"的判断完全无关，是纯粹基于"最终展示出来的
+    相邻两段是不是同一个label、离得够不够近"的收尾），单类别模式
+    (build_tasks_from_infer_ml)因为整个列表本来就只有一个label，不适用
+    这个逻辑——那样会把全部片段合并成一段。"""
     def _parse(t):
         return datetime.strptime(t, "%Y-%m-%d %H:%M:%S.%f")
 
@@ -181,8 +191,10 @@ def merge_adjacent_same_label(results):
     for r in items:
         lbl = r["value"]["timeserieslabels"][0]
         if merged and merged[-1]["value"]["timeserieslabels"][0] == lbl:
-            merged[-1]["value"]["end"] = r["value"]["end"]
-            continue
+            gap = (_parse(r["value"]["start"]) - _parse(merged[-1]["value"]["end"])).total_seconds()
+            if gap <= max_gap_s:
+                merged[-1]["value"]["end"] = r["value"]["end"]
+                continue
         merged.append(r)
     return merged
 
@@ -523,7 +535,7 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
 
 def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_url_prefix,
                                     min_conf=0.8, conf_field="conf_max", cam_mode="auto", min_seg_s=0.0,
-                                    blank=False):
+                                    blank=False, merge_adjacent_gap_s=2.0):
     """
     跟build_tasks_from_infer_ml是同一个"全录制视频+ML预标注"的思路，区别是
     这个函数一次性合并多个类别（比如活动/睡觉/抓挠/未佩戴）的检测结果到
@@ -622,7 +634,7 @@ def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_ur
                     results.extend(make_annotation(seg["start_ts"], seg["end_ts"], label) for seg in kept)
                     note_parts.append(f"{label}:{len(kept)}/{len(scratch_segs)}段达标")
 
-                results = merge_adjacent_same_label(results)
+                results = merge_adjacent_same_label(results, max_gap_s=merge_adjacent_gap_s)
                 note = f"模型ML自动检测(多类别合并)，{conf_field}>={min_conf}，" + "  ".join(note_parts)
                 annotations = [{
                     "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
@@ -722,6 +734,11 @@ def main():
                              "=不过滤）。用来对付设备长时间没佩戴、模型在睡觉/未佩戴之间"
                              "来回跳、切出几百个几十秒碎片段这种情况——碎片段留着也没法"
                              "逐个核对，不如整段不标，让人直接手动标一次")
+    parser.add_argument("--ml_merge_gap_s", type=float, default=2.0,
+                        help="仅--ml_multi_labels模式生效。多类别合并视图收尾清理时，"
+                             "排序后紧邻、label相同的两段最多间隔多少秒还会合并成一段"
+                             "（默认2秒，覆盖窗口重叠效应/低置信度孤立噪声窗口造成的碎片，"
+                             "但不会把间隔更长、真正独立的两次同类别事件误合并成一段）")
     parser.add_argument("--ml_blank", action="store_true",
                         help="--ml_full_video模式下，完全不附带任何模型预标注（--label/"
                              "--ml_min_conf/--ml_conf_field/--ml_min_seg_s在这个模式下都"
@@ -751,7 +768,7 @@ def main():
             ml_tasks = build_tasks_from_infer_ml_multi(
                 args.infer_dir, multi_labels, args.csv_url_prefix, video_prefix,
                 min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode,
-                min_seg_s=args.ml_min_seg_s)
+                min_seg_s=args.ml_min_seg_s, merge_adjacent_gap_s=args.ml_merge_gap_s)
             suffix = "_full_ml_multi_"
         else:
             infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
