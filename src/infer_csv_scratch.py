@@ -445,26 +445,52 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             print(f"  【合并】{merged_str}")
 
     # 跨类别裁剪重叠区间——上面每个类别各自的合并逻辑已经能保证"同一个
-    # 类别自己的片段不重叠"，但不同类别之间还是会重叠：majority label_mode
-    # 下每个正例窗口的显示时长是整个window_size（不是stride），而窗口本身
-    # 是按stride滑动、彼此重叠的（比如window_s=1/stride_s=0.5就是50%重叠）。
-    # 一段"活动"的最后一个窗口和紧接着的"抓挠"第一个窗口，两者各自的
-    # window_size区间天然就有重叠部分，各自单独看没问题（每个类别的
-    # _infer.json只含它自己的片段），但用ML_PRELABEL_MULTI把多个类别画到
-    # 同一条时间轴上就会出现"活动1-100，抓挠40-60，60-100又是活动"这种
-    # 一段时间被两个类别同时标注的情况——不是merge_gap桥接的锅（上面已经
-    # 修过那个问题），是不同类别相邻片段边界本身的重叠，必须在这里跨类别
-    # 统一裁剪：把所有类别的片段按开始时间排成一条链，只要前一段的结束
-    # 时间晚于下一段（不同类别）的开始时间，就把前一段的结束时间收缩到
-    # 刚好等于下一段的开始时间——让相邻片段贴合但不重叠，谁先开始占用
-    # 这段时间，后来的类别从它结束的地方接着算，不覆盖已经被占用的部分。
-    all_segs_sorted = sorted(
-        ((seg, label) for label in merged_by_label for seg in merged_by_label[label]
-         if seg[0] is not None and seg[1] is not None),
-        key=lambda pair: pair[0][0])
-    for (seg_cur, label_cur), (seg_nxt, label_nxt) in zip(all_segs_sorted, all_segs_sorted[1:]):
-        if label_cur != label_nxt and seg_cur[1] > seg_nxt[0]:
+    # 类别自己的片段不重叠"，但不同类别之间还是会重叠，原因有两个：
+    #   1) majority label_mode下每个正例窗口的显示时长是整个window_size
+    #      （不是stride），窗口本身按stride滑动、彼此重叠，相邻两个不同
+    #      类别的窗口天然就有重叠的显示区间。
+    #   2) merge_gap_s桥接：某类别两段本来分开的片段，如果间隔里那1~2个
+    #      窗口被argmax成了别的类别、但置信度没到other_label_conf_threshold，
+    #      会被当成"噪声flicker"桥接成一整段——但那1~2个窗口本身在别的
+    #      类别自己的提取里，一样会形成它自己的一小段（这里的
+    #      confidence_threshold全程是0.0），如果显示阈值允许它露出来，
+    #      就会跟桥接后的这一大段重叠。
+    # 第1种情况裁掉的是很小一段（一个window_size以内），直接收缩前一段
+    # 的结束时间没问题；但第2种情况如果直接收缩，桥接段在"别的类别"那
+    # 一小段结束之后原本还有真实数据（比如"活动"桥接了0~100，中间被
+    # "抓挠"占了40~42，如果只是把"活动"的结束时间缩到40，那42~100这段
+    # 活动的真实windows就会凭空消失，变成一段没有任何显示内容的空白——
+    # 这正是实测中大量"两段同label中间有真实空白"的根因）。所以裁剪时
+    # 要判断前一段是不是"整个盖过了"下一段（不只是尾部重叠）：如果是，
+    # 说明前一段桥接吞掉的窗口比下一段还长，除了缩短前一段的结束时间，
+    # 还要把下一段结束之后剩下的尾巴拆成一段新的、还给前一段原本的类别，
+    # 不能让这部分真实存在的数据凭空消失。
+    #
+    # 拆分出来的尾巴段又是一个新片段，可能跟后面别的片段再次重叠，所以
+    # 用循环重复裁剪，直到某一轮完全没有变化为止（片段数量有限，几轮
+    # 内必然收敛；给个轮数上限防止极端情况死循环）。
+    def _resolve_cross_label_overlaps_once():
+        all_segs_sorted = sorted(
+            ((seg, label) for label in merged_by_label for seg in merged_by_label[label]
+             if seg[0] is not None and seg[1] is not None),
+            key=lambda pair: pair[0][0])
+        changed = False
+        for (seg_cur, label_cur), (seg_nxt, label_nxt) in zip(all_segs_sorted, all_segs_sorted[1:]):
+            if label_cur == label_nxt or seg_cur[1] <= seg_nxt[0]:
+                continue
+            if seg_cur[1] > seg_nxt[1]:
+                # 前一段整个盖过了下一段，尾巴部分（下一段结束之后到前
+                # 一段原本结束为止）是真实存在的数据，拆成新的一段还给
+                # label_cur，不能直接被下面的收缩操作吞掉
+                tail = [seg_nxt[1], seg_cur[1], seg_cur[2], seg_cur[3]]
+                merged_by_label[label_cur].append(tail)
             seg_cur[1] = seg_nxt[0]
+            changed = True
+        return changed
+
+    for _ in range(10):
+        if not _resolve_cross_label_overlaps_once():
+            break
 
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
     # 每个目标类别各写一份 JSON，落在 output_dir/{label}/ 下——不同类别的
