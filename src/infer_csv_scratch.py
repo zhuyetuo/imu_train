@@ -388,7 +388,18 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             if merged and t0 is not None and merged[-1][1] is not None:
                 gap = (t0 - merged[-1][1]).total_seconds()
                 if gap <= merge_gap_s and not _gap_has_confident_other_label(merged[-1][3], i0):
-                    merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
+                    # 用list不用tuple——下面"跨类别裁剪重叠"那一步会直接
+                    # seg_cur[1]=...原地改这里产出的每一项，之前这里写成
+                    # tuple，只要某个session里发生过至少一次桥接合并
+                    # （很常见，比如"活动"这种长时间类别几乎必然会经过
+                    # 这一行），后面裁剪那步给tuple赋值就会直接抛
+                    # TypeError，整个infer_file()崩溃，这个session的
+                    # 推理结果完全没有写进_infer.json——外层main()的
+                    # try/except只是打印一行[错误]然后跳过，不会让整个
+                    # 批处理停下来，容易被忽略掉，表现成"这一批文件里大
+                    # 部分session的结果消失了"，看着像是被覆盖，其实是
+                    # 从来没成功生成过。
+                    merged[-1] = [merged[-1][0], t1, merged[-1][2], i1]
                     continue
             merged.append([t0, t1, i0, i1])
 
