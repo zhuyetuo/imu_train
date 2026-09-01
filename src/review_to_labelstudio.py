@@ -37,6 +37,7 @@ import glob
 import json
 import os
 import re
+from datetime import datetime
 
 
 def _cam_mode_type(value: str) -> str:
@@ -141,6 +142,20 @@ def video_url(basename: str, video_prefix: str) -> str:
 
 
 # ── 标注生成 ──────────────────────────────────────────────────────────────────
+
+def seg_duration_s(seg):
+    """算一个scratch_segment的时长(秒)，start_ts/end_ts格式跟infer_csv_scratch.py
+    里ts_fmt()保持一致："%Y-%m-%d %H:%M:%S.%f"（毫秒截断到3位）。给
+    --ml_min_seg_s过滤用——解析失败（时间戳缺失）时当0秒处理，会被
+    min_seg_s>0的过滤条件挡掉，不是让程序崩溃。"""
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S.%f"
+        t0 = datetime.strptime(seg["start_ts"], fmt)
+        t1 = datetime.strptime(seg["end_ts"], fmt)
+        return (t1 - t0).total_seconds()
+    except Exception:
+        return 0.0
+
 
 def make_annotation(start_ts, end_ts, label):
     return {
@@ -331,7 +346,7 @@ def build_tasks_from_infer(infer_jsons, csv_url_prefix, video_url_prefix,
 # ── 模式 3：全录制文件 + 高置信度自动预标注(标注人=ML) ───────────────────────
 
 def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, label_name,
-                              min_conf=0.8, conf_field="conf_max", cam_mode="auto"):
+                              min_conf=0.8, conf_field="conf_max", cam_mode="auto", min_seg_s=0.0):
     """
     在原始完整录制视频上直接生成"模型预标注"任务，不裁剪clip：
       - 每个session(不管有没有检测到达标片段)都生成一个task，让复查的人
@@ -345,6 +360,11 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
         看过了，直接跳过，跟"提醒核查漏检"这个目的正好相反
       - 机位处理跟build_tasks_from_clips一样支持cam_mode(auto/2/3)
       - 标注人固定标成"ML"（completed_by），跟人工标注区分开
+      - min_seg_s>0时，额外按片段时长过滤：短于min_seg_s的片段直接不标
+        （不是标出来再让人删）。用来对付"设备一小时没戴，模型在睡觉/
+        未佩戴之间来回跳、切出几百个几十秒的碎片段"这种情况——碎片段
+        对复查没有意义，反而增加要逐个删除/合并的工作量；干脆整个不标，
+        让这段时间保持空白，人直接在Label Studio里整段手动标一次就行
     """
     # 一个session里：每条狗(IMU)有自己的CSV，机位(cam)有自己的视频，两者
     # 不是一回事——房间固定就2个机位，但可以同时挂4条狗，文件名会出现
@@ -431,7 +451,8 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
             # "额外筛一份高置信度子集"的思路，只是这里作用在整段视频的标注
             # 内容上，不是文件层面的筛选
             kept = [seg for seg in scratch_segs
-                   if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
+                   if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")
+                   and seg_duration_s(seg) >= min_seg_s]
             results = [make_annotation(seg["start_ts"], seg["end_ts"], label_name) for seg in kept]
 
             # 不管results是不是空都生成task——让复查人能看到全部录制数据，
@@ -471,7 +492,7 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
 
 
 def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_url_prefix,
-                                    min_conf=0.8, conf_field="conf_max", cam_mode="auto"):
+                                    min_conf=0.8, conf_field="conf_max", cam_mode="auto", min_seg_s=0.0):
     """
     跟build_tasks_from_infer_ml是同一个"全录制视频+ML预标注"的思路，区别是
     这个函数一次性合并多个类别（比如活动/睡觉/抓挠/未佩戴）的检测结果到
@@ -486,6 +507,12 @@ def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_ur
     （RESULT_ROOT/{day}/{label}/_infer/*.json，跟run_review_bins_all_days.sh
     的目录结构一致），不是某一个类别自己的_infer目录。
     labels: 要合并的类别列表，比如["活动","睡觉","抓挠","未佩戴"]。
+    min_seg_s>0时，按片段时长过滤：短于min_seg_s的片段直接不标（每个
+    类别各自按这个阈值过滤，不是看合并后的）。设备一小时没佩戴、模型在
+    "睡觉"/"未佩戴"之间来回跳，切出几百个几十秒的碎片段，人工没法逐个
+    核对/合并——用这个阈值把碎片段整体滤掉，那一整段时间就完全没有
+    预标注，人直接在Label Studio里手动整段标一次，比删除几百个碎片段
+    快得多。
     """
     # 每个session+每条IMU收集来自多个类别的infer数据：
     # sessions[sess]["imus"][imu_num][label] = 该类别这条IMU的infer json内容
@@ -550,7 +577,8 @@ def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_ur
                 data = by_label.get(label)
                 scratch_segs = data.get("scratch_segments", []) if data else []
                 kept = [seg for seg in scratch_segs
-                       if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")]
+                       if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")
+                       and seg_duration_s(seg) >= min_seg_s]
                 results.extend(make_annotation(seg["start_ts"], seg["end_ts"], label) for seg in kept)
                 note_parts.append(f"{label}:{len(kept)}/{len(scratch_segs)}段达标")
 
@@ -648,6 +676,11 @@ def main():
                              "这一级目录（下面按类别各有一个子目录，run_review_bins_"
                              "all_days.sh的标准结构），不是某个类别自己的_infer目录。"
                              "--label参数在这个模式下不生效")
+    parser.add_argument("--ml_min_seg_s", type=float, default=0.0,
+                        help="--ml_full_video模式下，短于这个秒数的片段直接不标（默认0"
+                             "=不过滤）。用来对付设备长时间没佩戴、模型在睡觉/未佩戴之间"
+                             "来回跳、切出几百个几十秒碎片段这种情况——碎片段留着也没法"
+                             "逐个核对，不如整段不标，让人直接手动标一次")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
@@ -660,7 +693,8 @@ def main():
                   f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
             ml_tasks = build_tasks_from_infer_ml_multi(
                 args.infer_dir, multi_labels, args.csv_url_prefix, video_prefix,
-                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
+                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode,
+                min_seg_s=args.ml_min_seg_s)
             suffix = "_full_ml_multi_"
         else:
             infer_jsons = glob.glob(os.path.join(args.infer_dir, "**", "*_infer.json"), recursive=True)
@@ -673,7 +707,8 @@ def main():
                   f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
             ml_tasks = build_tasks_from_infer_ml(
                 infer_jsons, args.csv_url_prefix, video_prefix, args.label,
-                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode)
+                min_conf=args.ml_min_conf, conf_field=args.ml_conf_field, cam_mode=args.cam_mode,
+                min_seg_s=args.ml_min_seg_s)
             suffix = "_full_ml_"
 
         if not ml_tasks:

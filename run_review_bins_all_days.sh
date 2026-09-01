@@ -61,6 +61,13 @@
 #   ML_CONF_FIELD ML_PRELABEL=1或IMU_STATS=1时，用conf_max还是conf_mean判断置信度
 #                 达没达标（默认conf_mean——比conf_max更稳，误报更少；conf_max更
 #                 容易找出漏检但也更容易把噪声算进去，想换回conf_max就显式传这个）
+#   ML_MIN_SEG_S  ML_PRELABEL=1/ML_PRELABEL_MULTI=1时，短于这个秒数的片段直接不标
+#                 （默认0=不过滤）。设备长时间没佩戴时模型容易在"睡觉"/"未佩戴"之间
+#                 来回跳、切出几百个几十秒的碎片段，留着没法逐个核对/合并；调大这个
+#                 值（比如60或300）能把这些碎片段整体滤掉，让那一整段时间保持空白，
+#                 人工直接手动整段标一次，比删除几百个碎片段快得多。真实的短促行为
+#                 （比如抓挠只有几秒钟）如果比这个值还短也会被一起滤掉，几个类别
+#                 共用同一个阈值，没法按类别分别设置
 #   IMU_STATS     传1时，全部天推理完之后额外跑一遍src/imu_scratch_daily_stats.py，
 #                 用ML_MIN_CONF/ML_CONF_FIELD同一套置信度标准筛"算不算抓挠"，统计
 #                 每天每个机位(IMU)的抓挠次数/时长/聚集/持续/中断等，每天各产出一份
@@ -149,6 +156,7 @@ ML_PRELABEL="${ML_PRELABEL:-0}"
 ML_PRELABEL_MULTI="${ML_PRELABEL_MULTI:-0}"
 ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
 ML_CONF_FIELD="${ML_CONF_FIELD:-conf_mean}"
+ML_MIN_SEG_S="${ML_MIN_SEG_S:-0}"
 IMU_STATS="${IMU_STATS:-0}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
 MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
@@ -360,6 +368,7 @@ if [[ "$ML_PRELABEL" == "1" ]]; then
                 --ml_full_video \
                 --ml_min_conf "$ML_MIN_CONF" \
                 --ml_conf_field "$ML_CONF_FIELD" \
+                --ml_min_seg_s "$ML_MIN_SEG_S" \
                 --cam_mode "$CAM_MODE" \
                 --label "$label"
             echo "  $day [$label] → ${ls_json%.json}_full_ml_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
@@ -386,6 +395,7 @@ if [[ "$ML_PRELABEL_MULTI" == "1" ]]; then
             --ml_multi_labels "$TARGET_LABELS" \
             --ml_min_conf "$ML_MIN_CONF" \
             --ml_conf_field "$ML_CONF_FIELD" \
+            --ml_min_seg_s "$ML_MIN_SEG_S" \
             --cam_mode "$CAM_MODE"
         echo "  $day → ${ls_json%.json}_full_ml_multi_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done
