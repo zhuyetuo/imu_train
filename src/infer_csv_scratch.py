@@ -467,8 +467,41 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     # 不能让这部分真实存在的数据凭空消失。
     #
     # 拆分出来的尾巴段又是一个新片段，可能跟后面别的片段再次重叠，所以
-    # 用循环重复裁剪，直到某一轮完全没有变化为止（片段数量有限，几轮
-    # 内必然收敛；给个轮数上限防止极端情况死循环）。
+    # 用循环重复裁剪，直到某一轮完全没有变化为止。
+    #
+    # 收敛所需轮数：每一轮_resolve_cross_label_overlaps_once()只能剥离
+    # "一层"嵌套重叠（新拆出的tail要等下一轮重新排序后才会被纳入比较），
+    # N个嵌套在同一个桥接大段里的异类别小段需要恰好N+1轮才能收敛。之前
+    # 固定写死range(10)，超过9个嵌套小段（多类别+confidence_threshold=0.0
+    # 的组合下完全可能出现）会在没收敛的情况下被强行截断，且没有任何
+    # 提示——merged_by_label里会静默残留真实的跨类别时间重叠，直接写进
+    # JSON，等于这套裁剪机制本该修的"同一段时间被两个类别同时标注"问题
+    # 在深层嵌套场景下原样复现。改成按片段总数动态设定轮数上限（远高于
+    # 实际需要的量级），真的还不收敛就打印警告而不是悄悄放弃。
+    #
+    # i0/i1同步问题：裁剪只改t0/t1（真实显示的时间边界），如果不同步
+    # 重新计算i0/i1（窗口下标范围，conf_max/conf_mean/n_windows就是拿
+    # 它去筛start_indices算的），被裁剪过的头部和拆出来的尾部会共用
+    # 同一份"裁剪前整段"的窗口范围算出一模一样但都不准确的置信度统计，
+    # 而且这个不准的统计还会影响--ml_min_conf/--ml_min_seg_s过滤的
+    # 结果（该显示的被误杀，不该显示的被误放行）。用start_indices/
+    # idx_to_ts/window_bounds重新定位真正落在新边界内的窗口下标。
+    def _shrink_i1(seg, new_t1):
+        """把seg的i1收紧到新结束时间new_t1对应的窗口下标（seg[2]/seg[3]
+        此时还是裁剪前的原始范围，必须在改seg[1]之前/之后都能正确读到
+        原始i0/i1，所以这里直接从seg读，不额外传参）。"""
+        i0, i1 = seg[2], seg[3]
+        candidates = [s for s in start_indices if i0 <= s <= i1
+                      and idx_to_ts(window_bounds(s)[1]) <= new_t1]
+        seg[3] = max(candidates) if candidates else i0
+
+    def _shrink_i0(seg, new_t0):
+        """把seg的i0收紧到新起始时间new_t0对应的窗口下标，语义同上。"""
+        i0, i1 = seg[2], seg[3]
+        candidates = [s for s in start_indices if i0 <= s <= i1
+                      and idx_to_ts(window_bounds(s)[0]) >= new_t0]
+        seg[2] = min(candidates) if candidates else i1
+
     def _resolve_cross_label_overlaps_once():
         all_segs_sorted = sorted(
             ((seg, label) for label in merged_by_label for seg in merged_by_label[label]
@@ -481,16 +514,53 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             if seg_cur[1] > seg_nxt[1]:
                 # 前一段整个盖过了下一段，尾巴部分（下一段结束之后到前
                 # 一段原本结束为止）是真实存在的数据，拆成新的一段还给
-                # label_cur，不能直接被下面的收缩操作吞掉
+                # label_cur，不能直接被下面的收缩操作吞掉。尾巴的i1沿用
+                # seg_cur原本的i1（这一头没被裁过，本来就对），只有i0
+                # 需要重新定位到新起点
                 tail = [seg_nxt[1], seg_cur[1], seg_cur[2], seg_cur[3]]
+                _shrink_i0(tail, seg_nxt[1])
                 merged_by_label[label_cur].append(tail)
+            _shrink_i1(seg_cur, seg_nxt[0])
             seg_cur[1] = seg_nxt[0]
             changed = True
         return changed
 
-    for _ in range(10):
+    max_trim_passes = max(50, 4 * sum(len(v) for v in merged_by_label.values()))
+    for _pass in range(max_trim_passes):
         if not _resolve_cross_label_overlaps_once():
             break
+    else:
+        print(f"  [警告] {display_name}: 跨类别裁剪超过{max_trim_passes}轮仍未收敛，"
+              f"可能仍残留跨类别时间重叠，建议人工核查这份结果")
+
+    # 裁剪+拆分会把tail片段append到列表末尾，不再按时间顺序排列——
+    # extract_clips.py等下游按数组下标当"clip序号"烧进文件名/任务顺序，
+    # 乱序会导致序号跟真实发生时间对不上（不丢数据，但显示/文件名的
+    # 先后语义会跟事实不符）。这里统一按i0重新排一次序，一次性堵住所有
+    # 下游对"顺序=时间序"的隐式假设，不用每个消费者各自打补丁。
+    for label in merged_by_label:
+        merged_by_label[label].sort(key=lambda s: s[2])
+
+    # keep_isolated/min_windows过滤（第412-429行附近）只在跨类别裁剪
+    # 之前对每个类别的原始片段跑过一次，用的是当时的i0/i1。裁剪阶段
+    # 新拆出来的tail片段是裁剪之后才产生的，从来没有经过这道过滤——
+    # 哪怕tail自己修正后只对应1个窗口（按keep_isolated=0的过滤意图本该
+    # 被当成孤立噪声丢弃），也会因为绕过了这道检查而直接进入输出。
+    # i0/i1现在已经同步修正过，count_windows()能正确反映每段真实对应
+    # 的窗口数，这里统一对全部片段（含tail）再跑一遍同样的过滤，行为
+    # 上跟"过滤发生在裁剪之后"完全等价，不需要给tail单独写一套逻辑。
+    if not keep_isolated or min_windows > 1:
+        for label in merged_by_label:
+            segs = merged_by_label[label]
+            before = len(segs)
+            if not keep_isolated:
+                segs = [s for s in segs if count_windows(s) > 1]
+            if min_windows > 1:
+                segs = [s for s in segs if count_windows(s) >= min_windows]
+            if before != len(segs) and not scratch_only:
+                print(f"  [过滤][{label}] 跨类别裁剪产生的片段中，丢弃 {before - len(segs)} 段"
+                      f"（不满足keep_isolated/min_windows）")
+            merged_by_label[label] = segs
 
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
     # 每个目标类别各写一份 JSON，落在 output_dir/{label}/ 下——不同类别的
