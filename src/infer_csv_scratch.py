@@ -235,7 +235,8 @@ def _extract_label_segments(preds, confs, start_indices, classes, window_bounds,
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", target_labels=None, is_dl=False, **kwargs):
+               resample_method="poly", target_labels=None, is_dl=False,
+               other_label_conf_threshold=0.5, **kwargs):
     # target_labels：要独立统计/输出的目标类别列表，默认只有"抓挠"，跟改造前
     # 行为完全一致。多个类别时，output_dir 下会按类别各建一个子目录，互不
     # 混淆（见函数末尾"保存 JSON 结果"部分）——CSV读取/降采样/重力对齐/特征
@@ -362,13 +363,23 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         # 问题完全看不出来(只有它自己的片段，不会跟别的类别比对)，多类别
         # 合并到同一条时间轴才会暴露出"同一段时间被两个类别同时标注"这个
         # 问题。改成合并前检查间隔内每个窗口的argmax预测——只要有任何一个
-        # 窗口被置信预测(conf>=confidence_threshold)成了不是target_label
-        # 的类别，就不桥接，保留成两段独立片段，避免吞掉中间那段真实发生
-        # 的别的行为。
+        # 窗口被置信预测成了不是target_label的类别，就不桥接，保留成两段
+        # 独立片段，避免吞掉中间那段真实发生的别的行为。
+        #
+        # 这里的"置信"门槛必须是一个有意义的值(other_label_conf_threshold，
+        # 默认0.5)，不能像最初那版直接复用confidence_threshold——那个参数
+        # 从来没被run_review_bins_all_days.sh传过，默认是0.0，"conf>=0.0"
+        # 对任何窗口恒成立，等于只要中间有任意一个窗口argmax不是
+        # target_label（哪怕是softmax概率0.26 vs 0.25这种几乎打平的噪声
+        # flicker）就会阻止合并——实测同一个类别里1270对相邻同类别片段，
+        # 594对因为这个问题被错误拆开成几百个碎段（"1-50睡觉、50-100睡觉"
+        # 中间就夹着一个噪声flicker窗口）。改成要求conf>=0.5（比随便argmax
+        # 一下要高得多、真正算"这一帧模型确实倾向于别的类别"）才算数，
+        # 噪声级别的flicker不再挡合并。
         def _gap_has_confident_other_label(prev_last_i, next_first_i):
             for pred_id, conf, start_i in zip(preds, confs, start_indices):
                 if prev_last_i < start_i < next_first_i:
-                    if classes[pred_id] != target_label and conf >= confidence_threshold:
+                    if classes[pred_id] != target_label and conf >= other_label_conf_threshold:
                         return True
             return False
 
