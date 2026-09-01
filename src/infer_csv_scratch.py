@@ -276,8 +276,14 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         X            = X[valid_windows]
         start_indices = [s for s, v in zip(start_indices, valid_windows) if v]
         n_skipped = sum(not v for v in valid_windows)
-        if n_skipped and not scratch_only:
-            print(f"  [过滤] 跳过 {n_skipped} 个缺失率>30% 的窗口")
+        # 之前这条跟--scratch_only绑在一起，被压没了——scratch_only本来是
+        # 为了减少"没检测到目标行为"这种噪音，但"这个文件因为数据缺失跳过
+        # 了多少窗口"是数据质量诊断，跟检没检测到目标行为是两回事，不该
+        # 被一起压掉。run_review_bins_all_days.sh默认就带--scratch_only，
+        # 之前这条消息在正常批量跑的日志里从来看不到，没法确认某段时间轴
+        # 上的空白到底是不是这里跳过的窗口导致的。
+        if n_skipped:
+            print(f"  [过滤] {display_name}: 跳过 {n_skipped} 个缺失率>30% 的窗口")
     if len(X) == 0:
         return
 
