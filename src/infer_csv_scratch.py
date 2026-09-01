@@ -353,12 +353,30 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         # 还是要保存。
         skip_print = scratch_only and not raw_segs
 
-        # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）
+        # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）——但不跨越"这段
+        # 间隔里其实是另一个类别置信预测"的情况去合并：ML_PRELABEL_MULTI把
+        # 多个类别的片段画在同一条时间轴上之后才发现，比如"抓挠"只持续了
+        # 不到1s(1~2个窗口)，前后都是"活动"，之前这里只看时间间隔够不够
+        # 短(<=merge_gap_s)就无条件桥接，桥接后的"活动"片段会整段盖住中间
+        # 那段真实是"抓挠"的时间区间——单独看"抓挠"这一个类别的文件时这个
+        # 问题完全看不出来(只有它自己的片段，不会跟别的类别比对)，多类别
+        # 合并到同一条时间轴才会暴露出"同一段时间被两个类别同时标注"这个
+        # 问题。改成合并前检查间隔内每个窗口的argmax预测——只要有任何一个
+        # 窗口被置信预测(conf>=confidence_threshold)成了不是target_label
+        # 的类别，就不桥接，保留成两段独立片段，避免吞掉中间那段真实发生
+        # 的别的行为。
+        def _gap_has_confident_other_label(prev_last_i, next_first_i):
+            for pred_id, conf, start_i in zip(preds, confs, start_indices):
+                if prev_last_i < start_i < next_first_i:
+                    if classes[pred_id] != target_label and conf >= confidence_threshold:
+                        return True
+            return False
+
         merged = []
         for t0, t1, i0, i1 in raw_segs:
             if merged and t0 is not None and merged[-1][1] is not None:
                 gap = (t0 - merged[-1][1]).total_seconds()
-                if gap <= merge_gap_s:
+                if gap <= merge_gap_s and not _gap_has_confident_other_label(merged[-1][3], i0):
                     merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
                     continue
             merged.append([t0, t1, i0, i1])
