@@ -416,6 +416,28 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             print(f"  【片段】{seg_str}")
             print(f"  【合并】{merged_str}")
 
+    # 跨类别裁剪重叠区间——上面每个类别各自的合并逻辑已经能保证"同一个
+    # 类别自己的片段不重叠"，但不同类别之间还是会重叠：majority label_mode
+    # 下每个正例窗口的显示时长是整个window_size（不是stride），而窗口本身
+    # 是按stride滑动、彼此重叠的（比如window_s=1/stride_s=0.5就是50%重叠）。
+    # 一段"活动"的最后一个窗口和紧接着的"抓挠"第一个窗口，两者各自的
+    # window_size区间天然就有重叠部分，各自单独看没问题（每个类别的
+    # _infer.json只含它自己的片段），但用ML_PRELABEL_MULTI把多个类别画到
+    # 同一条时间轴上就会出现"活动1-100，抓挠40-60，60-100又是活动"这种
+    # 一段时间被两个类别同时标注的情况——不是merge_gap桥接的锅（上面已经
+    # 修过那个问题），是不同类别相邻片段边界本身的重叠，必须在这里跨类别
+    # 统一裁剪：把所有类别的片段按开始时间排成一条链，只要前一段的结束
+    # 时间晚于下一段（不同类别）的开始时间，就把前一段的结束时间收缩到
+    # 刚好等于下一段的开始时间——让相邻片段贴合但不重叠，谁先开始占用
+    # 这段时间，后来的类别从它结束的地方接着算，不覆盖已经被占用的部分。
+    all_segs_sorted = sorted(
+        ((seg, label) for label in merged_by_label for seg in merged_by_label[label]
+         if seg[0] is not None and seg[1] is not None),
+        key=lambda pair: pair[0][0])
+    for (seg_cur, label_cur), (seg_nxt, label_nxt) in zip(all_segs_sorted, all_segs_sorted[1:]):
+        if label_cur != label_nxt and seg_cur[1] > seg_nxt[0]:
+            seg_cur[1] = seg_nxt[0]
+
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
     # 每个目标类别各写一份 JSON，落在 output_dir/{label}/ 下——不同类别的
     # 片段绝不能混进同一个 *_infer.json，否则下游 extract_clips.py/
