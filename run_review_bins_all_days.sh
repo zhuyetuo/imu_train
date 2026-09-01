@@ -172,8 +172,10 @@ ML_MIN_SEG_S="${ML_MIN_SEG_S:-0}"
 ML_MERGE_GAP_S="${ML_MERGE_GAP_S:-2.0}"
 IMU_STATS="${IMU_STATS:-0}"
 CONTEXT_S="${CONTEXT_S:-3}"        # 片段前后保留秒数
-MERGE_GAP="${MERGE_GAP:-1}"            # 合并相邻抓挠片段的最大间隔秒数（默认1s，event_eval.py 验证过
-                                        # 3s会导致约一半真实事件被错误合并，1s已能消除碎片化且合并更少）
+MERGE_GAP="${MERGE_GAP:-1}"            # [已废弃，不再生效] infer_csv_scratch.py现在每个窗口只占据
+                                        # 不重叠的专属时间区间，不需要靠"桥接"去平滑，这个参数只是
+                                        # 保留不破坏旧调用方式。想平滑低置信度噪声窗口，用ML_MIN_CONF/
+                                        # ML_MIN_SEG_S/ML_MERGE_GAP_S
 MIN_WINDOWS="${MIN_WINDOWS:-1}"        # 片段最少窗口数，不足则丢弃（默认1=不过滤）
 KEEP_ISOLATED="${KEEP_ISOLATED:-1}"    # 是否保留孤立单窗口片段（默认1=保留）
 BIN_BY="${BIN_BY:-conf_max}"           # 置信度分桶依据：conf_max（默认）或 conf_mean

@@ -202,41 +202,19 @@ def sliding_windows(data, window_size, stride):
     return np.stack(windows) if windows else np.empty((0, window_size, data.shape[1])), indices
 
 
-def _extract_label_segments(preds, confs, start_indices, classes, window_bounds, idx_to_ts,
-                            label, confidence_threshold):
-    """从逐窗口预测里抽出某一个目标类别（比如"抓挠"或"甩身体"）的连续片段。
-    以前这段逻辑写死判断 label=="抓挠"，现在改成单类别提取的独立函数，每个
-    目标类别各自调用一次——一个窗口序列里完全可能同时含多个类别的片段
-    （一段抓挠、另一段甩身体），必须分别扫描、分别产出，不能只扫一遍、
-    混在一个列表里（下游按类别分文件输出时会分不清）。"""
-    segs = []
-    in_run = False
-    run_first_i = None
-    run_last_i = None
-    for pred_id, conf, start_i in zip(preds, confs, start_indices):
-        is_hit = (classes[pred_id] == label) and (conf >= confidence_threshold)
-        if is_hit:
-            if not in_run:
-                in_run = True
-                run_first_i = start_i
-            run_last_i = start_i
-        elif in_run:
-            in_run = False
-            s0, _ = window_bounds(run_first_i)
-            _, e1 = window_bounds(run_last_i)
-            segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
-    if in_run:
-        s0, _ = window_bounds(run_first_i)
-        _, e1 = window_bounds(run_last_i)
-        segs.append((idx_to_ts(s0), idx_to_ts(e1), run_first_i, run_last_i))
-    return segs
-
-
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", target_labels=None, is_dl=False,
-               other_label_conf_threshold=0.5, **kwargs):
+               resample_method="poly", target_labels=None, is_dl=False, **kwargs):
+    # merge_gap_s：不再使用（保留形参只是为了不破坏main()里_run_one()的
+    # 调用签名，--merge_gap这个CLI参数还在，但已经名存实亡）。之前它是
+    # 用来"桥接"间隔较近的同类别片段、掩盖低置信度噪声窗口的，但桥接
+    # 本身会跨过中间那个窗口真实占据的时间、跟那个窗口自己类别的片段
+    # 产生重叠——本函数现在改成每个窗口只占据不重叠的专属区间(见下面
+    # window_zone())，天然不会有重叠，也就不需要靠桥接去"平滑"了。想要
+    # 平滑低置信度噪声窗口，用review_to_labelstudio.py那边的
+    # ML_MIN_CONF/ML_MIN_SEG_S/ML_MERGE_GAP_S，在展示层面处理，不在
+    # 这里污染"模型真实说了什么"这份原始数据。
     # target_labels：要独立统计/输出的目标类别列表，默认只有"抓挠"，跟改造前
     # 行为完全一致。多个类别时，output_dir 下会按类别各建一个子目录，互不
     # 混淆（见函数末尾"保存 JSON 结果"部分）——CSV读取/降采样/重力对齐/特征
@@ -305,19 +283,28 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
 
-    # 单个窗口在原始时间轴上对应的 (起点采样点, 终点采样点)，取决于训练时的 label_mode：
-    #   "majority"（默认）：一个正例窗口代表"这一整个window_size都是目标行为"，
-    #     窗口起点到窗口终点整段对应，这是训练时多数投票的语义。
-    #   "center"：一个正例窗口只代表"窗口正中心这一瞬间是目标行为"，只用窗口
-    #     中心点前后半个步长(stride/2)去覆盖时间轴，不铺满整个窗口——否则中心点
-    #     标注法带来的边界精度收益在推理这一步就白费了（跟 event_eval.py 里
-    #     pred_windows_to_segments() 的逻辑保持一致）。
-    def window_bounds(s):
+    # 每个窗口在时间轴上"负责"的区间：从它自己的起点，到下一个窗口的
+    # 起点为止（最后一个窗口没有下一个接手，补满到window_size）——这样
+    # 整条时间轴被严丝合缝地切成一串互不重叠、也没有空隙的区间，任意
+    # 时刻精确属于且只属于一个窗口，argmax出来是什么类别，这段时间就是
+    # 什么类别。不再是之前majority模式那种"每个窗口按整个window_size
+    # 展示、跟前后stride重叠(window_size-stride)"，事后还要靠一整套
+    # 跨类别裁剪/拆分/收敛/重排序逻辑修回来——直接从一开始就按不重叠的
+    # 区间划分，那套裁剪逻辑存在的理由就没有了，也不会再有"同一段时间
+    # 被两个类别同时标注"这种问题（数学上不可能发生，不是靠事后检查
+    # 出来的）。
+    #
+    # center模式本来的设计（中心点前后各stride/2）天然就是首尾相接、
+    # 不重叠的，这里统一用同一个函数处理两种label_mode，不用再分开
+    # 维护"majority怎么显示"和"怎么把majority的重叠裁回去"两套逻辑。
+    def window_zone(k):
+        s = start_indices[k]
         if label_mode == "center":
             center = s + window_size / 2
             half_pad = stride / 2
             return center - half_pad, center + half_pad
-        return s, s + window_size
+        next_s = start_indices[k + 1] if k + 1 < len(start_indices) else s + window_size
+        return s, next_s
 
     # 打印逐窗口结果（多类别时，一个窗口只可能是argmax出来的那一个类别，
     # marker标出它是不是命中了target_labels里的某一个，不再写死"抓挠"）
@@ -341,14 +328,34 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     ts_fmt = lambda t: t.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if t is not None else None
 
-    # 每个目标类别独立扫描/合并/过滤/输出——一个窗口序列里完全可能同时含
-    # 多个类别的片段（一段抓挠、另一段甩身体），必须分开处理，不能只跑
-    # 一遍、混在同一份结果里（下游按类别拆目录就无从下手了）
+    # 一趟扫描把整条窗口序列切成一串首尾相接、互不重叠的原子片段——
+    # 每个片段就是"连续argmax预测相同的一串窗口"，边界直接用
+    # window_zone()算出来，天然衔接（片段k的结束边界=片段k+1的开始
+    # 边界），不需要任何"合并/裁剪/去重叠"的后处理。低置信度的单窗口
+    # "噪声flicker"要不要在最终展示时抹平，是review_to_labelstudio.py
+    # 那边ML_MIN_CONF/ML_MIN_SEG_S/merge_adjacent_same_label的事——这里
+    # 只负责如实切出模型逐窗口的真实判断，不在这一步就掺入"要不要相信
+    # 这个窗口"的判断，两件事分开、互不纠缠，也不会再出现"为了平滑噪声
+    # 而跨越性地合并、合并又制造出跨类别重叠、又要专门写代码把重叠裁
+    # 回去"这种绕圈子的处理。
+    all_segs = []
+    n = len(preds)
+    k = 0
+    while k < n:
+        j = k
+        while j + 1 < n and preds[j + 1] == preds[k]:
+            j += 1
+        s0, _ = window_zone(k)
+        _, e1 = window_zone(j)
+        all_segs.append([idx_to_ts(s0), idx_to_ts(e1), classes[preds[k]],
+                         start_indices[k], start_indices[j]])
+        k = j + 1
+
+    # 每个目标类别从同一份all_segs（本来就不重叠）里筛出自己的片段，
+    # 各类别的片段天然互不重叠，不需要再额外处理
     merged_by_label = {}
     for target_label in target_labels:
-        raw_segs = _extract_label_segments(preds, confs, start_indices, classes,
-                                           window_bounds, idx_to_ts,
-                                           target_label, confidence_threshold)
+        merged = [[t0, t1, i0, i1] for t0, t1, label, i0, i1 in all_segs if label == target_label]
 
         # 之前这里 scratch_only 且没检测到目标类别时会直接return，连下面
         # "保存JSON结果"那块都被跳过了——批量推理时某个文件如果真的一段
@@ -358,56 +365,7 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         # 没有任何 *_infer.json。改成不提前return，只在没检出时跳过下面的
         # 汇总打印（scratch_only本来的目的就是减少输出噪音），JSON该保存
         # 还是要保存。
-        skip_print = scratch_only and not raw_segs
-
-        # 合并相邻片段（间隔 <= merge_gap_s 秒视为同一段）——但不跨越"这段
-        # 间隔里其实是另一个类别置信预测"的情况去合并：ML_PRELABEL_MULTI把
-        # 多个类别的片段画在同一条时间轴上之后才发现，比如"抓挠"只持续了
-        # 不到1s(1~2个窗口)，前后都是"活动"，之前这里只看时间间隔够不够
-        # 短(<=merge_gap_s)就无条件桥接，桥接后的"活动"片段会整段盖住中间
-        # 那段真实是"抓挠"的时间区间——单独看"抓挠"这一个类别的文件时这个
-        # 问题完全看不出来(只有它自己的片段，不会跟别的类别比对)，多类别
-        # 合并到同一条时间轴才会暴露出"同一段时间被两个类别同时标注"这个
-        # 问题。改成合并前检查间隔内每个窗口的argmax预测——只要有任何一个
-        # 窗口被置信预测成了不是target_label的类别，就不桥接，保留成两段
-        # 独立片段，避免吞掉中间那段真实发生的别的行为。
-        #
-        # 这里的"置信"门槛必须是一个有意义的值(other_label_conf_threshold，
-        # 默认0.5)，不能像最初那版直接复用confidence_threshold——那个参数
-        # 从来没被run_review_bins_all_days.sh传过，默认是0.0，"conf>=0.0"
-        # 对任何窗口恒成立，等于只要中间有任意一个窗口argmax不是
-        # target_label（哪怕是softmax概率0.26 vs 0.25这种几乎打平的噪声
-        # flicker）就会阻止合并——实测同一个类别里1270对相邻同类别片段，
-        # 594对因为这个问题被错误拆开成几百个碎段（"1-50睡觉、50-100睡觉"
-        # 中间就夹着一个噪声flicker窗口）。改成要求conf>=0.5（比随便argmax
-        # 一下要高得多、真正算"这一帧模型确实倾向于别的类别"）才算数，
-        # 噪声级别的flicker不再挡合并。
-        def _gap_has_confident_other_label(prev_last_i, next_first_i):
-            for pred_id, conf, start_i in zip(preds, confs, start_indices):
-                if prev_last_i < start_i < next_first_i:
-                    if classes[pred_id] != target_label and conf >= other_label_conf_threshold:
-                        return True
-            return False
-
-        merged = []
-        for t0, t1, i0, i1 in raw_segs:
-            if merged and t0 is not None and merged[-1][1] is not None:
-                gap = (t0 - merged[-1][1]).total_seconds()
-                if gap <= merge_gap_s and not _gap_has_confident_other_label(merged[-1][3], i0):
-                    # 用list不用tuple——下面"跨类别裁剪重叠"那一步会直接
-                    # seg_cur[1]=...原地改这里产出的每一项，之前这里写成
-                    # tuple，只要某个session里发生过至少一次桥接合并
-                    # （很常见，比如"活动"这种长时间类别几乎必然会经过
-                    # 这一行），后面裁剪那步给tuple赋值就会直接抛
-                    # TypeError，整个infer_file()崩溃，这个session的
-                    # 推理结果完全没有写进_infer.json——外层main()的
-                    # try/except只是打印一行[错误]然后跳过，不会让整个
-                    # 批处理停下来，容易被忽略掉，表现成"这一批文件里大
-                    # 部分session的结果消失了"，看着像是被覆盖，其实是
-                    # 从来没成功生成过。
-                    merged[-1] = [merged[-1][0], t1, merged[-1][2], i1]
-                    continue
-            merged.append([t0, t1, i0, i1])
+        skip_print = scratch_only and not merged
 
         # 过滤孤立单窗口片段（前后均不是目标类别）
         if not keep_isolated:
@@ -435,132 +393,11 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         if not skip_print:
             if scratch_only:
                 print(f"\n── {display_name} [{target_label}] ──")
-            seg_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in raw_segs) \
-                      if raw_segs else f"未检测到{target_label}"
             merged_str = "  ".join(fmt(t0, i0) + "→" + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
                          if merged else f"未检测到{target_label}"
             print(f"  【汇总:{target_label}】总窗口={len(preds)}  {target_label}窗口={n_hit}  "
                   f"({n_hit/len(preds)*100:.1f}%)")
-            print(f"  【片段】{seg_str}")
-            print(f"  【合并】{merged_str}")
-
-    # 跨类别裁剪重叠区间——上面每个类别各自的合并逻辑已经能保证"同一个
-    # 类别自己的片段不重叠"，但不同类别之间还是会重叠，原因有两个：
-    #   1) majority label_mode下每个正例窗口的显示时长是整个window_size
-    #      （不是stride），窗口本身按stride滑动、彼此重叠，相邻两个不同
-    #      类别的窗口天然就有重叠的显示区间。
-    #   2) merge_gap_s桥接：某类别两段本来分开的片段，如果间隔里那1~2个
-    #      窗口被argmax成了别的类别、但置信度没到other_label_conf_threshold，
-    #      会被当成"噪声flicker"桥接成一整段——但那1~2个窗口本身在别的
-    #      类别自己的提取里，一样会形成它自己的一小段（这里的
-    #      confidence_threshold全程是0.0），如果显示阈值允许它露出来，
-    #      就会跟桥接后的这一大段重叠。
-    # 第1种情况裁掉的是很小一段（一个window_size以内），直接收缩前一段
-    # 的结束时间没问题；但第2种情况如果直接收缩，桥接段在"别的类别"那
-    # 一小段结束之后原本还有真实数据（比如"活动"桥接了0~100，中间被
-    # "抓挠"占了40~42，如果只是把"活动"的结束时间缩到40，那42~100这段
-    # 活动的真实windows就会凭空消失，变成一段没有任何显示内容的空白——
-    # 这正是实测中大量"两段同label中间有真实空白"的根因）。所以裁剪时
-    # 要判断前一段是不是"整个盖过了"下一段（不只是尾部重叠）：如果是，
-    # 说明前一段桥接吞掉的窗口比下一段还长，除了缩短前一段的结束时间，
-    # 还要把下一段结束之后剩下的尾巴拆成一段新的、还给前一段原本的类别，
-    # 不能让这部分真实存在的数据凭空消失。
-    #
-    # 拆分出来的尾巴段又是一个新片段，可能跟后面别的片段再次重叠，所以
-    # 用循环重复裁剪，直到某一轮完全没有变化为止。
-    #
-    # 收敛所需轮数：每一轮_resolve_cross_label_overlaps_once()只能剥离
-    # "一层"嵌套重叠（新拆出的tail要等下一轮重新排序后才会被纳入比较），
-    # N个嵌套在同一个桥接大段里的异类别小段需要恰好N+1轮才能收敛。之前
-    # 固定写死range(10)，超过9个嵌套小段（多类别+confidence_threshold=0.0
-    # 的组合下完全可能出现）会在没收敛的情况下被强行截断，且没有任何
-    # 提示——merged_by_label里会静默残留真实的跨类别时间重叠，直接写进
-    # JSON，等于这套裁剪机制本该修的"同一段时间被两个类别同时标注"问题
-    # 在深层嵌套场景下原样复现。改成按片段总数动态设定轮数上限（远高于
-    # 实际需要的量级），真的还不收敛就打印警告而不是悄悄放弃。
-    #
-    # i0/i1同步问题：裁剪只改t0/t1（真实显示的时间边界），如果不同步
-    # 重新计算i0/i1（窗口下标范围，conf_max/conf_mean/n_windows就是拿
-    # 它去筛start_indices算的），被裁剪过的头部和拆出来的尾部会共用
-    # 同一份"裁剪前整段"的窗口范围算出一模一样但都不准确的置信度统计，
-    # 而且这个不准的统计还会影响--ml_min_conf/--ml_min_seg_s过滤的
-    # 结果（该显示的被误杀，不该显示的被误放行）。用start_indices/
-    # idx_to_ts/window_bounds重新定位真正落在新边界内的窗口下标。
-    def _shrink_i1(seg, new_t1):
-        """把seg的i1收紧到新结束时间new_t1对应的窗口下标（seg[2]/seg[3]
-        此时还是裁剪前的原始范围，必须在改seg[1]之前/之后都能正确读到
-        原始i0/i1，所以这里直接从seg读，不额外传参）。"""
-        i0, i1 = seg[2], seg[3]
-        candidates = [s for s in start_indices if i0 <= s <= i1
-                      and idx_to_ts(window_bounds(s)[1]) <= new_t1]
-        seg[3] = max(candidates) if candidates else i0
-
-    def _shrink_i0(seg, new_t0):
-        """把seg的i0收紧到新起始时间new_t0对应的窗口下标，语义同上。"""
-        i0, i1 = seg[2], seg[3]
-        candidates = [s for s in start_indices if i0 <= s <= i1
-                      and idx_to_ts(window_bounds(s)[0]) >= new_t0]
-        seg[2] = min(candidates) if candidates else i1
-
-    def _resolve_cross_label_overlaps_once():
-        all_segs_sorted = sorted(
-            ((seg, label) for label in merged_by_label for seg in merged_by_label[label]
-             if seg[0] is not None and seg[1] is not None),
-            key=lambda pair: pair[0][0])
-        changed = False
-        for (seg_cur, label_cur), (seg_nxt, label_nxt) in zip(all_segs_sorted, all_segs_sorted[1:]):
-            if label_cur == label_nxt or seg_cur[1] <= seg_nxt[0]:
-                continue
-            if seg_cur[1] > seg_nxt[1]:
-                # 前一段整个盖过了下一段，尾巴部分（下一段结束之后到前
-                # 一段原本结束为止）是真实存在的数据，拆成新的一段还给
-                # label_cur，不能直接被下面的收缩操作吞掉。尾巴的i1沿用
-                # seg_cur原本的i1（这一头没被裁过，本来就对），只有i0
-                # 需要重新定位到新起点
-                tail = [seg_nxt[1], seg_cur[1], seg_cur[2], seg_cur[3]]
-                _shrink_i0(tail, seg_nxt[1])
-                merged_by_label[label_cur].append(tail)
-            _shrink_i1(seg_cur, seg_nxt[0])
-            seg_cur[1] = seg_nxt[0]
-            changed = True
-        return changed
-
-    max_trim_passes = max(50, 4 * sum(len(v) for v in merged_by_label.values()))
-    for _pass in range(max_trim_passes):
-        if not _resolve_cross_label_overlaps_once():
-            break
-    else:
-        print(f"  [警告] {display_name}: 跨类别裁剪超过{max_trim_passes}轮仍未收敛，"
-              f"可能仍残留跨类别时间重叠，建议人工核查这份结果")
-
-    # 裁剪+拆分会把tail片段append到列表末尾，不再按时间顺序排列——
-    # extract_clips.py等下游按数组下标当"clip序号"烧进文件名/任务顺序，
-    # 乱序会导致序号跟真实发生时间对不上（不丢数据，但显示/文件名的
-    # 先后语义会跟事实不符）。这里统一按i0重新排一次序，一次性堵住所有
-    # 下游对"顺序=时间序"的隐式假设，不用每个消费者各自打补丁。
-    for label in merged_by_label:
-        merged_by_label[label].sort(key=lambda s: s[2])
-
-    # keep_isolated/min_windows过滤（第412-429行附近）只在跨类别裁剪
-    # 之前对每个类别的原始片段跑过一次，用的是当时的i0/i1。裁剪阶段
-    # 新拆出来的tail片段是裁剪之后才产生的，从来没有经过这道过滤——
-    # 哪怕tail自己修正后只对应1个窗口（按keep_isolated=0的过滤意图本该
-    # 被当成孤立噪声丢弃），也会因为绕过了这道检查而直接进入输出。
-    # i0/i1现在已经同步修正过，count_windows()能正确反映每段真实对应
-    # 的窗口数，这里统一对全部片段（含tail）再跑一遍同样的过滤，行为
-    # 上跟"过滤发生在裁剪之后"完全等价，不需要给tail单独写一套逻辑。
-    if not keep_isolated or min_windows > 1:
-        for label in merged_by_label:
-            segs = merged_by_label[label]
-            before = len(segs)
-            if not keep_isolated:
-                segs = [s for s in segs if count_windows(s) > 1]
-            if min_windows > 1:
-                segs = [s for s in segs if count_windows(s) >= min_windows]
-            if before != len(segs) and not scratch_only:
-                print(f"  [过滤][{label}] 跨类别裁剪产生的片段中，丢弃 {before - len(segs)} 段"
-                      f"（不满足keep_isolated/min_windows）")
-            merged_by_label[label] = segs
+            print(f"  【片段】{merged_str}")
 
     # ── 保存 JSON 结果（供后续复查和 Label Studio 上传）────────────────
     # 每个目标类别各写一份 JSON，落在 output_dir/{label}/ 下——不同类别的
@@ -651,8 +488,11 @@ def main():
     parser.add_argument("--scratch_only", action="store_true",
                         help="只输出检测到抓挠的文件，忽略无抓挠的文件")
     parser.add_argument("--merge_gap", type=float, default=1.0,
-                        help="合并相邻抓挠片段的最大间隔秒数（默认1s，"
-                             "event_eval.py 验证过3s会导致约一半真实事件被错误合并）")
+                        help="[已废弃，不再生效] 之前用来桥接间隔较近的同类别片段，"
+                             "现在每个窗口只占据不重叠的专属时间区间，不需要桥接就不会"
+                             "产生跨类别重叠，参数保留只是不破坏旧的调用方式。想平滑"
+                             "低置信度噪声窗口，用review_to_labelstudio.py的"
+                             "ML_MIN_CONF/ML_MIN_SEG_S/ML_MERGE_GAP_S")
     parser.add_argument("--min_windows", type=int, default=1,
                         help="片段最少窗口数，不足则丢弃（默认1=不过滤）")
     parser.add_argument("--no_keep_isolated", action="store_true",
