@@ -492,7 +492,8 @@ def build_tasks_from_infer_ml(infer_jsons, csv_url_prefix, video_url_prefix, lab
 
 
 def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_url_prefix,
-                                    min_conf=0.8, conf_field="conf_max", cam_mode="auto", min_seg_s=0.0):
+                                    min_conf=0.8, conf_field="conf_max", cam_mode="auto", min_seg_s=0.0,
+                                    blank=False):
     """
     跟build_tasks_from_infer_ml是同一个"全录制视频+ML预标注"的思路，区别是
     这个函数一次性合并多个类别（比如活动/睡觉/抓挠/未佩戴）的检测结果到
@@ -513,6 +514,11 @@ def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_ur
     核对/合并——用这个阈值把碎片段整体滤掉，那一整段时间就完全没有
     预标注，人直接在Label Studio里手动整段标一次，比删除几百个碎片段
     快得多。
+    blank=True时，完全不读取/不生成任何ML预测标注（min_conf/conf_field/
+    min_seg_s这几个参数在这个模式下不起作用），annotations永远是空
+    列表——只是"引用同一批原始CSV/视频、生成同样结构的task列表"，
+    直接导入Label Studio就是一份空白待标注任务，供从零开始纯人工标注
+    用（而不是"先看AI标的对不对再改"）。
     """
     # 每个session+每条IMU收集来自多个类别的infer数据：
     # sessions[sess]["imus"][imu_num][label] = 该类别这条IMU的infer json内容
@@ -571,22 +577,26 @@ def build_tasks_from_infer_ml_multi(infer_root, labels, csv_url_prefix, video_ur
             task_data = {"csv1": csv_url(cam_csv, csv_url_prefix)}
             task_data.update(video_urls)
 
-            results = []
-            note_parts = []
-            for label in labels:
-                data = by_label.get(label)
-                scratch_segs = data.get("scratch_segments", []) if data else []
-                kept = [seg for seg in scratch_segs
-                       if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")
-                       and seg_duration_s(seg) >= min_seg_s]
-                results.extend(make_annotation(seg["start_ts"], seg["end_ts"], label) for seg in kept)
-                note_parts.append(f"{label}:{len(kept)}/{len(scratch_segs)}段达标")
+            if blank:
+                note = "空白任务，未附带任何模型预标注，供从零开始人工标注"
+                annotations = []
+            else:
+                results = []
+                note_parts = []
+                for label in labels:
+                    data = by_label.get(label)
+                    scratch_segs = data.get("scratch_segments", []) if data else []
+                    kept = [seg for seg in scratch_segs
+                           if seg.get(conf_field, 0.0) >= min_conf and seg.get("start_ts") and seg.get("end_ts")
+                           and seg_duration_s(seg) >= min_seg_s]
+                    results.extend(make_annotation(seg["start_ts"], seg["end_ts"], label) for seg in kept)
+                    note_parts.append(f"{label}:{len(kept)}/{len(scratch_segs)}段达标")
 
-            note = f"模型ML自动检测(多类别合并)，{conf_field}>={min_conf}，" + "  ".join(note_parts)
-            annotations = [{
-                "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
-                "result": results,
-            }] if results else []
+                note = f"模型ML自动检测(多类别合并)，{conf_field}>={min_conf}，" + "  ".join(note_parts)
+                annotations = [{
+                    "completed_by": {"email": "ml@model.local", "first_name": "ML", "last_name": "Model"},
+                    "result": results,
+                }] if results else []
 
             tasks.append({
                 "id": task_id,
@@ -681,6 +691,15 @@ def main():
                              "=不过滤）。用来对付设备长时间没佩戴、模型在睡觉/未佩戴之间"
                              "来回跳、切出几百个几十秒碎片段这种情况——碎片段留着也没法"
                              "逐个核对，不如整段不标，让人直接手动标一次")
+    parser.add_argument("--ml_blank", action="store_true",
+                        help="--ml_full_video模式下，完全不附带任何模型预标注（--label/"
+                             "--ml_min_conf/--ml_conf_field/--ml_min_seg_s在这个模式下都"
+                             "不起作用），只生成引用同一批原始CSV/视频的空白task列表，"
+                             "annotations永远是空的，直接导入Label Studio就是从零开始的"
+                             "纯人工标注任务，不是先看AI标的对不对再改。仅--ml_multi_labels"
+                             "模式(即传了逗号分隔类别)下支持，输出文件名后缀是"
+                             "_full_blank_而不是_full_ml_/_full_ml_multi_，不会跟已有的"
+                             "预标注文件互相覆盖")
     args = parser.parse_args()
 
     video_prefix = args.video_url_prefix or f"{args.csv_url_prefix.rstrip('/')}/transcoded"
@@ -688,7 +707,14 @@ def main():
     if args.ml_full_video:
         multi_labels = [l.strip() for l in args.ml_multi_labels.split(",") if l.strip()]
 
-        if multi_labels:
+        if multi_labels and args.ml_blank:
+            print(f"模式: 全录制文件+空白任务(不附带任何模型预标注，类别范围: {multi_labels}"
+                  f"仅用于发现同一批session/IMU/视频，标注内容不受影响)")
+            ml_tasks = build_tasks_from_infer_ml_multi(
+                args.infer_dir, multi_labels, args.csv_url_prefix, video_prefix,
+                cam_mode=args.cam_mode, blank=True)
+            suffix = "_full_blank_"
+        elif multi_labels:
             print(f"模式: 全录制文件+ML自动预标注(多类别合并: {multi_labels})，"
                   f"置信度阈值({args.ml_conf_field})>={args.ml_min_conf}")
             ml_tasks = build_tasks_from_infer_ml_multi(

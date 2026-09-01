@@ -53,6 +53,13 @@
 #                 落在RESULT_ROOT/{day}/下（不是{day}/{label}/下）。跟ML_PRELABEL
 #                 可以同时开，互不影响，只是多生成一份合并视图，方便复查时不用在
 #                 各个类别的文件之间来回切换对照（默认0=不生成）
+#   ML_BLANK      传1时，生成一份不带任何模型预标注的空白任务(labelstudio_review_
+#                 full_blank_IMU1.json等)，引用的是同样一批原始CSV/视频，只是
+#                 annotations永远是空的，导入Label Studio就是从零开始纯人工标注，
+#                 不受ML_MIN_CONF/ML_CONF_FIELD/ML_MIN_SEG_S影响（压根不读取检测
+#                 结果）。给"设备整段时间没佩戴，模型判断来回跳/不可信，宁可自己
+#                 从头标"这种场景用，可以跟ML_PRELABEL/ML_PRELABEL_MULTI同时开
+#                 （默认0=不生成）
 #   ML_MIN_CONF   ML_PRELABEL=1/ML_PRELABEL_MULTI=1/IMU_STATS=1时，置信度>=这个值的片段才算数
 #                 （默认0.8，跟MIN_CONF是两回事——MIN_CONF是给clips模式筛任务文件
 #                 用的，这个是给ML预标注/IMU统计筛"算不算抓挠"用的，两处共用同一个
@@ -154,6 +161,7 @@ SPLIT_BY_IMU="${SPLIT_BY_IMU:-0}"
 MIN_CONF="${MIN_CONF:-}"
 ML_PRELABEL="${ML_PRELABEL:-0}"
 ML_PRELABEL_MULTI="${ML_PRELABEL_MULTI:-0}"
+ML_BLANK="${ML_BLANK:-0}"
 ML_MIN_CONF="${ML_MIN_CONF:-0.8}"
 ML_CONF_FIELD="${ML_CONF_FIELD:-conf_mean}"
 ML_MIN_SEG_S="${ML_MIN_SEG_S:-0}"
@@ -398,6 +406,30 @@ if [[ "$ML_PRELABEL_MULTI" == "1" ]]; then
             --ml_min_seg_s "$ML_MIN_SEG_S" \
             --cam_mode "$CAM_MODE"
         echo "  $day → ${ls_json%.json}_full_ml_multi_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
+    done
+fi
+
+# ── 空白任务：同样的session/IMU/视频，但不带任何模型预标注（可选）──
+# 给"设备根本没戴，一整段时间想从零开始纯人工标"这种场景用——引用跟
+# 上面ML_PRELABEL_MULTI完全一样的原始CSV/视频，只是annotations永远
+# 是空的，导入Label Studio就是空白待标注任务，不受任何置信度/碎片段
+# 过滤参数影响（因为压根不读取任何检测结果）
+if [[ "$ML_BLANK" == "1" ]]; then
+    echo ""
+    echo "▶ 生成空白待标注任务（全录制视频，不含任何模型预标注）..."
+    for day in "${days[@]}"; do
+        day_dir="$RESULT_ROOT/$day"
+        ls_json="$day_dir/labelstudio_review.json"
+        python src/review_to_labelstudio.py \
+            --infer_dir "$day_dir" \
+            --output "$ls_json" \
+            --csv_url_prefix "$LS_URL_PREFIX" \
+            $video_prefix_arg \
+            --ml_full_video \
+            --ml_multi_labels "$TARGET_LABELS" \
+            --ml_blank \
+            --cam_mode "$CAM_MODE"
+        echo "  $day → ${ls_json%.json}_full_blank_IMU{1,2,3}.json（按机位各自一份，视CAM_MODE而定）"
     done
 fi
 
