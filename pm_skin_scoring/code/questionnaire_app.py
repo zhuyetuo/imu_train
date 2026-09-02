@@ -27,6 +27,7 @@ questionnaire_paper_form.md保持一致（那份是纯离线纸质表，这个�
 """
 import csv
 import glob
+import html
 import json
 import math
 import os
@@ -1257,19 +1258,6 @@ def _write_weekly_all(rows: list) -> None:
         writer.writerows(rows)
 
 
-def save_weekly_report(rows: list) -> str:
-    """整表保存——这个标签是"编辑一张表格"的用法(不是逐条提交表单)，
-    跟save_record()那种"一条记录一条记录追加、按狗名+日期+填写人查重"
-    的逻辑不一样，这里直接把Dataframe组件当前的完整内容原样写回CSV，
-    用户在表格里怎么改、保存下来就是怎样。"""
-    # gr.Dataframe编辑后传出来的行可能包含NaN(空单元格pandas读成NaN)，
-    # 写CSV前统一转成空字符串，不然存下来的文件里会出现字面的"nan"
-    clean_rows = [["" if (c is None or (isinstance(c, float) and c != c)) else c for c in row]
-                 for row in rows]
-    _write_weekly_all(clean_rows)
-    return f"✅ 已保存 {len(clean_rows)} 行到周报表"
-
-
 def export_weekly_report_csv():
     if not os.path.exists(WEEKLY_REPORT_CSV):
         _write_weekly_all([])
@@ -1388,6 +1376,137 @@ def recompute_weekly_errors(rows: list) -> list:
 
         out.append(row)
     return out
+
+
+# gr.Dataframe装36列时表头文字会跟单元格内容错位、串行（这台机器上这个
+# Gradio版本的已知问题，column_widths/wrap/column_count几种参数组合都
+# 试过没能修好），干脆不用它——改成"选一天→表单逐列填→保存这一行"，
+# 每一列都是独立的gr.Textbox（用「填写问答」标签同样的、已经验证稳定
+# 好用的组件），完整表格只用只读的gr.HTML渲染，不走Dataframe这条有
+# 问题的路径。WEEKLY_FORM_INDICES是除了"日期"（单独用下拉框选/新建）
+# 之外的全部列，按WEEKLY_REPORT_COLUMNS原本的顺序，表单里的输入框
+# 就按这个顺序一一对应，不用再维护一份手写的列表。
+WEEKLY_FORM_INDICES = [i for i in range(len(WEEKLY_REPORT_COLUMNS)) if i != W_DATE]
+# 这4列是「自动填模型列」按钮算出来的，表单里显示但不给手动改——手滑
+# 改错了下次自动填会覆盖回去，还不如干脆锁住，想改就去用自动填
+WEEKLY_AUTOFILL_INDICES = {W_WEAR_HOURS, W_M_COUNT, W_M_DUR, W_M_C}
+
+
+def weekly_dates_choices() -> list:
+    """已经存过的全部日期，供「选择已有日期」下拉框用，新旧顺序按日期
+    字符串排序（"2026_8_2"这种格式不是严格的字典序日期排序，但周报表
+    本来日期量级不大，肉眼选一下不影响使用，没必要为这个再引入日期
+    解析）。"""
+    return sorted({row[W_DATE] for row in load_weekly_report() if row and row[W_DATE]})
+
+
+def load_weekly_row_for_form(date_str: str):
+    """按WEEKLY_FORM_INDICES的顺序，返回选中日期这一行除"日期"外的全部
+    列值——date_str还没有对应的行时（新建一天）全部返回空字符串，表单
+    从空白开始填，不报错。"""
+    if not date_str:
+        return [""] * len(WEEKLY_FORM_INDICES)
+    rows = load_weekly_report()
+    match = next((r for r in rows if r and r[W_DATE] == date_str), None)
+    if match is None:
+        return [""] * len(WEEKLY_FORM_INDICES)
+    match = list(match) + [""] * (len(WEEKLY_REPORT_COLUMNS) - len(match))  # 兼容旧的、列数没补齐的行
+    return [match[i] for i in WEEKLY_FORM_INDICES]
+
+
+def _esc(value) -> str:
+    return html.escape("" if value is None else str(value))
+
+
+def render_weekly_html(rows: list) -> str:
+    """只读的完整表格预览，纯拼HTML字符串、外层套横向滚动的div——不走
+    gr.Dataframe，不会有它36列错位那个问题。按日期升序排列，方便按
+    时间顺序浏览这一周的情况。"""
+    if not rows:
+        return "<p>还没有任何记录，用上面的表单新增一天，或者「自动填模型列」批量导入。</p>"
+    sorted_rows = sorted([r for r in rows if r and r[W_DATE]], key=lambda r: r[W_DATE])
+    head = "".join(f"<th style='padding:4px 8px;white-space:nowrap;border:1px solid #555;'>{_esc(c)}</th>"
+                   for c in WEEKLY_REPORT_COLUMNS)
+    body_rows = []
+    for row in sorted_rows:
+        row = list(row) + [""] * (len(WEEKLY_REPORT_COLUMNS) - len(row))
+        cells = "".join(f"<td style='padding:4px 8px;white-space:nowrap;border:1px solid #555;'>{_esc(c)}</td>"
+                        for c in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+    return (
+        "<div style='overflow-x:auto;max-width:100%;'>"
+        "<table style='border-collapse:collapse;font-size:13px;'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
+    )
+
+
+def upsert_weekly_row(date_str: str, *field_values):
+    """把表单里的值（按WEEKLY_FORM_INDICES顺序传进来，正好是除日期外的
+    全部列）存成这一天的记录——按日期去重，已存在就整行替换，不存在就
+    新增。保存前会先跑一遍recompute_weekly_errors()对这一行重新算好
+    对比/误差，不用用户自己再点一次「重新计算」。
+
+    返回：状态提示、日期下拉框选项更新（新增了日期时要能立刻在下拉框
+    里选到）、刷新后的只读预览表格HTML。"""
+    date_str = (date_str or "").strip()
+    if not date_str:
+        return "❌ 请先选择或填写日期", gr.update(), render_weekly_html(load_weekly_report())
+
+    row = [""] * len(WEEKLY_REPORT_COLUMNS)
+    row[W_DATE] = date_str
+    for idx, value in zip(WEEKLY_FORM_INDICES, field_values):
+        row[idx] = value
+
+    rows = load_weekly_report()
+    idx_existing = next((i for i, r in enumerate(rows) if r and r[W_DATE] == date_str), None)
+    recomputed = recompute_weekly_errors([row])[0]
+    if idx_existing is not None:
+        rows[idx_existing] = recomputed
+        msg = f"✅ 已更新 {date_str} 这一天的记录"
+    else:
+        rows.append(recomputed)
+        msg = f"✅ 已新增 {date_str} 这一天的记录"
+    _write_weekly_all(rows)
+
+    dates = weekly_dates_choices()
+    return msg, gr.update(choices=dates, value=date_str), render_weekly_html(rows)
+
+
+def delete_weekly_row(date_str: str):
+    """删除选中日期的整行记录。date_str为空（还没选任何日期）时什么都
+    不做。"""
+    date_str = (date_str or "").strip()
+    rows = load_weekly_report()
+    if not date_str:
+        return "❌ 请先选择要删除的日期", gr.update(), render_weekly_html(rows)
+    before = len(rows)
+    rows = [r for r in rows if not (r and r[W_DATE] == date_str)]
+    if len(rows) == before:
+        return f"❌ 没有找到 {date_str} 这一天的记录", gr.update(), render_weekly_html(rows)
+    _write_weekly_all(rows)
+    dates = weekly_dates_choices()
+    return f"✅ 已删除 {date_str} 这一天的记录", gr.update(choices=dates, value=None), render_weekly_html(rows)
+
+
+def auto_fill_weekly_report_and_save(stats_rows: list, date_labels: list, imu: str, dog_name_val: str):
+    """「自动填模型列」按钮：在已保存的记录基础上合并自动填的结果，
+    直接写回weekly_report.csv并刷新只读预览——不再像之前那版一样只是
+    改一份内存里的表格、还要再手动点「保存」，批量导入好几天时更直接。"""
+    existing_rows = load_weekly_report()
+    new_rows, status = auto_fill_weekly_report(existing_rows, stats_rows, date_labels, imu, dog_name_val)
+    if new_rows is not existing_rows:  # auto_fill_weekly_report参数没填全时会原样返回existing_rows，不用重复写盘
+        _write_weekly_all(new_rows)
+    dates = weekly_dates_choices()
+    return status, gr.update(choices=dates), render_weekly_html(load_weekly_report())
+
+
+def recompute_all_weekly_errors_and_save():
+    """把已保存的全部记录重新跑一遍对比/误差计算并存回去——用于批量
+    改完好几天的兽医审核数据之后，一次性把所有天的对比结果都刷新，
+    不用逐天进表单点保存。"""
+    rows = recompute_weekly_errors(load_weekly_report())
+    _write_weekly_all(rows)
+    return "✅ 已重新计算全部记录的对比/误差列", render_weekly_html(rows)
 
 
 def delete_record(row_idx):
@@ -1846,15 +1965,17 @@ def build_app():
                 gr.Markdown(
                     "# 周报表\n"
                     "对照PM给的那份「模型输出/人工标注/兽医1&2审核/对比分析/误差分析」"
-                    "周报模板做的表格。「模型-」这几列（抓挠次数/总时长/佩戴时长/C级评级）"
-                    "点「自动填模型列」就能从IMU推理结果自动算出来，不用手动数；"
-                    "「今日佩戴时间段」「模型-S级评级」这两列统计脚本没有对应数据，跟"
-                    "「人工-」「兽医1-」「兽医2-」「素材库地址」这些一样需要手动填——"
-                    "表格本身是可编辑的，直接在格子里改。填完人工/兽医的数字后点"
-                    "「重新计算误差」，「对比-」「误差分析-」这几列会基于当前表格内容"
-                    "自动算一遍（次数/时长是数值直接算绝对误差；C级/S评分是档位，"
-                    "只能标\"一致\"/\"不一致\"）。改完记得点「保存」，不然刷新页面会丢。"
+                    "周报模板做的页面。「模型-抓挠次数/总时长/C级评级」「今日佩戴时长」"
+                    "这4项在下面「批量自动填模型列」点一下就能从IMU推理结果自动算出来、"
+                    "直接存盘，不用手动数；其余（今日佩戴时间段/模型-S级评级/人工标注/"
+                    "兽医1/兽医2/素材库地址）在再下面的表单里手动填，选好日期、填完点"
+                    "「保存这一天」——「对比-」「误差分析-」这几列会在保存时自动算好"
+                    "（次数/时长是数值直接算绝对误差；C级/S评分是档位，只能标"
+                    "\"一致\"/\"不一致\"），不用单独再点一次。最下面是全部记录的只读预览，"
+                    "改完立刻能看到。"
                 )
+
+                gr.Markdown("## 批量自动填「模型-」列")
                 with gr.Row():
                     weekly_stats_roots = gr.Textbox(
                         label="推理结果根目录（逗号分隔可填多个）",
@@ -1866,7 +1987,7 @@ def build_app():
                 weekly_stats_rows_state = gr.State(value=[])
 
                 with gr.Row():
-                    weekly_date_select = gr.Dropdown(
+                    weekly_autofill_date_select = gr.Dropdown(
                         label="日期（可多选，扫描后从这里选要自动填的天）",
                         multiselect=True, interactive=True,
                     )
@@ -1875,23 +1996,56 @@ def build_app():
                         DOG_NAME_OPTIONS, label="对应狗狗", interactive=True,
                         info="自动带出默认值，不确定就手动核对/改一下（尤其IMU1）",
                     )
-                auto_fill_btn = gr.Button("自动填模型列", variant="primary")
+                auto_fill_btn = gr.Button("批量自动填模型列（直接存盘）", variant="primary")
                 weekly_auto_fill_status_md = gr.Markdown()
 
-                weekly_table = gr.Dataframe(
-                    headers=WEEKLY_REPORT_COLUMNS, value=load_weekly_report,
-                    interactive=True, column_count=(len(WEEKLY_REPORT_COLUMNS), "fixed"),
-                )
+                gr.Markdown("## 编辑单独一天")
                 with gr.Row():
-                    weekly_recompute_btn = gr.Button("重新计算误差")
-                    weekly_refresh_btn = gr.Button("刷新（放弃未保存的修改）")
-                    weekly_save_btn = gr.Button("保存", variant="primary")
+                    weekly_date_edit_select = gr.Dropdown(
+                        label="选择已有日期，或直接输入一个新日期（比如 2026_8_29）",
+                        allow_custom_value=True, interactive=True, choices=weekly_dates_choices(),
+                    )
+                    weekly_load_btn = gr.Button("加载这一天")
+                    weekly_delete_btn = gr.Button("删除这一天")
+
+                # 每列一个独立的Textbox，不再用gr.Dataframe——按语义分组摆放，
+                # WEEKLY_AUTOFILL_INDICES里的那4列锁住不给手动改（自动填按钮
+                # 算出来的，手滑改错了也没意义，下次自动填还会覆盖回去）
+                _sections = [
+                    ("今日佩戴", [W_WEAR_HOURS, W_WEAR_RANGE]),
+                    ("模型输出", [W_M_COUNT, W_M_DUR, W_M_C, W_M_S, W_M_EVENTS]),
+                    ("人工标注", [W_H_COUNT, W_H_DUR, W_H_INTERRUPT, W_H_EVENTS]),
+                    ("对比（模型vs人工）", [W_CMP_MH_ERR_SET, W_CMP_MH_ERR]),
+                    ("兽医1", [W_V1_NAME, W_V1_COUNT, W_V1_DUR, W_V1_EVENTS, W_V1_INTERRUPT,
+                              W_V1_C, W_V1_S, W_V1_DESC, W_V1_QSCORE]),
+                    ("兽医2", [W_V2_NAME, W_V2_INTERRUPT, W_V2_C, W_V2_S, W_V2_DESC, W_V2_QSCORE]),
+                    ("对比（人工vs兽医）", [W_CMP_HV_ERR_SET, W_CMP_HV_ERR]),
+                    ("误差分析（自动算，也可手动改）", [W_ERR_COUNT_HV1, W_ERR_DUR_HV1, W_ERR_C_V1V2, W_ERR_S_V1V2]),
+                    ("素材库", [W_MATERIAL_URL]),
+                ]
+                weekly_form_by_index = {}
+                for section_title, indices in _sections:
+                    gr.Markdown(f"**{section_title}**")
+                    with gr.Row():
+                        for idx in indices:
+                            weekly_form_by_index[idx] = gr.Textbox(
+                                label=WEEKLY_REPORT_COLUMNS[idx],
+                                interactive=idx not in WEEKLY_AUTOFILL_INDICES,
+                            )
+                weekly_form_components = [weekly_form_by_index[i] for i in WEEKLY_FORM_INDICES]
+
+                with gr.Row():
+                    weekly_save_row_btn = gr.Button("保存这一天", variant="primary")
+                    weekly_recompute_all_btn = gr.Button("重新计算全部记录的对比/误差")
                     weekly_export_btn = gr.DownloadButton("导出为CSV")
                 weekly_save_status_md = gr.Markdown()
 
+                gr.Markdown("## 全部记录（只读预览）")
+                weekly_preview_html = gr.HTML(value=lambda: render_weekly_html(load_weekly_report()))
+
                 weekly_scan_btn.click(
                     fn=scan_imu_roots, inputs=[weekly_stats_roots],
-                    outputs=[weekly_stats_rows_state, weekly_date_select, weekly_scan_status_md],
+                    outputs=[weekly_stats_rows_state, weekly_autofill_date_select, weekly_scan_status_md],
                 )
                 # 多选日期下拉框没有单个"选中值"可以拿去过滤机位选项，机位下拉框
                 # 这里就列全部扫描到的机位，不像「导入IMU统计数据」标签那样按
@@ -1907,14 +2061,26 @@ def build_app():
                     fn=default_dog_for_imu, inputs=[weekly_imu_select], outputs=[weekly_dog_select],
                 )
                 auto_fill_btn.click(
-                    fn=auto_fill_weekly_report,
-                    inputs=[weekly_table, weekly_stats_rows_state, weekly_date_select,
+                    fn=auto_fill_weekly_report_and_save,
+                    inputs=[weekly_stats_rows_state, weekly_autofill_date_select,
                            weekly_imu_select, weekly_dog_select],
-                    outputs=[weekly_table, weekly_auto_fill_status_md],
+                    outputs=[weekly_auto_fill_status_md, weekly_date_edit_select, weekly_preview_html],
                 )
-                weekly_recompute_btn.click(fn=recompute_weekly_errors, inputs=[weekly_table], outputs=[weekly_table])
-                weekly_refresh_btn.click(fn=load_weekly_report, outputs=[weekly_table])
-                weekly_save_btn.click(fn=save_weekly_report, inputs=[weekly_table], outputs=[weekly_save_status_md])
+                weekly_load_btn.click(
+                    fn=load_weekly_row_for_form, inputs=[weekly_date_edit_select],
+                    outputs=weekly_form_components,
+                )
+                weekly_save_row_btn.click(
+                    fn=upsert_weekly_row, inputs=[weekly_date_edit_select] + weekly_form_components,
+                    outputs=[weekly_save_status_md, weekly_date_edit_select, weekly_preview_html],
+                )
+                weekly_delete_btn.click(
+                    fn=delete_weekly_row, inputs=[weekly_date_edit_select],
+                    outputs=[weekly_save_status_md, weekly_date_edit_select, weekly_preview_html],
+                )
+                weekly_recompute_all_btn.click(
+                    fn=recompute_all_weekly_errors_and_save, outputs=[weekly_save_status_md, weekly_preview_html],
+                )
                 weekly_export_btn.click(fn=export_weekly_report_csv, outputs=[weekly_export_btn])
 
             with gr.Tab("历史记录", id=5):
