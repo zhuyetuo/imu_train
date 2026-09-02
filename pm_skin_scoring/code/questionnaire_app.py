@@ -1067,11 +1067,23 @@ def _parse_bool(value) -> bool:
     return str(value).strip().lower() in ("true", "1", "是")
 
 
-def scan_imu_roots(roots_str: str):
-    """扫描输入框里逗号分隔的每个根目录，找里面每个日期目录下的
-    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份，每天一份、
-    落在各自的日期目录里）。只有真的存在这份文件的天才会列出来——
-    没跑过统计的天不会被误当成"有数据"。
+def scan_imu_roots(roots_str: str, target_label: str = "抓挠"):
+    """扫描输入框里逗号分隔的每个根目录，找里面每天每个类别子目录下的
+    imu_daily_scratch_stats.csv（IMU_STATS=1产出的那份）。
+
+    真实的落盘路径是 {root}/{day}/{label}/imu_daily_scratch_stats.csv
+    （src/imu_scratch_daily_stats.py OUTPUT_BASENAME那行，跟
+    run_review_bins_all_days.sh里"每个目标类别各跑一次"那段的注释
+    一致）——按类别单独一层子目录，不是直接在日期目录下。这个函数之前
+    一直按{root}/{day}/imu_daily_scratch_stats.csv（少了{label}这一层）
+    去扫，从来没匹配到过这套多类别输出结构，扫描永远是"没有找到任何
+    xxx.csv"，改成两层通配符(*/*/文件名)。
+
+    target_label：C值/S值这套PM打分方法本来就是针对"抓挠"这个行为的
+    严重度设计的，只扫这一个类别的统计文件，不把活动/睡觉/未佩戴这些
+    别的类别的统计也混进来（TARGET_LABELS传了多个类别时，root下会同时
+    存在好几个类别各自的imu_daily_scratch_stats.csv，选错类别会拿到
+    风马牛不相及的次数/时长数字）。
 
     返回(所有行的列表, 下拉选项更新, 状态提示)。目录不存在/一个统计
     文件都没有的根目录会跳过，不影响其它根目录，状态提示里写清楚跳过
@@ -1087,10 +1099,12 @@ def scan_imu_roots(roots_str: str):
         if not os.path.isdir(root):
             skipped.append(f"{root}（目录不存在）")
             continue
-        # 每天一份，在各自的日期目录下——不是root下一个总的文件
-        stats_csvs = sorted(glob.glob(os.path.join(root, "*", STATS_CSV_NAME)))
+        # {root}/{day}/{label}/imu_daily_scratch_stats.csv，只挑target_label
+        # 这个类别自己的文件，别的类别子目录下同名文件不要
+        stats_csvs = sorted(glob.glob(os.path.join(root, "*", target_label, STATS_CSV_NAME)))
         if not stats_csvs:
-            skipped.append(f"{root}（没有找到任何{STATS_CSV_NAME}，可能还没跑IMU_STATS=1）")
+            skipped.append(f"{root}（没有找到任何「{target_label}」类别的{STATS_CSV_NAME}，"
+                          f"可能还没跑IMU_STATS=1，或者TARGET_LABELS没包含「{target_label}」）")
             continue
         root_label = os.path.basename(root.rstrip("/\\")) or root
         for stats_csv in stats_csvs:
@@ -1104,6 +1118,7 @@ def scan_imu_roots(roots_str: str):
                 row = dict(row)
                 row["root"] = root
                 row["root_label"] = root_label
+                row["stats_label"] = target_label
                 all_rows.append(row)
 
     if not all_rows:
