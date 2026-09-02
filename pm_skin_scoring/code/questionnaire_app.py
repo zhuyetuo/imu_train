@@ -1400,18 +1400,43 @@ def weekly_dates_choices() -> list:
     return sorted({row[W_DATE] for row in load_weekly_report() if row and row[W_DATE]})
 
 
+# 审核链条上后一环节没填过时，先带出前一环节已有的数字/档位当默认值，
+# 用户看着不对直接在表单里改就好，不用每次都从空白开始录入——次数/
+# 时长按"模型→人工→兽医1"链条带，C级评级按"模型→兽医1→兽医2"链条带，
+# S评分只有兽医才打，按"兽医1→兽医2"带。只在目标列自己还是空的时候
+# 才用来源列的值垫底，已经存过的（哪怕就是当年默认带出来又原样保存
+# 的）都当成"用户确认过的值"，不会被覆盖。
+_WEEKLY_DEFAULT_CHAIN = [
+    (W_H_COUNT, W_M_COUNT),
+    (W_H_DUR, W_M_DUR),
+    (W_V1_COUNT, W_H_COUNT),
+    (W_V1_DUR, W_H_DUR),
+    (W_V1_C, W_M_C),
+    (W_V2_C, W_V1_C),
+    (W_V2_S, W_V1_S),
+]
+
+
+def _apply_weekly_defaults(row: list) -> list:
+    row = list(row)
+    for target, source in _WEEKLY_DEFAULT_CHAIN:
+        if not (row[target] or "").strip() and (row[source] or "").strip():
+            row[target] = row[source]
+    return row
+
+
 def load_weekly_row_for_form(date_str: str):
     """按WEEKLY_FORM_INDICES的顺序，返回选中日期这一行除"日期"外的全部
-    列值——date_str还没有对应的行时（新建一天）全部返回空字符串，表单
-    从空白开始填，不报错。"""
+    列值——date_str还没有对应的行时（新建一天）用全空白行打底，再套一层
+    _apply_weekly_defaults()把"模型→人工→兽医1"「"模型→兽医1→兽医2"这
+    两条链条上还没填的格子用上一环节的值带出来。"""
     if not date_str:
         return [""] * len(WEEKLY_FORM_INDICES)
     rows = load_weekly_report()
     match = next((r for r in rows if r and r[W_DATE] == date_str), None)
-    if match is None:
-        return [""] * len(WEEKLY_FORM_INDICES)
-    match = list(match) + [""] * (len(WEEKLY_REPORT_COLUMNS) - len(match))  # 兼容旧的、列数没补齐的行
-    return [match[i] for i in WEEKLY_FORM_INDICES]
+    row = _empty_weekly_row(date_str) if match is None else list(match) + [""] * (len(WEEKLY_REPORT_COLUMNS) - len(match))
+    row = _apply_weekly_defaults(row)
+    return [row[i] for i in WEEKLY_FORM_INDICES]
 
 
 def _esc(value) -> str:
