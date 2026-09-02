@@ -68,6 +68,51 @@ RECORD_COLUMNS = [
     "问答分数", "保存时间",
 ]
 
+# 周报表——一比一对照PM给的那份"模型输出/人工标注/兽医1&2审核/对比分析/
+# 误差分析"周报模板（多行合并表头的Excel），Gradio的Dataframe组件不支持
+# 合并表头，这里把分组拍平进列名里（比如"兽医1-C级评级"），保留分组语义
+# 但每一列还是独立、可编辑的单元格。
+#
+# 列名前缀含义：
+#   模型-      来自IMU推理管线，本页面自动填（复用「导入IMU统计数据」
+#              标签同一份imu_daily_scratch_stats.csv + 已有的compute_c_score()），
+#              不需要手动录入
+#   人工-      人工看视频标注的结果，手动录入
+#   兽医1-/兽医2-  两位兽医各自的视频审核&定级评分，手动录入
+#   对比-/误差-   模型/人工/兽医互相比对的结果，「重新计算误差」按钮会
+#              基于当前表格里已经填的数字自动算出次数/时长的绝对误差，
+#              C级/S评分这类档位型的字段只能自动标"一致"/"不一致"，
+#              算不出数值误差，具体原因写在错误集里手动记
+WEEKLY_REPORT_CSV = os.path.join(DATA_DIR, "weekly_report.csv")
+WEEKLY_REPORT_COLUMNS = [
+    "日期", "今日佩戴时长", "今日佩戴时间段",
+    "模型-抓挠次数", "模型-抓挠总时长(分钟)", "模型-C级评级", "模型-S级评级", "模型-导出事件记录",
+    "人工-抓挠次数", "人工-抓挠总时长(分钟)", "人工-睡眠打断次数", "人工-导出事件记录",
+    "对比-错误集(模型vs人工)", "对比-误差(模型vs人工)",
+    "兽医1-姓名", "兽医1-抓挠次数", "兽医1-抓挠总时长(分钟)", "兽医1-导出事件记录", "兽医1-睡眠打断次数",
+    "兽医1-C级评级", "兽医1-S评分", "兽医1-状态评估描述", "兽医1-问答分数",
+    "兽医2-姓名", "兽医2-睡眠打断次数", "兽医2-C级评级", "兽医2-S评分", "兽医2-状态评估描述", "兽医2-问答分数",
+    "对比-错误集(人工vs兽医)", "对比-误差(人工vs兽医)",
+    "误差分析-抓挠次数误差(人工vs兽医1)", "误差分析-抓挠时长误差(人工vs兽医1)",
+    "误差分析-C评级误差(兽医1vs兽医2)", "误差分析-S评分误差(兽医1vs兽医2)",
+    "素材库地址",
+]
+# 原模板"误差分析"这组的4列比对的其实不是同一对——只有人工/兽医1两边都
+# 有抓挠次数/时长的具体数字，所以次数/时长误差比的是人工vs兽医1；C级
+# 评级/S评分两位兽医各自都填了，比的是兽医1vs兽医2这两位审核人之间是否
+# 一致（人工标注这个模板本身没有单独的C级/S评分列，没法跟兽医的档位
+# 直接比）。用下标常量代替裸数字，改列顺序时不容易改漏。
+(W_DATE, W_WEAR_HOURS, W_WEAR_RANGE,
+ W_M_COUNT, W_M_DUR, W_M_C, W_M_S, W_M_EVENTS,
+ W_H_COUNT, W_H_DUR, W_H_INTERRUPT, W_H_EVENTS,
+ W_CMP_MH_ERR_SET, W_CMP_MH_ERR,
+ W_V1_NAME, W_V1_COUNT, W_V1_DUR, W_V1_EVENTS, W_V1_INTERRUPT,
+ W_V1_C, W_V1_S, W_V1_DESC, W_V1_QSCORE,
+ W_V2_NAME, W_V2_INTERRUPT, W_V2_C, W_V2_S, W_V2_DESC, W_V2_QSCORE,
+ W_CMP_HV_ERR_SET, W_CMP_HV_ERR,
+ W_ERR_COUNT_HV1, W_ERR_DUR_HV1, W_ERR_C_V1V2, W_ERR_S_V1V2,
+ W_MATERIAL_URL) = range(len(WEEKLY_REPORT_COLUMNS))
+
 
 def get_lan_ip() -> str:
     """探测这台机器对外的局域网IP（不实际发送数据，只是借这个UDP连接动作
@@ -1177,6 +1222,159 @@ def apply_stats_to_c_calc(rows: list, date_label: str, imu: str, dog_name_val: s
     )
 
 
+# ── 周报表：模型自动填 + 人工/兽医审核手动填 + 对比误差自动算 ──────────
+
+def load_weekly_report() -> list:
+    """返回weekly_report.csv里的全部行（不含表头）。文件不存在时返回
+    空列表，逻辑跟load_records()一致——第一次用这个页面是正常状态。"""
+    if not os.path.exists(WEEKLY_REPORT_CSV):
+        return []
+    with open(WEEKLY_REPORT_CSV, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f))
+    return rows[1:] if rows else []
+
+
+def _write_weekly_all(rows: list) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(WEEKLY_REPORT_CSV, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(WEEKLY_REPORT_COLUMNS)
+        writer.writerows(rows)
+
+
+def save_weekly_report(rows: list) -> str:
+    """整表保存——这个标签是"编辑一张表格"的用法(不是逐条提交表单)，
+    跟save_record()那种"一条记录一条记录追加、按狗名+日期+填写人查重"
+    的逻辑不一样，这里直接把Dataframe组件当前的完整内容原样写回CSV，
+    用户在表格里怎么改、保存下来就是怎样。"""
+    # gr.Dataframe编辑后传出来的行可能包含NaN(空单元格pandas读成NaN)，
+    # 写CSV前统一转成空字符串，不然存下来的文件里会出现字面的"nan"
+    clean_rows = [["" if (c is None or (isinstance(c, float) and c != c)) else c for c in row]
+                 for row in rows]
+    _write_weekly_all(clean_rows)
+    return f"✅ 已保存 {len(clean_rows)} 行到周报表"
+
+
+def export_weekly_report_csv():
+    if not os.path.exists(WEEKLY_REPORT_CSV):
+        _write_weekly_all([])
+    return WEEKLY_REPORT_CSV
+
+
+def _empty_weekly_row(date_label: str) -> list:
+    row = [""] * len(WEEKLY_REPORT_COLUMNS)
+    row[W_DATE] = date_label
+    return row
+
+
+def auto_fill_weekly_report(existing_rows: list, stats_rows: list, date_labels: list,
+                            imu: str, dog_name_val: str):
+    """把选中的几天(同一个机位)的IMU统计数据自动填进周报表的"模型-"这几列：
+    抓挠次数/总时长直接来自imu_daily_scratch_stats.csv，C级评级复用「C值
+    计算」标签同一套compute_c_score()（基线处理逻辑跟apply_stats_to_c_calc()
+    一致：没有可用历史基线时has_baseline=False，避免把"没有基线"当成
+    "基线是0次"凭空算出虚高的相对倍数）。S级评级需要问答（皮肤/毛发状态）
+    才能算，不是纯IMU能推出来的，这里留空，跟"今日佩戴时间段"（统计
+    脚本没有这个字段）一样留给人工填。
+
+    按「日期」这一列去重——同一天重新扫描/重新应用会更新那一行的"模型-"
+    这几列，不会在表格里堆出重复的行；这一天之前人工/兽医那些列已经
+    填过的内容会保留，只覆盖"模型-"这几列。"""
+    if not stats_rows or not date_labels or not imu:
+        return existing_rows, "❌ 请先扫描根目录，并至少选一个日期"
+
+    by_date = {row[W_DATE]: list(row) for row in existing_rows}
+    skipped = []
+    n_filled = 0
+    for date_label in sorted(date_labels):
+        match = next((r for r in stats_rows if _date_label(r) == date_label and r["imu"] == imu), None)
+        if not match:
+            skipped.append(date_label)
+            continue
+
+        n_baseline_days = int(float(match.get("n_baseline_days", 0) or 0))
+        has_baseline_val = n_baseline_days > 0
+        c_total, c_tier, _breakdown = compute_c_score(
+            float(match["baseline_count"]), float(match["baseline_duration_min"]),
+            float(match["event_count"]), float(match["total_duration_min"]),
+            float(match["cluster_count"]), float(match["persistence_days"]),
+            float(match["zn"]), float(match["zd"]), _parse_bool(match["long_scratch"]),
+            has_baseline=has_baseline_val,
+        )
+
+        row = by_date.get(match["date"], _empty_weekly_row(match["date"]))
+        row[W_DATE] = match["date"]
+        row[W_WEAR_HOURS] = f"{match.get('valid_wear_hours', '')}小时"
+        row[W_M_COUNT] = match["event_count"]
+        row[W_M_DUR] = match["total_duration_min"]
+        row[W_M_C] = c_tier
+        by_date[match["date"]] = row
+        n_filled += 1
+
+    new_rows = list(by_date.values())
+    status = f"✅ 已自动填好 {n_filled} 天的「模型-」列（{imu}，{dog_name_val or '未选狗狗'}）"
+    if skipped:
+        status += "；没找到数据、跳过：" + "、".join(skipped)
+    return new_rows, status
+
+
+def _to_float_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tier_match_note(a, b) -> str:
+    """两个档位字符串（C0/C1/C2或S0/S1/S2这类）对比，都非空时给"一致"/
+    "不一致"，任意一边空着就不下结论（不能把"还没填"当成"不一致"）。"""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b:
+        return ""
+    return "一致" if a == b else "不一致"
+
+
+def recompute_weekly_errors(rows: list) -> list:
+    """基于表格里当前已经填的"模型-"/"人工-"/"兽医1-"/"兽医2-"这几列，
+    重新算一遍"对比-"/"误差分析-"这几列：
+      - 对比-误差(模型vs人工)：次数+时长的绝对误差，合并成一句话
+        （原模板这里只有一个"误差"格，不像"误差分析"那组拆成4个独立列）
+      - 误差分析-抓挠次数/时长误差(人工vs兽医1)：原模板里只有人工和兽医1
+        两边都填了具体的次数/时长数字，兽医2这个模板本身没有次数/时长列，
+        没法比
+      - 误差分析-C评级/S评分误差(兽医1vs兽医2)：C级/S评分是档位
+        （C0/C1/C2、S0/S1/S2），不是连续数值，算不出"误差"这种数值，
+        只能标两位兽医的判断是不是一致；人工标注这个模板本身没有单独的
+        C级/S评分列，没法拿人工的档位去跟兽医比，所以这两列比的是
+        兽医1vs兽医2这两位审核人互相之间是否一致，不是跟人工比
+      - 对比-错误集/误差(模型vs人工)、(人工vs兽医)这两组文字性的"错误集"
+        列不做任何自动填写，具体差在哪需要人工去看数据后自己写
+    每次点按钮都是基于当前表格内容重新算一遍、覆盖旧的对比结果，不是
+    累加。"""
+    out = []
+    for row in rows:
+        row = list(row) + [""] * (len(WEEKLY_REPORT_COLUMNS) - len(row))  # 兼容旧的、列数还没补齐的行
+
+        model_count, human_count = _to_float_or_none(row[W_M_COUNT]), _to_float_or_none(row[W_H_COUNT])
+        model_dur,   human_dur   = _to_float_or_none(row[W_M_DUR]),   _to_float_or_none(row[W_H_DUR])
+        if model_count is not None and human_count is not None and model_dur is not None and human_dur is not None:
+            row[W_CMP_MH_ERR] = f"次数差{abs(model_count - human_count):g}次，时长差{abs(model_dur - human_dur):.1f}分钟"
+        else:
+            row[W_CMP_MH_ERR] = ""
+
+        vet1_count, vet1_dur = _to_float_or_none(row[W_V1_COUNT]), _to_float_or_none(row[W_V1_DUR])
+        row[W_ERR_COUNT_HV1] = abs(human_count - vet1_count) if human_count is not None and vet1_count is not None else ""
+        row[W_ERR_DUR_HV1] = round(abs(human_dur - vet1_dur), 1) if human_dur is not None and vet1_dur is not None else ""
+
+        row[W_ERR_C_V1V2] = _tier_match_note(row[W_V1_C], row[W_V2_C])
+        row[W_ERR_S_V1V2] = _tier_match_note(row[W_V1_S], row[W_V2_S])
+
+        out.append(row)
+    return out
+
+
 def delete_record(row_idx):
     """删除选中的那一行。row_idx是None（还没在表格里点选任何行）时
     什么都不做，直接返回当前记录，避免误触发删除第0行。"""
@@ -1628,6 +1826,81 @@ def build_app():
                            has_hair_loss, color, odor, lesion, hair_spot, hair_diameter, coat],
                     outputs=[ml_s_result_md],
                 )
+
+            with gr.Tab("周报表", id=6):
+                gr.Markdown(
+                    "# 周报表\n"
+                    "对照PM给的那份「模型输出/人工标注/兽医1&2审核/对比分析/误差分析」"
+                    "周报模板做的表格。「模型-」这几列（抓挠次数/总时长/佩戴时长/C级评级）"
+                    "点「自动填模型列」就能从IMU推理结果自动算出来，不用手动数；"
+                    "「今日佩戴时间段」「模型-S级评级」这两列统计脚本没有对应数据，跟"
+                    "「人工-」「兽医1-」「兽医2-」「素材库地址」这些一样需要手动填——"
+                    "表格本身是可编辑的，直接在格子里改。填完人工/兽医的数字后点"
+                    "「重新计算误差」，「对比-」「误差分析-」这几列会基于当前表格内容"
+                    "自动算一遍（次数/时长是数值直接算绝对误差；C级/S评分是档位，"
+                    "只能标\"一致\"/\"不一致\"）。改完记得点「保存」，不然刷新页面会丢。"
+                )
+                with gr.Row():
+                    weekly_stats_roots = gr.Textbox(
+                        label="推理结果根目录（逗号分隔可填多个）",
+                        value=DEFAULT_IMU_STATS_ROOTS,
+                        placeholder="比如 infer_result_majority_syn, infer_result_majority",
+                    )
+                    weekly_scan_btn = gr.Button("扫描")
+                weekly_scan_status_md = gr.Markdown()
+                weekly_stats_rows_state = gr.State(value=[])
+
+                with gr.Row():
+                    weekly_date_select = gr.Dropdown(
+                        label="日期（可多选，扫描后从这里选要自动填的天）",
+                        multiselect=True, interactive=True,
+                    )
+                    weekly_imu_select = gr.Dropdown(label="机位（IMU）", interactive=True)
+                    weekly_dog_select = gr.Dropdown(
+                        DOG_NAME_OPTIONS, label="对应狗狗", interactive=True,
+                        info="自动带出默认值，不确定就手动核对/改一下（尤其IMU1）",
+                    )
+                auto_fill_btn = gr.Button("自动填模型列", variant="primary")
+                weekly_auto_fill_status_md = gr.Markdown()
+
+                weekly_table = gr.Dataframe(
+                    headers=WEEKLY_REPORT_COLUMNS, value=load_weekly_report,
+                    interactive=True, wrap=True, column_widths=["100px"] * len(WEEKLY_REPORT_COLUMNS),
+                )
+                with gr.Row():
+                    weekly_recompute_btn = gr.Button("重新计算误差")
+                    weekly_refresh_btn = gr.Button("刷新（放弃未保存的修改）")
+                    weekly_save_btn = gr.Button("保存", variant="primary")
+                    weekly_export_btn = gr.DownloadButton("导出为CSV")
+                weekly_save_status_md = gr.Markdown()
+
+                weekly_scan_btn.click(
+                    fn=scan_imu_roots, inputs=[weekly_stats_roots],
+                    outputs=[weekly_stats_rows_state, weekly_date_select, weekly_scan_status_md],
+                )
+                # 多选日期下拉框没有单个"选中值"可以拿去过滤机位选项，机位下拉框
+                # 这里就列全部扫描到的机位，不像「导入IMU统计数据」标签那样按
+                # 单个日期缩小范围——周报表本来就是要跨多天一起填的
+                def _all_imu_choices(rows):
+                    imus = sorted({r["imu"] for r in rows})
+                    return gr.update(choices=imus, value=imus[0] if imus else None)
+
+                weekly_stats_rows_state.change(
+                    fn=_all_imu_choices, inputs=[weekly_stats_rows_state], outputs=[weekly_imu_select],
+                )
+                weekly_imu_select.change(
+                    fn=default_dog_for_imu, inputs=[weekly_imu_select], outputs=[weekly_dog_select],
+                )
+                auto_fill_btn.click(
+                    fn=auto_fill_weekly_report,
+                    inputs=[weekly_table, weekly_stats_rows_state, weekly_date_select,
+                           weekly_imu_select, weekly_dog_select],
+                    outputs=[weekly_table, weekly_auto_fill_status_md],
+                )
+                weekly_recompute_btn.click(fn=recompute_weekly_errors, inputs=[weekly_table], outputs=[weekly_table])
+                weekly_refresh_btn.click(fn=load_weekly_report, outputs=[weekly_table])
+                weekly_save_btn.click(fn=save_weekly_report, inputs=[weekly_table], outputs=[weekly_save_status_md])
+                weekly_export_btn.click(fn=export_weekly_report_csv, outputs=[weekly_export_btn])
 
             with gr.Tab("历史记录", id=5):
                 gr.Markdown("## 历史记录")
