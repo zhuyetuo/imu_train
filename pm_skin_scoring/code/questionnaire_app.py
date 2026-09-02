@@ -1880,7 +1880,7 @@ def build_app():
 
                 weekly_table = gr.Dataframe(
                     headers=WEEKLY_REPORT_COLUMNS, value=load_weekly_report,
-                    interactive=True, wrap=True, column_widths=["100px"] * len(WEEKLY_REPORT_COLUMNS),
+                    interactive=True, wrap=True,
                 )
                 with gr.Row():
                     weekly_recompute_btn = gr.Button("重新计算误差")
