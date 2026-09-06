@@ -22,7 +22,9 @@ _bundle: dict = {}
 
 def _init_worker(model_path: str) -> None:
     sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
+    from label_service.logging_setup import worker_setup_logging
     from label_service.model_loader import load_model_bundle
+    worker_setup_logging()
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
 

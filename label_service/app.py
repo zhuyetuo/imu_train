@@ -18,14 +18,20 @@
 """
 
 import asyncio
+import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from label_service import config, jobs, pool
+from label_service.logging_setup import setup_logging
+
+setup_logging()
+log = logging.getLogger("label_service")
 
 sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
 from label_service.model_loader import load_model_bundle  # noqa: E402
@@ -41,14 +47,15 @@ async def lifespan(app: FastAPI):
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
     _bundle.pop("model", None)
-    print(f"[label_service] 模型: {model_path}  device_hz={config.DEVICE_HZ}  "
-          f"resample={config.RESAMPLE_METHOD}  target_labels={config.TARGET_LABELS}  "
-          f"nas_root={config.NAS_ROOT}  infer_workers={config.INFER_WORKERS}")
+    log.info("启动 模型=%s classes=%s model_hz=%s device_hz=%s resample=%s target_labels=%s nas_root=%s "
+             "infer_workers=%s log_dir=%s", model_path, _bundle["classes"], _bundle["hz"], config.DEVICE_HZ,
+             config.RESAMPLE_METHOD, config.TARGET_LABELS, config.NAS_ROOT, config.INFER_WORKERS, config.LOG_DIR)
     missing = [t for t in config.TARGET_LABELS if t not in _bundle["classes"]]
     if missing:
-        print(f"[label_service][警告] TARGET_LABELS 里这些类别模型没有: {missing}  模型类别: {_bundle['classes']}")
+        log.warning("TARGET_LABELS 里这些类别模型没有: %s  模型类别: %s", missing, _bundle["classes"])
     _pool = pool.create_pool(model_path)
     yield
+    log.info("关闭")
     _pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -113,7 +120,16 @@ def _resolve_nas_path(relative_path: str) -> str:
 
 async def _infer_in_pool(full_path: str) -> dict:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_pool, pool._infer_one, full_path)
+    t0 = time.time()
+    try:
+        result = await loop.run_in_executor(_pool, pool._infer_one, full_path)
+    except Exception:
+        log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
+        raise
+    counts = {k: len(v) for k, v in result["segments"].items() if v}
+    log.info("推理完成 %s  %.1fs  windows=%d  segments=%s", os.path.relpath(full_path, config.NAS_ROOT),
+             time.time() - t0, result["n_windows"], counts)
+    return result
 
 
 @app.post("/api/v1/label/infer", response_model=InferResponse)
@@ -150,6 +166,8 @@ class InferBatchResult(BaseModel):
 async def infer_batch(req: InferBatchRequest):
     """一批文件同时丢进进程池并行跑，单个文件失败不影响其它的，逐项带回
     ok/error。几百个样本一次发一个请求就行，不用调用方自己控制并发。"""
+    log.info("批量推理开始 %d 个", len(req.items))
+    t0 = time.time()
     async def _one(item: InferBatchItem) -> InferBatchResult:
         try:
             full_path = _resolve_nas_path(item.path)
@@ -161,7 +179,10 @@ async def infer_batch(req: InferBatchRequest):
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=str(e.detail))
         except Exception as e:  # noqa: BLE001
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=f"{type(e).__name__}: {e}")
-    return await asyncio.gather(*(_one(i) for i in req.items))
+    results = await asyncio.gather(*(_one(i) for i in req.items))
+    n_ok = sum(1 for r in results if r.ok)
+    log.info("批量推理结束 %d 个  成功 %d 失败 %d  %.1fs", len(results), n_ok, len(results) - n_ok, time.time() - t0)
+    return results
 
 
 # ── /train ──────────────────────────────────────────────────────────────
@@ -183,6 +204,7 @@ class TrainRequest(BaseModel):
 @app.post("/api/v1/label/train")
 async def submit_train(req: TrainRequest):
     job = jobs.create_job(req.dataset.model_dump(), req.model_type, req.tag)
+    log.info("训练任务 #%d 提交: %s", job["job_id"], job["command"])
     asyncio.create_task(jobs.run_job(job["job_id"]))
     return job
 

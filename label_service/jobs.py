@@ -11,11 +11,14 @@ JOBS_DIR/{job_id}.json，stdout/stderr 落 JOBS_DIR/{job_id}.log，方便出问�
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 
 from label_service import config
+
+log = logging.getLogger("label_service.jobs")
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -117,6 +120,7 @@ async def run_job(job_id: int) -> None:
     job["started_at"] = int(time.time())
     job["log_path"] = _log_path(job_id)
     _save(job)
+    log.info("训练任务 #%d 开始，训练输出见 %s", job_id, _log_path(job_id))
 
     cmd = build_command(job["dataset_spec"], job["model_type"], job["tag"])
     try:
@@ -141,8 +145,10 @@ async def run_job(job_id: int) -> None:
         job["model_path"] = model_path
         job["model_version"] = job["tag"] or f"{job['model_type']}_{job['created_at']}"
         job["metrics"] = _load_metrics(model_path)
+        log.info("训练任务 #%d 完成 %.0fs 模型=%s", job_id, time.time() - job["started_at"], model_path)
     except Exception as e:  # noqa: BLE001 后台任务异常不能让服务进程崩，落盘状态即可
         job["status"] = STATUS_FAILED
         job["error"] = str(e)[:4000]
+        log.error("训练任务 #%d 失败: %s", job_id, str(e)[:500])
     job["finished_at"] = int(time.time())
     _save(job)

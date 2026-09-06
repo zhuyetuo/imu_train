@@ -1,1 +1,5 @@
 jobs/
+
+
+# label_service 日志目录
+label_service/logs/
