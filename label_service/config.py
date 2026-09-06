@@ -2,7 +2,8 @@
 label_service 的配置——全部走环境变量，跟 run_review_bins_all_days.sh 用的
 那套变量名尽量对齐，命令行怎么配、服务就怎么配，两边一致：
 
-  LABEL_MODEL       模型路径，支持通配符（跟 run_review_bins_all_days.sh 的 MODEL 一样）
+  LABEL_MODEL       模型路径，支持通配符（跟 run_review_bins_all_days.sh 的 MODEL 一样），
+                    默认是当前在用的 drop_window rf 模型，换模型改这里或者传环境变量
   DEVICE_HZ         样本 CSV 的采样率（默认 50）
   RESAMPLE_METHOD   降采样算法 poly / training_match（默认 training_match）
   TARGET_LABELS     逗号分隔（默认 活动,睡觉,抓挠,未佩戴,甩身体）
@@ -21,7 +22,7 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-MODEL_GLOB       = _env("LABEL_MODEL", "")
+MODEL_GLOB       = _env("LABEL_MODEL", "results/processed_2026_8_11-2026_8_27_raw_missing_drop_window/16hz_remap_custom_3class/rf/*.pkl")
 DEVICE_HZ        = int(_env("DEVICE_HZ", "50"))
 RESAMPLE_METHOD  = _env("RESAMPLE_METHOD", "training_match")
 TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "活动,睡觉,抓挠,未佩戴,甩身体").split(",") if t.strip()]
@@ -33,8 +34,6 @@ JOBS_DIR         = _env("LABEL_JOBS_DIR", os.path.join(REPO_ROOT, "label_service
 def resolve_model_path() -> str:
     """跟 run_review_bins_all_days.sh 里 MODEL 通配符的规则一样：
     必须恰好匹配一个文件，0 个或多个都报错，不猜。"""
-    if not MODEL_GLOB:
-        raise RuntimeError("没有设置 LABEL_MODEL 环境变量（模型路径，支持通配符）")
     pattern = MODEL_GLOB if os.path.isabs(MODEL_GLOB) else os.path.join(REPO_ROOT, MODEL_GLOB)
     matches = sorted(glob.glob(pattern))
     if len(matches) == 0:
