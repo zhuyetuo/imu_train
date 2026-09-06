@@ -25,6 +25,7 @@ bash label_service/run.sh
 | `NAS_ROOT` | `/home/toky/ai_data` | `/infer` 里传的 `path` 相对这个目录 |
 | `LABEL_SERVICE_PORT` | `8383` | |
 | `LABEL_JOBS_DIR` | `label_service/jobs/` | 训练任务状态 + 日志落盘处 |
+| `LABEL_INFER_WORKERS` | CPU 核数-2 | `WORKERS=-1`（推理进程池大小，按文件并行） |
 
 依赖：`pip install -r label_service/requirements.txt`（只多装 fastapi/uvicorn，其余复用仓库已有依赖）。
 
@@ -38,7 +39,15 @@ label_infra 那边只需要配 `ALGO_SERVICE_URL=http://<这台机器IP>:8383`�
 ```json
 {"path": "data_raw/2026_8_28/xxx_imu1_raw.csv", "sample_id": 123}
 ```
-返回 `segments`（按类别分组的片段，每段 `start_ts/end_ts/conf_max/conf_mean/n_windows`）+ `windows`（逐窗口预测和全类别概率）。字段跟 `*_infer.json` 一样。同一时刻只跑一个推理（内部加了锁），多人同时点会排队。
+返回 `segments`（按类别分组的片段，每段 `start_ts/end_ts/conf_max/conf_mean/n_windows`）+ `windows`（逐窗口预测和全类别概率）。字段跟 `*_infer.json` 一样。
+
+**`POST /api/v1/label/infer_batch`** — 批量，进程池并行（几百个样本用这个）
+```json
+{"items": [{"path": "data_raw/.../a_imu1_raw.csv", "sample_id": 1}, {"path": "...", "sample_id": 2}]}
+```
+返回跟 items 一一对应的列表，每项 `{sample_id, path, ok, error, result}`，`result` 跟 `/infer` 的返回一样；单个文件失败不影响其它的。一个请求就能把 CPU 吃满（`LABEL_INFER_WORKERS` 个进程同时跑），不用调用方自己控制并发。单个 `/infer` 也走同一个进程池，并发发多个请求同样并行，但串行一个个发就只用得上 1 个核。
+
+RF 本身预测很快，慢的是特征提取（纯 CPU 的 Python 循环，10 分钟的 50Hz 数据单核约 12 秒），所以提速靠多进程按文件并行，跟 `run_review_bins_all_days.sh` 的 `WORKERS=-1` 一个道理。
 
 **`POST /api/v1/label/train`** — 提交训练，立刻返回 job
 ```json

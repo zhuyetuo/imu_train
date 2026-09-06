@@ -10,6 +10,7 @@ label_service 的配置——全部走环境变量，跟 run_review_bins_all_day
   NAS_ROOT          NAS 根目录，/infer 里的 path 是相对它的相对路径（默认 /home/toky/ai_data）
   LABEL_SERVICE_PORT  监听端口（默认 8383）
   LABEL_JOBS_DIR    训练任务状态/日志落盘目录（默认 label_service/jobs，gitignore）
+  LABEL_INFER_WORKERS  推理进程数（默认 CPU 核数-2，跟 run_review_bins_all_days.sh 的 WORKERS=-1 一个意思）
 """
 
 import glob
@@ -29,6 +30,7 @@ TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "活动,睡觉,抓�
 NAS_ROOT         = _env("NAS_ROOT", "/home/toky/ai_data")
 PORT             = int(_env("LABEL_SERVICE_PORT", "8383"))
 JOBS_DIR         = _env("LABEL_JOBS_DIR", os.path.join(REPO_ROOT, "label_service", "jobs"))
+INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count() or 2) - 2)
 
 
 def resolve_model_path() -> str:
