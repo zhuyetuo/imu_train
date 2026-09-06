@@ -8,6 +8,8 @@
                                       同一套参数（模型/DEVICE_HZ/RESAMPLE_METHOD/TARGET_LABELS
                                       都从环境变量读，见 config.py），出来的片段跟
                                       infer_result_majority/ 下的 *_infer.json 一致
+  POST /api/v1/label/infer_batch     一次传一批路径，进程池并行跑（几百个样本批量预标注用这个，
+                                      一个请求就能把 CPU 吃满），逐个返回成功结果或错误信息
   POST /api/v1/label/train            提交训练任务，立刻返回 job_id，后台跑 train_custom.sh
   GET  /api/v1/label/train/{job_id}   轮询训练任务状态
   GET  /health
@@ -16,37 +18,38 @@
 """
 
 import asyncio
-import json
 import os
 import sys
-import tempfile
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs
+from label_service import config, jobs, pool
 
 sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
-from infer_csv_scratch import infer_file  # noqa: E402  跟命令行同一个函数，src/ 原样不动
 from label_service.model_loader import load_model_bundle  # noqa: E402
 
-_bundle: dict = {}
-_infer_lock = asyncio.Lock()   # 单机一次只跑一个推理，避免几个标注员同时点把机器打爆
+_bundle: dict = {}      # 主进程只留元数据（health 用），真正推理在 pool 的 worker 进程里
+_pool = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _pool
     model_path = config.resolve_model_path()
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
+    _bundle.pop("model", None)
     print(f"[label_service] 模型: {model_path}  device_hz={config.DEVICE_HZ}  "
           f"resample={config.RESAMPLE_METHOD}  target_labels={config.TARGET_LABELS}  "
-          f"nas_root={config.NAS_ROOT}")
+          f"nas_root={config.NAS_ROOT}  infer_workers={config.INFER_WORKERS}")
     missing = [t for t in config.TARGET_LABELS if t not in _bundle["classes"]]
     if missing:
         print(f"[label_service][警告] TARGET_LABELS 里这些类别模型没有: {missing}  模型类别: {_bundle['classes']}")
+    _pool = pool.create_pool(model_path)
     yield
+    _pool.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title="imu_train label_service", version="0.1.0", lifespan=lifespan)
@@ -63,6 +66,7 @@ async def health():
         "resample_method": config.RESAMPLE_METHOD,
         "target_labels": config.TARGET_LABELS,
         "nas_root": config.NAS_ROOT,
+        "infer_workers": config.INFER_WORKERS,
     }
 
 
@@ -107,47 +111,57 @@ def _resolve_nas_path(relative_path: str) -> str:
     return full
 
 
-def _run_infer_sync(full_path: str) -> dict:
-    """在临时目录里让 infer_file 按它自己的格式落一份 *_infer.json，再读回来——
-    这样 HTTP 返回的就是命令行产出的同一份东西，不另外维护一套输出格式。"""
-    b = _bundle
-    model_hz = b["hz"]
-    window_size = int(b["window_s"] * model_hz)
-    stride = int(b["stride_s"] * model_hz)
-    with tempfile.TemporaryDirectory(prefix="label_infer_") as tmp:
-        infer_file(
-            full_path, b["model"], b["classes"], window_size, stride,
-            config.DEVICE_HZ, model_hz, b["gravity_aligned"],
-            quiet=True, label_mode=b["label_mode"], output_dir=tmp,
-            resample_method=config.RESAMPLE_METHOD,
-            target_labels=config.TARGET_LABELS, is_dl=b["is_dl"],
-        )
-        stem = os.path.splitext(os.path.basename(full_path))[0]
-        segments, windows, n_windows = {}, [], 0
-        for label in config.TARGET_LABELS:
-            p = os.path.join(tmp, label, "_infer", f"{stem}_infer.json")
-            if not os.path.exists(p):
-                segments[label] = []
-                continue
-            with open(p, encoding="utf-8") as f:
-                data = json.load(f)
-            segments[label] = data["scratch_segments"]
-            windows, n_windows = data["windows"], data["n_windows"]   # 各类别文件里这两项相同
-    return {"segments": segments, "windows": windows, "n_windows": n_windows}
+async def _infer_in_pool(full_path: str) -> dict:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_pool, pool._infer_one, full_path)
 
 
 @app.post("/api/v1/label/infer", response_model=InferResponse)
 async def infer(req: InferRequest):
     full_path = _resolve_nas_path(req.path)
-    async with _infer_lock:
-        try:
-            result = await asyncio.to_thread(_run_infer_sync, full_path)
-        except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
-            raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
+    try:
+        result = await _infer_in_pool(full_path)
+    except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
+        raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
         sample_id=req.sample_id, path=req.path, model_path=_bundle["model_path"],
         classes=_bundle["classes"], **result,
     )
+
+
+class InferBatchItem(BaseModel):
+    path: str
+    sample_id: int | None = None
+
+
+class InferBatchRequest(BaseModel):
+    items: list[InferBatchItem] = Field(..., min_length=1)
+
+
+class InferBatchResult(BaseModel):
+    sample_id: int | None
+    path: str
+    ok: bool
+    error: str | None = None
+    result: InferResponse | None = None
+
+
+@app.post("/api/v1/label/infer_batch", response_model=list[InferBatchResult])
+async def infer_batch(req: InferBatchRequest):
+    """一批文件同时丢进进程池并行跑，单个文件失败不影响其它的，逐项带回
+    ok/error。几百个样本一次发一个请求就行，不用调用方自己控制并发。"""
+    async def _one(item: InferBatchItem) -> InferBatchResult:
+        try:
+            full_path = _resolve_nas_path(item.path)
+            result = await _infer_in_pool(full_path)
+            return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=True, result=InferResponse(
+                sample_id=item.sample_id, path=item.path, model_path=_bundle["model_path"],
+                classes=_bundle["classes"], **result))
+        except HTTPException as e:
+            return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=str(e.detail))
+        except Exception as e:  # noqa: BLE001
+            return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=f"{type(e).__name__}: {e}")
+    return await asyncio.gather(*(_one(i) for i in req.items))
 
 
 # ── /train ──────────────────────────────────────────────────────────────
