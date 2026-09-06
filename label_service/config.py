@@ -1,0 +1,44 @@
+"""
+label_service 的配置——全部走环境变量，跟 run_review_bins_all_days.sh 用的
+那套变量名尽量对齐，命令行怎么配、服务就怎么配，两边一致：
+
+  LABEL_MODEL       模型路径，支持通配符（跟 run_review_bins_all_days.sh 的 MODEL 一样）
+  DEVICE_HZ         样本 CSV 的采样率（默认 50）
+  RESAMPLE_METHOD   降采样算法 poly / training_match（默认 training_match）
+  TARGET_LABELS     逗号分隔（默认 活动,睡觉,抓挠,未佩戴,甩身体）
+  NAS_ROOT          NAS 根目录，/infer 里的 path 是相对它的相对路径（默认 /home/toky/ai_data）
+  LABEL_SERVICE_PORT  监听端口（默认 8383）
+  LABEL_JOBS_DIR    训练任务状态/日志落盘目录（默认 label_service/jobs，gitignore）
+"""
+
+import glob
+import os
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+MODEL_GLOB       = _env("LABEL_MODEL", "")
+DEVICE_HZ        = int(_env("DEVICE_HZ", "50"))
+RESAMPLE_METHOD  = _env("RESAMPLE_METHOD", "training_match")
+TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "活动,睡觉,抓挠,未佩戴,甩身体").split(",") if t.strip()]
+NAS_ROOT         = _env("NAS_ROOT", "/home/toky/ai_data")
+PORT             = int(_env("LABEL_SERVICE_PORT", "8383"))
+JOBS_DIR         = _env("LABEL_JOBS_DIR", os.path.join(REPO_ROOT, "label_service", "jobs"))
+
+
+def resolve_model_path() -> str:
+    """跟 run_review_bins_all_days.sh 里 MODEL 通配符的规则一样：
+    必须恰好匹配一个文件，0 个或多个都报错，不猜。"""
+    if not MODEL_GLOB:
+        raise RuntimeError("没有设置 LABEL_MODEL 环境变量（模型路径，支持通配符）")
+    pattern = MODEL_GLOB if os.path.isabs(MODEL_GLOB) else os.path.join(REPO_ROOT, MODEL_GLOB)
+    matches = sorted(glob.glob(pattern))
+    if len(matches) == 0:
+        raise RuntimeError(f"LABEL_MODEL 通配符 {pattern} 没有匹配到任何文件")
+    if len(matches) > 1:
+        raise RuntimeError(f"LABEL_MODEL 通配符 {pattern} 匹配到多个文件，请写具体一点: {matches}")
+    return matches[0]
