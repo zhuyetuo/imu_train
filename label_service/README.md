@@ -11,14 +11,14 @@
 
 ```bash
 cd ~/imu_train
-LABEL_MODEL="results/processed_2026_8_11-2026_8_27_raw_missing_drop_window/16hz_remap_custom_3class/rf/*.pkl" \
 bash label_service/run.sh
 ```
 
-`LABEL_MODEL` 是必填的（支持通配符，规则跟 `run_review_bins_all_days.sh` 的 `MODEL` 一样：必须恰好匹配一个文件）。其余默认值就是你常用那条推理命令的配置：
+所有默认值都在 `label_service/config.py` 里，就是你常用那条推理命令的配置，不用传任何环境变量；要换模型改 `config.py` 里的 `LABEL_MODEL` 默认值，或者临时 `LABEL_MODEL="..." bash label_service/run.sh`：
 
 | 环境变量 | 默认 | 对应命令行 |
 |---|---|---|
+| `LABEL_MODEL` | `results/processed_2026_8_11-2026_8_27_raw_missing_drop_window/16hz_remap_custom_3class/rf/*.pkl` | `MODEL=...`（通配符规则一样：必须恰好匹配一个文件） |
 | `DEVICE_HZ` | `50` | `DEVICE_HZ=50` |
 | `RESAMPLE_METHOD` | `training_match` | `RESAMPLE_METHOD=training_match` |
 | `TARGET_LABELS` | `活动,睡觉,抓挠,未佩戴,甩身体` | `TARGET_LABELS=...` |
