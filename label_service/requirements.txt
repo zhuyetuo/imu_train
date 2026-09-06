@@ -1,0 +1,3 @@
+# label_service 额外依赖（其余复用仓库根目录 requirements.txt 里已有的 numpy/pandas/scipy/scikit-learn/joblib）
+fastapi>=0.111
+uvicorn[standard]>=0.29
