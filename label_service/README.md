@@ -26,12 +26,24 @@ bash label_service/run.sh
 | `LABEL_SERVICE_PORT` | `8383` | |
 | `LABEL_JOBS_DIR` | `label_service/jobs/` | 训练任务状态 + 日志落盘处 |
 | `LABEL_INFER_WORKERS` | CPU 核数-2 | `WORKERS=-1`（推理进程池大小，按文件并行） |
+| `LABEL_LOG_DIR` | `label_service/logs/` | 日志目录 |
 
 依赖：`pip install -r label_service/requirements.txt`（只多装 fastapi/uvicorn，其余复用仓库已有依赖）。
 
 起来之后：`curl http://localhost:8383/health`，接口文档 `http://localhost:8383/docs`。
 
 label_infra 那边只需要配 `ALGO_SERVICE_URL=http://<这台机器IP>:8383`。
+
+## 日志
+
+`label_service/logs/` 下（按天切、留 14 天）：
+- `label_service.log` — 启动参数、每次推理（文件、耗时、各类别几段）、批量推理起止、训练任务提交/完成/失败、报错堆栈
+- `access.log` — HTTP 访问日志（谁调了什么接口、状态码）
+- `../jobs/{job_id}.log` — 每个训练任务 `train_custom.sh` 的完整输出
+
+```bash
+tail -f label_service/logs/label_service.log
+```
 
 ## 接口
 
