@@ -19,6 +19,9 @@ scikit-learn>=1.3
 pyyaml>=6.0
 joblib>=1.3
 tqdm>=4.65
+# 推理 worker 里把 BLAS/OpenMP 限成单线程用（见 pool.py 的说明），
+# sklearn 本来就依赖它，这里显式列出来免得以后被裁掉
+threadpoolctl>=3.1
 
 # 训练用的几个梯度提升实现（train.py 里 --model 可选）
 xgboost>=2.0
