@@ -33,6 +33,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from label_service import config, jobs, pool, postprocess, skin, tooth
+from label_service import queue as infer_queue
 from label_service.logging_setup import setup_logging
 
 setup_logging()
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI):
     if missing:
         log.warning("TARGET_LABELS 里这些类别模型没有: %s  模型类别: %s", missing, _bundle["classes"])
     _pool = pool.create_pool(model_path)
+    infer_queue.setup(config.INFER_WORKERS, config.INFER_RESERVE)
     yield
     log.info("关闭")
     _pool.shutdown(wait=False, cancel_futures=True)
@@ -158,11 +160,13 @@ def _stable_params() -> postprocess.StableParams:
     )
 
 
-async def _infer_in_pool(full_path: str, mode: str = "raw") -> dict:
+async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infer_queue.PRIORITY_BATCH) -> dict:
     loop = asyncio.get_running_loop()
     t0 = time.time()
     try:
-        result = await loop.run_in_executor(_pool, pool._infer_one, full_path)
+        # 批量的要抢槽位排队，交互式的直接进（见 queue.py）
+        async with infer_queue.slot(priority):
+            result = await loop.run_in_executor(_pool, pool._infer_one, full_path)
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
@@ -192,7 +196,7 @@ async def _infer_in_pool(full_path: str, mode: str = "raw") -> dict:
 async def infer(req: InferRequest):
     full_path = _resolve_nas_path(req.path)
     try:
-        result = await _infer_in_pool(full_path, req.mode)
+        result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE)
     except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
         raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
@@ -219,11 +223,17 @@ class InferBatchResult(BaseModel):
     result: InferResponse | None = None
 
 
+@app.get("/api/v1/label/queue")
+async def queue_status():
+    """当前排队情况：几个在算、几个在等、平均一个文件多久、预计多久消化完。"""
+    return infer_queue.stats()
+
+
 @app.post("/api/v1/label/infer_batch", response_model=list[InferBatchResult])
 async def infer_batch(req: InferBatchRequest):
     """一批文件同时丢进进程池并行跑，单个文件失败不影响其它的，逐项带回
     ok/error。几百个样本一次发一个请求就行，不用调用方自己控制并发。"""
-    log.info("批量推理开始 %d 个", len(req.items))
+    log.info("批量推理开始 %d 个  队列=%s", len(req.items), infer_queue.stats())
     t0 = time.time()
     async def _one(item: InferBatchItem) -> InferBatchResult:
         try:
@@ -238,7 +248,8 @@ async def infer_batch(req: InferBatchRequest):
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=f"{type(e).__name__}: {e}")
     results = await asyncio.gather(*(_one(i) for i in req.items))
     n_ok = sum(1 for r in results if r.ok)
-    log.info("批量推理结束 %d 个  成功 %d 失败 %d  %.1fs", len(results), n_ok, len(results) - n_ok, time.time() - t0)
+    log.info("批量推理结束 %d 个  成功 %d 失败 %d  %.1fs  队列=%s", len(results), n_ok, len(results) - n_ok,
+             time.time() - t0, infer_queue.stats())
     return results
 
 

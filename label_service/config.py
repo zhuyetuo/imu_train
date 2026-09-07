@@ -41,6 +41,9 @@ TOOTH_WEIGHTS    = _env("TOOTH_WEIGHTS", os.path.join(REPO_ROOT, "tooth_health",
 TOOTH_CONF       = float(_env("TOOTH_CONF", "0.5"))
 TOOTH_IMGSZ      = int(_env("TOOTH_IMGSZ", "960"))
 INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count() or 2) - 2)
+# 给交互式推理（工作台点「AI预标注」）留几个槽位，批量预标注最多占 INFER_WORKERS - 这个数，
+# 免得标注员点一下要排在几十个批量文件后面
+INFER_RESERVE    = int(_env("LABEL_INFER_RESERVE", "2"))
 
 # 稳定版后处理参数（见 postprocess.py）。调试版 = 模型逐窗口原始输出，不受这些影响
 STABLE_EVENT_LABELS      = [t.strip() for t in _env("STABLE_EVENT_LABELS", "抓挠,甩身体").split(",") if t.strip()]
