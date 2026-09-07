@@ -229,6 +229,7 @@ class ToothDetectRequest(BaseModel):
     path: str = Field(..., description="相对 MATERIAL_ROOT（如 口腔验证/2026-09-02-ok/Bali/x.jpg）或相对 NAS_ROOT 的图片路径")
     conf: float | None = Field(None, ge=0.0, le=0.95, description="置信度阈值，缺省用服务配置（0.5）；传 0 = 全部检出都返回（内部按 0.001）")
     with_image: bool = Field(True, description="是否返回带检测框的 JPEG（base64）")
+    top_k: int = Field(1, ge=0, le=50, description="每张图最多保留几个框（按置信度），默认 1；0 = 不限")
 
 
 @app.get("/api/v1/tooth/status")
@@ -246,7 +247,7 @@ async def tooth_detect(req: ToothDetectRequest):
     try:
         # YOLO 单张几十毫秒到几百毫秒，丢线程池别卡住事件循环；模型在主进程懒加载一次
         conf = None if req.conf is None else max(req.conf, 0.001)  # ultralytics conf=0 会被当成默认值，用 0.001 表示"全部"
-        result = await asyncio.to_thread(tooth.detect, full_path, conf, None, req.with_image)
+        result = await asyncio.to_thread(tooth.detect, full_path, conf, None, req.with_image, req.top_k)
     except FileNotFoundError as e:
         raise HTTPException(503, str(e))
     except Exception as e:  # noqa: BLE001

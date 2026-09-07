@@ -65,11 +65,18 @@ def resolve_image_path(relative_path: str) -> str:
     raise FileNotFoundError(f"文件不存在（在 {config.MATERIAL_ROOT} 和 {config.NAS_ROOT} 下都没找到）: {relative_path}")
 
 
-def detect(full_path: str, conf: float | None = None, imgsz: int | None = None, with_image: bool = True) -> dict:
+def detect(full_path: str, conf: float | None = None, imgsz: int | None = None, with_image: bool = True,
+           top_k: int | None = 1) -> dict:
+    """top_k=1（默认）：每张图只留置信度最高的一个框——一张口腔照片就是一张嘴，要的是
+    "这张嘴正常还是异常、多大把握"，不是一堆重叠框。agnostic_nms 让 NMS 跨类别做，同一个
+    位置不会同时冒出"正常"和"异常"两个框。top_k=0 表示不限（看模型全部输出）。"""
     import cv2
 
     model = _get_model()
-    results = model.predict(full_path, conf=conf or config.TOOTH_CONF, imgsz=imgsz or config.TOOTH_IMGSZ, verbose=False)
+    kwargs = dict(conf=conf or config.TOOTH_CONF, imgsz=imgsz or config.TOOTH_IMGSZ, verbose=False, agnostic_nms=True)
+    if top_k:
+        kwargs["max_det"] = top_k
+    results = model.predict(full_path, **kwargs)
     r = results[0]
     names = model.names
     dets = []
@@ -86,7 +93,7 @@ def detect(full_path: str, conf: float | None = None, imgsz: int | None = None, 
         "width": int(w), "height": int(h),
         "detections": dets,
         "class_names": class_names(),
-        "conf": conf or config.TOOTH_CONF, "imgsz": imgsz or config.TOOTH_IMGSZ,
+        "conf": conf or config.TOOTH_CONF, "imgsz": imgsz or config.TOOTH_IMGSZ, "top_k": top_k or 0,
         "annotated_jpeg_b64": None,
     }
     if with_image:
