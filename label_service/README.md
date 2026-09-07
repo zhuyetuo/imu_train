@@ -147,6 +147,17 @@ docker compose -f label_service/docker-compose.yml down       # 停
 
 NAS（`NAS_ROOT`）和素材库（`MATERIAL_ROOT`，只读）按**同名路径**挂进容器——接口里传的是相对路径，两边路径一致才对得上。要改路径或端口，把 `.env.example` 复制成 `.env` 再改。
 
-镜像装的是仓库根目录那份完整 `requirements.txt`（训练要 torch/xgboost/lightgbm/catboost，牙齿检测要 ultralytics），第一次构建比较慢、镜像也大，之后只有依赖变了才需要重建。
+镜像装的是 `label_service/requirements-docker.txt`（精简版）：只保留推理 / 训练 / 牙齿检测真正用到的包，去掉了 `shap`、`matplotlib`、`pymc`、`arviz`、`gradio`、`ward-metrics` 这些只在研究和评估脚本里用的东西（`train_custom.sh` 调到的几个 py 文件逐个查过，都不 import 它们）。
+
+torch 单独从 **CPU 源**装：容器里没配 GPU，装 PyPI 上的默认版会连带拉 `nvidia_cu*` 那一堆 CUDA 轮子，好几个 G 全是用不上的。
+
+构建慢就换源，默认已经指到国内镜像：
+
+```bash
+# 在 .env 里改，或者临时传
+docker compose -f label_service/docker-compose.yml build \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  --build-arg TORCH_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu/
+```
 
 `run.sh` 保留着，本地调试想看实时输出时还能用。

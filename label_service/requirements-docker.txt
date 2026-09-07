@@ -1,0 +1,34 @@
+# 容器里实际要装的依赖——比仓库根目录那份完整 requirements.txt 小很多。
+#
+# 根目录那份是给「本机做研究」用的，包含 shap / matplotlib / pymc / arviz / gradio /
+# ward-metrics 这些分析和可视化工具。label_service 这个服务只跑三件事：
+#   1) 推理           → numpy/pandas/scipy/scikit-learn/joblib
+#   2) 训练           → 上面这些 + xgboost/lightgbm/catboost/pyyaml/tqdm
+#                       （train_custom.sh 调的是 labelstudio_to_custom.py、preprocess.py、
+#                         train.py、synthesize_scratch.py，逐个查过，都不 import 那几个重包）
+#   3) 牙齿检测       → ultralytics + torch + opencv
+# 所以那几个装了也用不上，去掉能省一大截构建时间和镜像体积。
+#
+# torch 走 CPU 版（Dockerfile 里单独从 CPU 源装）：容器没配 GPU，装官方 PyPI 的
+# 默认版会连带拉 nvidia_* 那一堆 CUDA 轮子，好几个 G 全是死重量。
+
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+scikit-learn>=1.3
+pyyaml>=6.0
+joblib>=1.3
+tqdm>=4.65
+
+# 训练用的几个梯度提升实现（train.py 里 --model 可选）
+xgboost>=2.0
+lightgbm>=4.0
+catboost>=1.2
+
+# 牙齿检测：ultralytics 依赖 torch（CPU 版单独装）；headless 版 opencv 不需要 libgl
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0
+
+# 服务本体
+fastapi>=0.111
+uvicorn[standard]>=0.29

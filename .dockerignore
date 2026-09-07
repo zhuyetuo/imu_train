@@ -1,0 +1,15 @@
+# 构建上下文只需要 label_service/requirements-docker.txt，别把几十 G 的数据和模型
+# 传给 docker daemon（代码和模型是运行时挂载进去的，不进镜像）
+data/
+results/
+tmp/
+logs/
+label_service/logs/
+label_service/jobs/
+.git/
+**/__pycache__/
+*.pyc
+*.mp4
+*.csv
+*.pkl
+*.pt
