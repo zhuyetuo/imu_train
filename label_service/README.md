@@ -27,7 +27,7 @@ bash label_service/run.sh
 | `LABEL_JOBS_DIR` | `label_service/jobs/` | 训练任务状态 + 日志落盘处 |
 | `LABEL_INFER_WORKERS` | CPU 核数-2 | `WORKERS=-1`（推理进程池大小，按文件并行） |
 | `LABEL_LOG_DIR` | `label_service/logs/` | 日志目录 |
-| `MATERIAL_ROOT` | `/home/toky/算法任务素材库` | 素材库 NAS 挂载点，牙齿照片在 `口腔验证/` 下 |
+| `MATERIAL_ROOT` | `/home/toky/alg_material` | 素材库 NAS 挂载点，牙齿照片在 `口腔验证/` 下 |
 | `TOOTH_WEIGHTS` | `tooth_health/data/runs/tooth_detect/weights/best.pt` | 牙齿 YOLO 权重（不在仓库里，没有则 /tooth 接口不可用，不影响 IMU 推理） |
 | `TOOTH_CONF` / `TOOTH_IMGSZ` | `0.5` / `960` | 跟 tooth_health/code/web_app.py 默认一致 |
 
