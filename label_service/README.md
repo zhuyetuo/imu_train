@@ -27,6 +27,9 @@ bash label_service/run.sh
 | `LABEL_JOBS_DIR` | `label_service/jobs/` | 训练任务状态 + 日志落盘处 |
 | `LABEL_INFER_WORKERS` | CPU 核数-2 | `WORKERS=-1`（推理进程池大小，按文件并行） |
 | `LABEL_LOG_DIR` | `label_service/logs/` | 日志目录 |
+| `MATERIAL_ROOT` | `/home/toky/算法任务素材库` | 素材库 NAS 挂载点，牙齿照片在 `口腔验证/` 下 |
+| `TOOTH_WEIGHTS` | `tooth_health/data/runs/tooth_detect/weights/best.pt` | 牙齿 YOLO 权重（不在仓库里，没有则 /tooth 接口不可用，不影响 IMU 推理） |
+| `TOOTH_CONF` / `TOOTH_IMGSZ` | `0.5` / `960` | 跟 tooth_health/code/web_app.py 默认一致 |
 
 依赖：`pip install -r label_service/requirements.txt`（只多装 fastapi/uvicorn，其余复用仓库已有依赖）。
 
@@ -72,3 +75,9 @@ RF 本身预测很快，慢的是特征提取（纯 CPU 的 Python 循环，10 �
 **`GET /api/v1/label/train/{job_id}`** — 轮询状态 `queued/running/done/failed`，完成后带 `model_path/metrics`；日志在 `label_service/jobs/{job_id}.log`。
 
 训练完**不会自动替换** `/infer` 正在用的模型——要换就改 `LABEL_MODEL` 重启服务。
+
+**`POST /api/v1/tooth/detect`** — 牙齿/口腔照片 YOLO 检测
+```json
+{"path": "口腔验证/2026-09-02-ok/Bali/微信图片_xxx.jpg", "conf": 0.5, "with_image": true}
+```
+`path` 相对 `MATERIAL_ROOT`（或 `NAS_ROOT`）。返回 `detections[]`（`class_name/confidence/box[x1,y1,x2,y2]`）、`class_names`、原图尺寸、`annotated_jpeg_b64`（带框图）。`GET /api/v1/tooth/status` 看权重在不在、加载了没。
