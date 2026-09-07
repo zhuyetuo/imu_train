@@ -109,3 +109,10 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
 每个窗口和片段都带 `spec`（陀螺仪 4–8 Hz 能量占比，抓挠的独立物理证据）。`STABLE_SPECTRAL_MIN` 设成 >0 后，平均 spec 低于它的抓挠 bout 会被丢掉；默认 0 不启用，先在 `data_labeled_ai/` 的 JSON 里看真/假抓挠的 spec 分布再定阈值。
 
 几个模式用的是同一次模型推理，稳定版不会多花时间（频谱多读一次 CSV，约 1 秒）。
+
+## 疑似抓挠候选、边界微调、训练闭环
+
+- 稳定版/v2 的响应多一个 `candidates`：低门槛（`CAND_ENTER/CAND_STAY`）滞回抽出来、或频谱占比 ≥ `CAND_SPEC_MIN` 但模型没判抓挠的段，不进正式片段，给人工审核找漏检。
+- `REFINE_ENABLED=1`（默认）时，抓挠/甩身体片段和候选的起止用陀螺仪能量包络（10 Hz）在 ±`REFINE_MARGIN_S` 内精确到 0.1 秒。
+- `/train` 的 `dataset.export_json`：label_infra 从审核通过的任务导出的 Label Studio 格式 JSON（NAS 相对路径），服务整理成 `data/raw_custom/<date>/merged_tmp.json` 并把 CSV 软链进 `data/raw_wit/`；`source_hz`/`hz`/`clean` 直接透传给 `train_custom.sh`。
+- `POST /api/v1/label/model/switch {model_path}`：运行时切换推理模型（重建进程池），重启后回到 `LABEL_MODEL`。

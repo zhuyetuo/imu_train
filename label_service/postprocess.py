@@ -55,6 +55,14 @@ class StableParams:
     event_single_conf: float = 0.85  # 单窗口也保留的最高概率下限
     spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
+    # 疑似抓挠候选（给人工审核找漏检用，不进正式片段）
+    cand_enter: float = 0.2        # 低门槛滞回：进入
+    cand_stay: float = 0.15        # 低门槛滞回：维持
+    cand_min_windows: int = 2
+    cand_spec_min: float = 0.35    # 频谱占比 ≥ 这个且连续 ≥ cand_min_windows 个窗口，模型没判抓挠也列为候选
+    # 边界微调：在片段起止各 ±refine_margin_s 内按陀螺仪能量找真正的起止
+    refine_margin_s: float = 1.0
+    refine_ratio: float = 0.3      # 能量高于片段内中位数 × 这个比例才算"在动"
 
 
 def _parse_ts(s: str | None) -> datetime | None:
@@ -185,6 +193,111 @@ def _merge_gaps(bouts: list[list[int]], zones, gap_s: float) -> list[list[int]]:
         else:
             merged.append(list(range(b[0], b[-1] + 1)))
     return merged
+
+
+def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]],
+                       window_s: float, stride_s: float, label_mode: str,
+                       params: StableParams | None = None) -> list[dict]:
+    """
+    疑似抓挠候选：正式片段（稳定版/v2）为了准把 20% 左右的真抓挠也滤掉了，这里用
+    低门槛再抽一遍给人工看——两类来源：
+      low_conf：抓挠概率 ≥ cand_enter 进入、≥ cand_stay 维持，≥ cand_min_windows 个窗口；
+      spectral：陀螺仪 4–8 Hz 占比 ≥ cand_spec_min 且连续 ≥ cand_min_windows 个窗口，
+                模型没判成抓挠（模型漏检但物理信号像抓挠）。
+    跟正式抓挠片段重叠的去掉。返回结构同 segments 元素，多 reason 字段。
+    """
+    p = params or StableParams()
+    n = len(windows)
+    if n == 0:
+        return []
+    ts = [_parse_ts(w.get("ts")) for w in windows]
+    if any(t is None for t in ts):
+        return []
+    zones = _zones(ts, window_s, stride_s, label_mode)  # type: ignore[arg-type]
+    sl = p.scratch_label
+    probs = [w.get("probs") or {} for w in windows]
+    spec = [w.get("spec") for w in windows]
+    pv = [probs[i].get(sl, 0.0) for i in range(n)]
+
+    taken = [False] * n
+    for seg in final_segments.get(sl) or []:
+        s0, e0 = _parse_ts(seg["start_ts"]), _parse_ts(seg["end_ts"])
+        for i in range(n):
+            if s0 and e0 and zones[i][0] < e0 and zones[i][1] > s0:
+                taken[i] = True
+
+    cands: list[tuple[list[int], str]] = []
+    for b in _merge_gaps(_bouts_hysteresis(pv, p.cand_enter, p.cand_stay), zones, p.event_gap_s):
+        b = [i for i in b if not taken[i]]
+        if len(b) >= p.cand_min_windows:
+            cands.append((b, "low_conf"))
+    covered = {i for b, _ in cands for i in b}
+    run: list[int] = []
+    for i in range(n + 1):
+        ok = i < n and not taken[i] and i not in covered and spec[i] is not None and spec[i] >= p.cand_spec_min
+        if ok:
+            run.append(i)
+        else:
+            if len(run) >= p.cand_min_windows:
+                cands.append((list(run), "spectral"))
+            run = []
+
+    out = []
+    for b, reason in cands:
+        i0, i1 = b[0], b[-1]
+        vals = [pv[i] for i in range(i0, i1 + 1)]
+        sv = [spec[i] for i in range(i0, i1 + 1) if spec[i] is not None]
+        out.append({
+            "start_ts": _fmt_ts(zones[i0][0]),
+            "end_ts": _fmt_ts(zones[i1][1]),
+            "conf_max": float(max(vals)),
+            "conf_mean": float(sum(vals) / len(vals)),
+            "n_windows": i1 - i0 + 1,
+            "spec": round(sum(sv) / len(sv), 3) if sv else None,
+            "reason": reason,
+        })
+    out.sort(key=lambda c: c["start_ts"])
+    return out
+
+
+def refine_boundaries(segments: list[dict], envelope: dict | None, params: StableParams | None = None) -> None:
+    """
+    用陀螺仪能量包络（pool.py 算的，10 Hz）把片段起止从 1 秒窗口对齐精确到 0.1 秒：
+    在原起点 ±margin 内找第一个能量高于阈值的点当新起点，终点同理找最后一个。
+    阈值 = 片段内能量中位数 × refine_ratio。原地改 segments 的 start_ts/end_ts。
+    """
+    p = params or StableParams()
+    if not envelope or not segments:
+        return
+    t0 = _parse_ts(envelope.get("t0"))
+    hz = float(envelope.get("hz") or 0)
+    energy = envelope.get("energy") or []
+    if t0 is None or hz <= 0 or not energy:
+        return
+    n = len(energy)
+
+    def idx(t: datetime) -> int:
+        return int(round((t - t0).total_seconds() * hz))
+
+    def at(i: int) -> datetime:
+        return t0 + timedelta(seconds=i / hz)
+
+    m = int(round(p.refine_margin_s * hz))
+    for seg in segments:
+        s, e = _parse_ts(seg["start_ts"]), _parse_ts(seg["end_ts"])
+        if s is None or e is None:
+            continue
+        si, ei = idx(s), idx(e)
+        inner = sorted(energy[max(0, si):min(n, ei)])
+        if not inner:
+            continue
+        thr = inner[len(inner) // 2] * p.refine_ratio
+        lo, hi = max(0, si - m), min(n - 1, si + m)
+        new_s = next((i for i in range(lo, hi + 1) if energy[i] >= thr), None)
+        lo, hi = max(0, ei - m), min(n - 1, ei + m)
+        new_e = next((i for i in range(hi, lo - 1, -1) if energy[i] >= thr), None)
+        if new_s is not None and new_e is not None and new_e > new_s:
+            seg["start_ts"], seg["end_ts"] = _fmt_ts(at(new_s)), _fmt_ts(at(new_e + 1))
 
 
 def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],

@@ -60,8 +60,53 @@ def _next_job_id() -> int:
     return (max(ids) + 1) if ids else 1
 
 
+def prepare_export(dataset_spec: dict) -> None:
+    """
+    label_infra 导出的数据集：NAS 上一份 Label Studio 格式 JSON，csv 字段是 NAS_ROOT
+    下的相对路径。train_custom.sh 只认 data/raw_custom/<date>/merged_tmp.json + 固定的
+    data/raw_wit/ 当 CSV 目录（按文件名找），所以这里把 JSON 抄过去、csv 改成文件名，
+    并把 NAS 上的 CSV 软链进 data/raw_wit/（文件名带日期时间，不会撞）。
+    """
+    export_json = dataset_spec.get("export_json")
+    if not export_json:
+        return
+    src = os.path.join(config.NAS_ROOT, export_json)
+    if not os.path.isfile(src):
+        raise RuntimeError(f"导出的数据集 JSON 不存在: {src}")
+    with open(src, encoding="utf-8") as f:
+        tasks = json.load(f)
+    csv_dir = os.path.join(config.REPO_ROOT, "data", "raw_wit")
+    os.makedirs(csv_dir, exist_ok=True)
+    for t in tasks:
+        rel = (t.get("data") or {}).get("csv")
+        if not rel:
+            continue
+        full = rel if os.path.isabs(rel) else os.path.join(config.NAS_ROOT, rel)
+        if not os.path.isfile(full):
+            raise RuntimeError(f"CSV 不存在: {full}")
+        link = os.path.join(csv_dir, os.path.basename(full))
+        if os.path.islink(link):
+            if os.readlink(link) != full:
+                os.remove(link)
+                os.symlink(full, link)
+        elif not os.path.exists(link):
+            os.symlink(full, link)
+        t["data"]["csv"] = os.path.basename(full)
+    data_dir = os.path.join(config.REPO_ROOT, "data", "raw_custom", dataset_spec["date"])
+    os.makedirs(data_dir, exist_ok=True)
+    with open(os.path.join(data_dir, "merged_tmp.json"), "w", encoding="utf-8") as f:
+        json.dump(tasks, f, ensure_ascii=False)
+    log.info("数据集 %s 已整理: %d 个任务 → %s", dataset_spec["date"], len(tasks), data_dir)
+
+
 def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[str]:
     cmd = ["bash", "train_custom.sh", "--date", dataset_spec["date"]]
+    if dataset_spec.get("source_hz"):
+        cmd += ["--source_hz", str(dataset_spec["source_hz"])]
+    if dataset_spec.get("hz"):
+        cmd += ["--hz", str(dataset_spec["hz"])]
+    if dataset_spec.get("clean"):
+        cmd += ["--clean"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
     if dataset_spec.get("missing_strategy"):
@@ -124,6 +169,7 @@ async def run_job(job_id: int) -> None:
 
     cmd = build_command(job["dataset_spec"], job["model_type"], job["tag"])
     try:
+        await asyncio.to_thread(prepare_export, job["dataset_spec"])
         with open(_log_path(job_id), "wb") as log_f:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=config.REPO_ROOT, stdout=log_f, stderr=asyncio.subprocess.STDOUT,
