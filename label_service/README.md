@@ -131,13 +131,27 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
 前台 `bash label_service/run.sh` 会一直占着终端刷日志，改用容器常驻：
 
 ```bash
-bash label_service/up.sh          # 重建并后台启动
+bash label_service/up.sh          # 重建并后台启动（CPU）
+bash label_service/up.sh -g       # 用 GPU 起
 bash label_service/up.sh -p       # 先 git pull 再重建
 bash label_service/up.sh -d       # 只重启（改了 .py 用这个，最快，不重建镜像）
-
-docker compose -f label_service/docker-compose.yml logs -f    # 看日志
-docker compose -f label_service/docker-compose.yml down       # 停
+bash label_service/up.sh logs -f  # 看日志
+bash label_service/up.sh down     # 停
 ```
+
+### 要不要开 GPU
+
+默认 CPU。**能吃到 GPU 的只有牙齿检测（YOLO / ultralytics）和 DL 模型**；IMU 那条线的推理和训练是随机森林 / XGBoost / LightGBM / CatBoost，都是 CPU 算法，开 GPU 不会变快。所以除非牙齿照片要批量跑，否则用默认的就行。
+
+开 GPU 需要宿主机先装好驱动和容器工具包：
+
+```bash
+nvidia-smi                                  # 驱动在不在
+docker info | grep -i runtimes              # 有没有 nvidia runtime
+sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
+```
+
+GPU 版镜像是单独的 tag（`:gpu`，装带 CUDA 的 torch），跟 CPU 版并存，来回切不用重建。
 
 整个仓库以读写方式挂进容器的 `/app`：
 
