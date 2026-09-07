@@ -22,6 +22,30 @@ from label_service import config
 _bundle: dict = {}
 
 
+def _memoize_load_csv() -> None:
+    """
+    同一个文件在一次推理里要读两遍 CSV：infer_file 自己读一遍算特征，
+    _spectral_ratio_per_window 再读一遍算频谱。一小时 50Hz 的数据是 18 万行，
+    pandas 解析一遍就大几百毫秒。这里给 load_csv 套一个只存最近一个文件的缓存，
+    第二次直接命中；换文件就自动淘汰，不会把内存堆起来。
+    """
+    import infer_csv_scratch as m
+
+    if getattr(m, "_lru_wrapped", False):
+        return
+    orig = m.load_csv
+    cache: dict = {}
+
+    def cached(path):
+        if cache.get("path") != path:
+            cache.clear()
+            cache["path"], cache["val"] = path, orig(path)
+        return cache["val"]
+
+    m.load_csv = cached
+    m._lru_wrapped = True
+
+
 def _init_worker(model_path: str) -> None:
     sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
     from label_service.logging_setup import worker_setup_logging
@@ -29,6 +53,7 @@ def _init_worker(model_path: str) -> None:
     worker_setup_logging()
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
+    _memoize_load_csv()
 
 
 def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float) -> dict | None:
@@ -61,7 +86,11 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
         band = (freqs >= 4) & (freqs <= 8)
         wide = (freqs >= 1) & (freqs <= 15)
         hann = np.hanning(n_samp).astype(np.float32)
-        for w in windows:
+
+        # 所有窗口一次性堆成矩阵做批量 FFT——逐窗口在 Python 里循环几千次
+        # rfft，光解释器开销就比 FFT 本身还贵
+        starts, idx_of = [], []
+        for k, w in enumerate(windows):
             w["spec"] = None
             t = w.get("ts")
             if not t:
@@ -71,15 +100,21 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             except ValueError:
                 continue
             i0 = int(np.searchsorted(ts_vals, t0))
-            seg = mag[i0:i0 + n_samp]
-            if len(seg) < n_samp // 2:
+            if len(mag) - i0 < n_samp // 2:
                 continue
-            seg = seg - seg.mean()
-            if len(seg) < n_samp:
-                seg = np.pad(seg, (0, n_samp - len(seg)))
-            pw = np.abs(np.fft.rfft(seg * hann)) ** 2
-            tot = float(pw[wide].sum())
-            w["spec"] = round(float(pw[band].sum()) / tot, 3) if tot > 0 else None
+            starts.append(i0)
+            idx_of.append(k)
+        if starts:
+            padded = np.zeros(len(mag) + n_samp, dtype=np.float32)
+            padded[: len(mag)] = mag
+            offsets = np.asarray(starts)[:, None] + np.arange(n_samp)[None, :]
+            segs = padded[offsets]
+            segs = segs - segs.mean(axis=1, keepdims=True)
+            pw = np.abs(np.fft.rfft(segs * hann, axis=1)) ** 2
+            tot = pw[:, wide].sum(axis=1)
+            ratio = np.divide(pw[:, band].sum(axis=1), tot, out=np.zeros_like(tot), where=tot > 0)
+            for k, r, tt in zip(idx_of, ratio, tot):
+                windows[k]["spec"] = round(float(r), 3) if tt > 0 else None
     except Exception:  # noqa: BLE001 频谱只是附加信息，算不出来不影响推理
         for w in windows:
             w.setdefault("spec", None)

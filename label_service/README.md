@@ -116,3 +116,12 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
 - `REFINE_ENABLED=1`（默认）时，抓挠/甩身体片段和候选的起止用陀螺仪能量包络（10 Hz）在 ±`REFINE_MARGIN_S` 内精确到 0.1 秒。
 - `/train` 的 `dataset.export_json`：label_infra 从审核通过的任务导出的 Label Studio 格式 JSON（NAS 相对路径），服务整理成 `data/raw_custom/<date>/merged_tmp.json` 并把 CSV 软链进 `data/raw_wit/`；`source_hz`/`hz`/`clean` 直接透传给 `train_custom.sh`。
 - `POST /api/v1/label/model/switch {model_path}`：运行时切换推理模型（重建进程池），重启后回到 `LABEL_MODEL`。
+
+## 排队与并发
+
+- 批量预标注最多占 `LABEL_INFER_WORKERS - LABEL_INFER_RESERVE` 个槽位（默认留 2 个），
+  剩下的永远留给工作台点「AI预标注」的交互式请求——批量慢一点没关系，点一下要马上有反应。
+- `GET /api/v1/label/queue`：几个在算、几个在等、平均一个文件多久、预计多久消化完。
+  批量推理开始/结束的日志里也会带一份。
+- worker 里 `load_csv` 带一个只存最近一个文件的缓存：一次推理原来要把 CSV 读两遍
+  （特征一遍、频谱一遍），现在第二次直接命中。频谱也改成所有窗口一次批量 FFT。
