@@ -46,13 +46,44 @@ def _memoize_load_csv() -> None:
     m._lru_wrapped = True
 
 
+def _limit_threads_in_worker() -> None:
+    """
+    每个 worker 只跑单线程的 numpy/BLAS/OpenMP。
+
+    并行度已经由进程池提供（默认 CPU 核数 - 2 个进程），如果每个进程里的 numpy /
+    scikit-learn 再各自开满线程，30 个进程 × 几十个线程会有上千个线程去抢几十个核，
+    绝大部分时间花在上下文切换上，实测比单线程还慢。这是 multiprocessing + numpy
+    最常见的一个坑。
+
+    注意只限制推理 worker，不设成全局环境变量——训练（train_custom.sh 里的
+    XGBoost/LightGBM）是靠 OpenMP 多线程加速的，那边要用满核心。
+    """
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[var] = "1"
+    try:
+        # numpy 已经在父进程 import 过了，fork 出来的子进程里改环境变量对已经建好的
+        # 线程池不生效；threadpoolctl 是运行时改，才真正管用（sklearn 自带这个依赖）
+        from threadpoolctl import threadpool_limits
+
+        threadpool_limits(1)
+    except Exception:  # noqa: BLE001 限不了就算了，只是慢点，不该影响推理
+        pass
+
+
 def _init_worker(model_path: str) -> None:
+    _limit_threads_in_worker()
     sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
     from label_service.logging_setup import worker_setup_logging
     from label_service.model_loader import load_model_bundle
     worker_setup_logging()
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
+    # 模型自己也别再开多线程/多进程：随机森林是用 n_jobs=-1 训出来的，predict 时
+    # 会照着这个值再 fork 一堆 joblib worker，跟进程池打架
+    model = _bundle.get("model")
+    if hasattr(model, "n_jobs"):
+        model.n_jobs = 1
     _memoize_load_csv()
 
 
