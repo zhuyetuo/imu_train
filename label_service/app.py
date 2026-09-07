@@ -27,11 +27,12 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs, pool, skin, tooth
+from label_service import config, jobs, pool, postprocess, skin, tooth
 from label_service.logging_setup import setup_logging
 
 setup_logging()
@@ -88,6 +89,7 @@ async def health():
 class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
+    mode: Literal["raw", "stable"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（状态平滑+事件合并过滤，见 postprocess.py）")
 
 
 class Segment(BaseModel):
@@ -108,6 +110,7 @@ class WindowOut(BaseModel):
 class InferResponse(BaseModel):
     sample_id: int | None
     path: str
+    mode: str = "raw"
     model_path: str
     classes: list[str]
     n_windows: int
@@ -124,7 +127,19 @@ def _resolve_nas_path(relative_path: str) -> str:
     return full
 
 
-async def _infer_in_pool(full_path: str) -> dict:
+def _stable_params() -> postprocess.StableParams:
+    return postprocess.StableParams(
+        event_labels=tuple(config.STABLE_EVENT_LABELS),
+        smooth_windows=config.STABLE_SMOOTH_WINDOWS,
+        min_state_s=config.STABLE_MIN_STATE_S,
+        event_gap_s=config.STABLE_EVENT_GAP_S,
+        event_min_windows=config.STABLE_EVENT_MIN_WINDOWS,
+        event_min_mean=config.STABLE_EVENT_MIN_MEAN,
+        event_single_conf=config.STABLE_EVENT_SINGLE_CONF,
+    )
+
+
+async def _infer_in_pool(full_path: str, mode: str = "raw") -> dict:
     loop = asyncio.get_running_loop()
     t0 = time.time()
     try:
@@ -132,8 +147,15 @@ async def _infer_in_pool(full_path: str) -> dict:
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
+    if mode == "stable":
+        # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
+        result["segments"] = postprocess.stabilize(
+            result["windows"], _bundle["classes"], config.TARGET_LABELS,
+            _bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"], _stable_params(),
+        )
+    result["mode"] = mode
     counts = {k: len(v) for k, v in result["segments"].items() if v}
-    log.info("推理完成 %s  %.1fs  windows=%d  segments=%s", os.path.relpath(full_path, config.NAS_ROOT),
+    log.info("推理完成[%s] %s  %.1fs  windows=%d  segments=%s", mode, os.path.relpath(full_path, config.NAS_ROOT),
              time.time() - t0, result["n_windows"], counts)
     return result
 
@@ -142,7 +164,7 @@ async def _infer_in_pool(full_path: str) -> dict:
 async def infer(req: InferRequest):
     full_path = _resolve_nas_path(req.path)
     try:
-        result = await _infer_in_pool(full_path)
+        result = await _infer_in_pool(full_path, req.mode)
     except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
         raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
@@ -158,6 +180,7 @@ class InferBatchItem(BaseModel):
 
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
+    mode: Literal["raw", "stable"] = "raw"
 
 
 class InferBatchResult(BaseModel):
@@ -177,7 +200,7 @@ async def infer_batch(req: InferBatchRequest):
     async def _one(item: InferBatchItem) -> InferBatchResult:
         try:
             full_path = _resolve_nas_path(item.path)
-            result = await _infer_in_pool(full_path)
+            result = await _infer_in_pool(full_path, req.mode)
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=True, result=InferResponse(
                 sample_id=item.sample_id, path=item.path, model_path=_bundle["model_path"],
                 classes=_bundle["classes"], **result))

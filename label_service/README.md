@@ -97,3 +97,12 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
 | `POST /skin/ml/scan` `/ml/preview` `/ml/predict-c` `/ml/predict-s` | ML 模型 A/B（skin_health/code/rf_infer.py），兼容 `{day}/_infer` 和 `{day}/抓挠/_infer` 两种目录结构 |
 
 记录/周报表的存储在 label_infra 的数据库里，这边只负责算。
+
+## 推理模式：调试版 / 稳定版
+
+`/infer`、`/infer_batch` 都接受 `mode`：
+
+- `raw`（默认，调试版）：模型逐窗口 argmax 的原始输出，活动/睡觉会来回闪、抓挠常有单窗口噪声，适合看模型到底说了什么。
+- `stable`（稳定版）：同一次推理结果做后处理（`postprocess.py`）：状态类概率滑动平均 + 短片段并入邻居；事件类（抓挠/甩身体）间隙合并成 bout，窗口数/平均概率不够的丢掉。参数见 `config.py` 的 `STABLE_*`。
+
+两个模式用的是同一次模型推理，稳定版不会多花时间。
