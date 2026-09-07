@@ -31,21 +31,32 @@ def _init_worker(model_path: str) -> None:
     _bundle["model_path"] = model_path
 
 
-def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float) -> None:
+def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float) -> dict | None:
     """
     给每个窗口算陀螺仪 4–8 Hz 能量占 1–15 Hz 的比例，写进 window["spec"]。抓挠是
     后腿高频往复，这个频段有明显峰；模型之外的独立证据，稳定版可按它过滤误报
     （config.STABLE_SPECTRAL_MIN）。算不出来（没陀螺仪/没时间戳）就全 None。
+    同时返回 10 Hz 的陀螺仪能量包络 {t0, hz, energy}，给边界微调用（postprocess.refine_boundaries）。
     """
+    envelope = None
     try:
         from infer_csv_scratch import load_csv
         _acc, gyro, ts, _mask, _null = load_csv(full_path)
         if gyro is None or ts is None or len(gyro) == 0:
-            return
+            return None
         hz = config.DEVICE_HZ
         n_samp = int(window_s * hz)
         ts_vals = ts.values.astype("datetime64[ns]")
         mag = np.linalg.norm(gyro, axis=1).astype(np.float32)
+        # 能量包络：去均值后的幅值平方按 0.1s 分箱求均值
+        step = max(1, hz // 10)
+        dm = mag - float(np.nanmean(mag))
+        sq = np.nan_to_num(dm * dm)
+        n_bins = len(sq) // step
+        if n_bins > 0:
+            env = sq[: n_bins * step].reshape(n_bins, step).mean(axis=1)
+            envelope = {"t0": ts.iloc[0].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], "hz": hz / step,
+                        "energy": [round(float(v), 4) for v in env]}
         freqs = np.fft.rfftfreq(n_samp, d=1.0 / hz)
         band = (freqs >= 4) & (freqs <= 8)
         wide = (freqs >= 1) & (freqs <= 15)
@@ -72,6 +83,7 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
     except Exception:  # noqa: BLE001 频谱只是附加信息，算不出来不影响推理
         for w in windows:
             w.setdefault("spec", None)
+    return envelope
 
 
 def _infer_one(full_path: str) -> dict:
@@ -99,9 +111,8 @@ def _infer_one(full_path: str) -> dict:
                 data = json.load(f)
             segments[label] = data["scratch_segments"]
             windows, n_windows = data["windows"], data["n_windows"]  # 各类别文件里这两项相同
-    if windows:
-        _spectral_ratio_per_window(full_path, windows, b["window_s"])
-    return {"segments": segments, "windows": windows, "n_windows": n_windows}
+    envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"]) if windows else None
+    return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope}
 
 
 def create_pool(model_path: str) -> ProcessPoolExecutor:

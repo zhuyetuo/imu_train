@@ -109,10 +109,16 @@ class WindowOut(BaseModel):
     spec: float | None = None
 
 
+class Candidate(Segment):
+    reason: str   # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判
+
+
 class InferResponse(BaseModel):
     sample_id: int | None
     path: str
     mode: str = "raw"
+    # 疑似抓挠候选（稳定版/v2 才有）：不进正式片段，给人工审核找漏检
+    candidates: list[Candidate] = []
     model_path: str
     classes: list[str]
     n_windows: int
@@ -143,6 +149,12 @@ def _stable_params() -> postprocess.StableParams:
         event_single_conf=config.STABLE_EVENT_SINGLE_CONF,
         spectral_min=config.STABLE_SPECTRAL_MIN,
         viterbi_switch=config.STABLE_VITERBI_SWITCH,
+        cand_enter=config.CAND_ENTER,
+        cand_stay=config.CAND_STAY,
+        cand_min_windows=config.CAND_MIN_WINDOWS,
+        cand_spec_min=config.CAND_SPEC_MIN,
+        refine_margin_s=config.REFINE_MARGIN_S,
+        refine_ratio=config.REFINE_RATIO,
     )
 
 
@@ -154,16 +166,25 @@ async def _infer_in_pool(full_path: str, mode: str = "raw") -> dict:
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
+    envelope = result.pop("envelope", None)
+    result["candidates"] = []
     if mode in ("stable", "viterbi"):
         # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
+        params = _stable_params()
+        geom = (_bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"])
         result["segments"] = postprocess.stabilize(
-            result["windows"], _bundle["classes"], config.TARGET_LABELS,
-            _bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"], _stable_params(), algo=mode,
+            result["windows"], _bundle["classes"], config.TARGET_LABELS, *geom, params, algo=mode,
         )
+        result["candidates"] = postprocess.scratch_candidates(result["windows"], result["segments"], *geom, params)
+        if config.REFINE_ENABLED:
+            for lab in config.STABLE_EVENT_LABELS:
+                postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)
+            postprocess.refine_boundaries(result["candidates"], envelope, params)
     result["mode"] = mode
     counts = {k: len(v) for k, v in result["segments"].items() if v}
-    log.info("推理完成[%s] %s  %.1fs  windows=%d  segments=%s", mode, os.path.relpath(full_path, config.NAS_ROOT),
-             time.time() - t0, result["n_windows"], counts)
+    log.info("推理完成[%s] %s  %.1fs  windows=%d  segments=%s  candidates=%d", mode,
+             os.path.relpath(full_path, config.NAS_ROOT), time.time() - t0, result["n_windows"], counts,
+             len(result["candidates"]))
     return result
 
 
@@ -229,6 +250,11 @@ class DatasetSpec(BaseModel):
     missing_strategy: str | None = Field(None, description="none/drop/ffill/drop_window")
     skip_syn: bool = Field(False, description="只训练方案A，跳过合成数据")
     feat_workers: int | None = Field(None, description="特征提取并行数，-1=全部CPU")
+    source_hz: int | None = Field(None, description="主批次真实采样率（NAS 原始 50Hz 数据必须传 50）")
+    hz: int | None = Field(None, description="训练目标采样率，默认脚本里的 16")
+    export_json: str | None = Field(None, description="label_infra 导出的 Label Studio 格式 JSON 在 NAS_ROOT 下的相对路径；"
+                                                    "csv 字段是 NAS_ROOT 下的相对路径，服务会整理成 data/raw_custom/<date>/merged_tmp.json")
+    clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")
 
 
 class TrainRequest(BaseModel):
@@ -243,6 +269,38 @@ async def submit_train(req: TrainRequest):
     log.info("训练任务 #%d 提交: %s", job["job_id"], job["command"])
     asyncio.create_task(jobs.run_job(job["job_id"]))
     return job
+
+
+class ModelSwitchRequest(BaseModel):
+    model_path: str = Field(..., description="训练产出的 .pkl，绝对路径或相对 imu_train 仓库")
+
+
+@app.post("/api/v1/label/model/switch")
+async def switch_model(req: ModelSwitchRequest):
+    """
+    切换当前推理用的模型：重新加载元数据、重建进程池（worker 启动时各自加载模型）。
+    正在跑的推理会被取消，调用方（label_infra 训练页「启用此模型」）自己挑空闲时候点。
+    只改运行时，不改 config/LABEL_MODEL——重启服务会回到配置里的模型，想固定就把
+    LABEL_MODEL 环境变量改成这个路径。
+    """
+    global _pool
+    path = req.model_path if os.path.isabs(req.model_path) else os.path.join(config.REPO_ROOT, req.model_path)
+    if not os.path.isfile(path):
+        raise HTTPException(422, f"模型文件不存在: {path}")
+    try:
+        bundle = await asyncio.to_thread(load_model_bundle, path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(422, f"模型加载失败: {type(e).__name__}: {e}") from e
+    bundle.pop("model", None)
+    old = _pool
+    _pool = pool.create_pool(path)
+    _bundle.clear()
+    _bundle.update(bundle)
+    _bundle["model_path"] = path
+    if old is not None:
+        old.shutdown(wait=False, cancel_futures=True)
+    log.info("已切换模型: %s classes=%s", path, _bundle["classes"])
+    return {"model_path": path, "classes": _bundle["classes"], "hz": _bundle["hz"]}
 
 
 @app.get("/api/v1/label/train/{job_id}")

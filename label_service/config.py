@@ -58,6 +58,14 @@ STABLE_EVENT_SINGLE_CONF = float(_env("STABLE_EVENT_SINGLE_CONF", "0.85"))
 STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
 # viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
 STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
+# 疑似抓挠候选（低门槛，给人工找漏检）与边界微调
+CAND_ENTER               = float(_env("CAND_ENTER", "0.2"))
+CAND_STAY                = float(_env("CAND_STAY", "0.15"))
+CAND_MIN_WINDOWS         = int(_env("CAND_MIN_WINDOWS", "2"))
+CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0.35"))
+REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
+REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
+REFINE_ENABLED           = _env("REFINE_ENABLED", "1") == "1"
 
 
 def resolve_model_path() -> str:
