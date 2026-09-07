@@ -42,6 +42,15 @@ TOOTH_CONF       = float(_env("TOOTH_CONF", "0.5"))
 TOOTH_IMGSZ      = int(_env("TOOTH_IMGSZ", "960"))
 INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count() or 2) - 2)
 
+# 稳定版后处理参数（见 postprocess.py）。调试版 = 模型逐窗口原始输出，不受这些影响
+STABLE_EVENT_LABELS      = [t.strip() for t in _env("STABLE_EVENT_LABELS", "抓挠,甩身体").split(",") if t.strip()]
+STABLE_SMOOTH_WINDOWS    = int(_env("STABLE_SMOOTH_WINDOWS", "7"))
+STABLE_MIN_STATE_S       = float(_env("STABLE_MIN_STATE_S", "10"))
+STABLE_EVENT_GAP_S       = float(_env("STABLE_EVENT_GAP_S", "2"))
+STABLE_EVENT_MIN_WINDOWS = int(_env("STABLE_EVENT_MIN_WINDOWS", "2"))
+STABLE_EVENT_MIN_MEAN    = float(_env("STABLE_EVENT_MIN_MEAN", "0.45"))
+STABLE_EVENT_SINGLE_CONF = float(_env("STABLE_EVENT_SINGLE_CONF", "0.85"))
+
 
 def resolve_model_path() -> str:
     """跟 run_review_bins_all_days.sh 里 MODEL 通配符的规则一样：
