@@ -15,6 +15,8 @@ import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 
+import numpy as np
+
 from label_service import config
 
 _bundle: dict = {}
@@ -27,6 +29,49 @@ def _init_worker(model_path: str) -> None:
     worker_setup_logging()
     _bundle.update(load_model_bundle(model_path))
     _bundle["model_path"] = model_path
+
+
+def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float) -> None:
+    """
+    给每个窗口算陀螺仪 4–8 Hz 能量占 1–15 Hz 的比例，写进 window["spec"]。抓挠是
+    后腿高频往复，这个频段有明显峰；模型之外的独立证据，稳定版可按它过滤误报
+    （config.STABLE_SPECTRAL_MIN）。算不出来（没陀螺仪/没时间戳）就全 None。
+    """
+    try:
+        from infer_csv_scratch import load_csv
+        _acc, gyro, ts, _mask, _null = load_csv(full_path)
+        if gyro is None or ts is None or len(gyro) == 0:
+            return
+        hz = config.DEVICE_HZ
+        n_samp = int(window_s * hz)
+        ts_vals = ts.values.astype("datetime64[ns]")
+        mag = np.linalg.norm(gyro, axis=1).astype(np.float32)
+        freqs = np.fft.rfftfreq(n_samp, d=1.0 / hz)
+        band = (freqs >= 4) & (freqs <= 8)
+        wide = (freqs >= 1) & (freqs <= 15)
+        hann = np.hanning(n_samp).astype(np.float32)
+        for w in windows:
+            w["spec"] = None
+            t = w.get("ts")
+            if not t:
+                continue
+            try:
+                t0 = np.datetime64(t.replace(" ", "T"))
+            except ValueError:
+                continue
+            i0 = int(np.searchsorted(ts_vals, t0))
+            seg = mag[i0:i0 + n_samp]
+            if len(seg) < n_samp // 2:
+                continue
+            seg = seg - seg.mean()
+            if len(seg) < n_samp:
+                seg = np.pad(seg, (0, n_samp - len(seg)))
+            pw = np.abs(np.fft.rfft(seg * hann)) ** 2
+            tot = float(pw[wide].sum())
+            w["spec"] = round(float(pw[band].sum()) / tot, 3) if tot > 0 else None
+    except Exception:  # noqa: BLE001 频谱只是附加信息，算不出来不影响推理
+        for w in windows:
+            w.setdefault("spec", None)
 
 
 def _infer_one(full_path: str) -> dict:
@@ -54,6 +99,8 @@ def _infer_one(full_path: str) -> dict:
                 data = json.load(f)
             segments[label] = data["scratch_segments"]
             windows, n_windows = data["windows"], data["n_windows"]  # 各类别文件里这两项相同
+    if windows:
+        _spectral_ratio_per_window(full_path, windows, b["window_s"])
     return {"segments": segments, "windows": windows, "n_windows": n_windows}
 
 

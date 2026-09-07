@@ -46,10 +46,18 @@ INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count
 STABLE_EVENT_LABELS      = [t.strip() for t in _env("STABLE_EVENT_LABELS", "抓挠,甩身体").split(",") if t.strip()]
 STABLE_SMOOTH_WINDOWS    = int(_env("STABLE_SMOOTH_WINDOWS", "7"))
 STABLE_MIN_STATE_S       = float(_env("STABLE_MIN_STATE_S", "10"))
-STABLE_EVENT_GAP_S       = float(_env("STABLE_EVENT_GAP_S", "2"))
+STABLE_EVENT_ENTER       = float(_env("STABLE_EVENT_ENTER", "0.5"))    # 滞回：进入事件的概率
+STABLE_EVENT_STAY        = float(_env("STABLE_EVENT_STAY", "0.25"))    # 滞回：维持在同一段的概率
+STABLE_EVENT_GAP_S       = float(_env("STABLE_EVENT_GAP_S", "4"))
+STABLE_SHAKE_ABSORB_S    = float(_env("STABLE_SHAKE_ABSORB_S", "3"))   # 抓挠前后多少秒内的甩身体并入抓挠
 STABLE_EVENT_MIN_WINDOWS = int(_env("STABLE_EVENT_MIN_WINDOWS", "2"))
 STABLE_EVENT_MIN_MEAN    = float(_env("STABLE_EVENT_MIN_MEAN", "0.45"))
 STABLE_EVENT_SINGLE_CONF = float(_env("STABLE_EVENT_SINGLE_CONF", "0.85"))
+# 抓挠 bout 陀螺仪 4–8 Hz 能量占比下限（0 = 不启用）。每个片段都带 spec 字段，先看
+# 一批真/假抓挠的分布再定阈值，经验上真抓挠 > 0.3、误报 < 0.15
+STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
+# viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
+STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
 
 
 def resolve_model_path() -> str:

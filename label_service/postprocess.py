@@ -1,24 +1,38 @@
 """
 "稳定版"后处理：把逐窗口的原始预测（调试版，模型逐窗口 argmax 的真实输出）
 整理成人看着可信的片段。原始输出里活动/睡觉这类"状态"经常一秒一换来回闪，
-抓挠/甩身体这类"事件"又常常是孤立的单窗口噪声——这里分两套规则处理：
+抓挠/甩身体这类"事件"又常常是孤立的单窗口噪声，或者一次完整抓挠中间被一两个
+跳成活动/甩身体的窗口切碎——这里分两套规则处理。
 
-状态类（活动/睡觉/未佩戴 …，除 EVENT_LABELS 之外的全部）
-  1. 对状态类的概率向量做滑动平均（SMOOTH_WINDOWS 个窗口），再取 argmax；
-  2. 连续同状态的一段短于 MIN_STATE_S 的，并入相邻更长的那段，反复直到没有碎片。
+两种算法（算法名 = /infer 的 mode）：
 
-事件类（抓挠/甩身体，EVENT_LABELS）
-  1. 用原始 argmax 找出事件窗口，同类事件之间间隔 ≤ EVENT_GAP_S 的合成一个 bout；
-  2. 一个 bout 要么窗口数 ≥ EVENT_MIN_WINDOWS 且平均概率 ≥ EVENT_MIN_MEAN，
-     要么最高概率 ≥ EVENT_SINGLE_CONF（单窗口但特别确定），否则丢掉；
-  3. 留下的事件覆盖在状态时间轴上（事件期间不算活动/睡觉）。
+stable —— 规则版
+  状态类（EVENT_LABELS 之外的全部）
+    1. 状态类概率向量做滑动平均（SMOOTH_WINDOWS 个窗口）再取 argmax；
+    2. 连续同状态短于 MIN_STATE_S 的段并入相邻更长的那段，反复直到没有碎片。
+  事件类（抓挠 / 甩身体）
+    1. 双阈值滞回：该事件概率 ≥ EVENT_ENTER 进入，进入后只要 ≥ EVENT_STAY 就继续
+       算同一段（中间 argmax 跳成活动的窗口抓挠概率通常还有 0.3，不会被切断）；
+    2. 同类事件间隔 ≤ EVENT_GAP_S 的合成一个 bout；
+    3. 抓挠 bout 前后 SHAKE_ABSORB_S 内的甩身体窗口并进抓挠（抓完常甩一下，
+       模型也爱把抓挠的剧烈段判成甩身体）；
+    4. bout 要么窗口数 ≥ EVENT_MIN_WINDOWS 且平均概率 ≥ EVENT_MIN_MEAN，要么最高
+       概率 ≥ EVENT_SINGLE_CONF，否则丢掉；
+    5. 可选：窗口自带的陀螺仪 4–8 Hz 能量占比（spec，见 pool.py）低于 SPECTRAL_MIN
+       的抓挠 bout 丢掉——抓挠是后腿高频往复，频谱上有明显峰，模型之外的独立证据。
 
-输入就是 /infer 返回的 windows（ts/label/conf/probs），不碰模型、不碰特征，
-调试版原样保留，两个版本用同一次推理的结果。
+viterbi —— 稳定版 v2
+  把每个窗口的各类概率当发射概率，切换类别付一个固定代价（VITERBI_SWITCH，
+  对数单位），动态规划求整条时间轴代价最小的标签序列。对所有类别统一生效，
+  参数只有一个；事件类出来之后同样走上面 2–5 的合并/过滤。
+
+输入就是 /infer 返回的 windows（ts/label/conf/probs/spec），不碰模型、不碰特征，
+调试版原样保留，几个版本用同一次推理的结果。
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -28,24 +42,30 @@ _TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
 @dataclass
 class StableParams:
     event_labels: tuple[str, ...] = ("抓挠", "甩身体")
+    scratch_label: str = "抓挠"
+    shake_label: str = "甩身体"
     smooth_windows: int = 7        # 状态概率滑动平均的窗口数（stride 1s 时 ≈ 7 秒）
     min_state_s: float = 10.0      # 状态片段最短时长，短于这个并入邻居
-    event_gap_s: float = 2.0       # 同类事件之间隔多久以内合成一个 bout
+    event_enter: float = 0.5       # 滞回：进入事件的概率门槛
+    event_stay: float = 0.25       # 滞回：进入后维持在同一段的概率门槛
+    event_gap_s: float = 4.0       # 同类事件之间隔多久以内合成一个 bout
+    shake_absorb_s: float = 3.0    # 抓挠 bout 前后多少秒内的甩身体并进抓挠
     event_min_windows: int = 2     # bout 至少几个窗口
     event_min_mean: float = 0.45   # bout 内该事件的平均概率下限
     event_single_conf: float = 0.85  # 单窗口也保留的最高概率下限
+    spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
+    viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
 
 
 def _parse_ts(s: str | None) -> datetime | None:
     if not s:
         return None
-    try:
-        return datetime.strptime(s, _TS_FMT)
-    except ValueError:
+    for f in (_TS_FMT, "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+            return datetime.strptime(s, f)
         except ValueError:
-            return None
+            continue
+    return None
 
 
 def _fmt_ts(t: datetime) -> str:
@@ -53,8 +73,7 @@ def _fmt_ts(t: datetime) -> str:
 
 
 def _zones(ts: list[datetime], window_s: float, stride_s: float, label_mode: str) -> list[tuple[datetime, datetime]]:
-    """每个窗口在时间轴上负责的区间，跟 infer_csv_scratch.window_zone 一致：
-    majority 模式 = 自己起点到下一个窗口起点；center 模式 = 中心点前后各 stride/2。"""
+    """每个窗口在时间轴上负责的区间，跟 infer_csv_scratch.window_zone 一致。"""
     out = []
     n = len(ts)
     for k in range(n):
@@ -89,40 +108,17 @@ def _absorb_short_runs(labels: list[str], zones, min_s: float) -> list[str]:
         short = [k for k, d in enumerate(dur) if d < min_s]
         if not short:
             return labels
-        k = min(short, key=lambda kk: dur[kk])   # 先处理最短的那段
+        k = min(short, key=lambda kk: dur[kk])
         left = runs[k - 1] if k > 0 else None
         right = runs[k + 1] if k + 1 < len(runs) else None
-        if left is None:
-            target = right
-        elif right is None:
-            target = left
-        else:
-            target = left if dur[k - 1] >= dur[k + 1] else right
+        target = right if left is None else left if right is None else (left if dur[k - 1] >= dur[k + 1] else right)
         for i in range(runs[k][1], runs[k][2] + 1):
             labels[i] = target[0]
 
 
-def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
-              window_s: float, stride_s: float, label_mode: str,
-              params: StableParams | None = None) -> dict[str, list[dict]]:
-    """返回 {label: [{start_ts, end_ts, conf_max, conf_mean, n_windows}]}，跟调试版 segments 同结构。"""
-    p = params or StableParams()
-    n = len(windows)
-    if n == 0:
-        return {lab: [] for lab in target_labels}
-    ts = [_parse_ts(w.get("ts")) for w in windows]
-    if any(t is None for t in ts):
-        # 没有时间戳没法算时长/间隔，稳定版做不了，返回空让调用方退回调试版
-        return {lab: [] for lab in target_labels}
-    zones = _zones(ts, window_s, stride_s, label_mode)  # type: ignore[arg-type]
-
-    events = [lab for lab in p.event_labels if lab in classes]
-    states = [lab for lab in classes if lab not in events]
-    probs = [w.get("probs") or {} for w in windows]
-
-    # ── 状态：概率滑动平均 → argmax → 吸收碎片 ──
-    half = max(0, p.smooth_windows // 2)
-    state_label: list[str] = []
+def _smooth_states(probs: list[dict], states: list[str], n: int, k: int) -> list[str]:
+    half = max(0, k // 2)
+    out = []
     for i in range(n):
         lo, hi = max(0, i - half), min(n, i + half + 1)
         best, best_v = None, -1.0
@@ -130,40 +126,159 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
             v = sum(probs[j].get(lab, 0.0) for j in range(lo, hi)) / (hi - lo)
             if v > best_v:
                 best, best_v = lab, v
-        state_label.append(best or (states[0] if states else ""))
-    state_label = _absorb_short_runs(state_label, zones, p.min_state_s)
+        out.append(best or (states[0] if states else ""))
+    return out
 
-    # ── 事件：原始 argmax 找事件窗口 → 间隙合并 → 门槛过滤 ──
-    final = list(state_label)
-    raw_label = [w.get("label") for w in windows]
-    for ev in events:
-        idx = [i for i in range(n) if raw_label[i] == ev]
-        bouts: list[list[int]] = []
-        for i in idx:
-            if bouts and (zones[i][0] - zones[bouts[-1][-1]][1]).total_seconds() <= p.event_gap_s:
-                bouts[-1].append(i)
+
+def _viterbi(probs: list[dict], classes: list[str], switch_cost: float) -> list[str]:
+    """发射 = log(prob)，切换类别扣 switch_cost，求整条序列代价最小的标签。"""
+    n, m = len(probs), len(classes)
+    if n == 0 or m == 0:
+        return []
+    eps = 1e-6
+    emit = [[math.log(max(eps, p.get(c, 0.0))) for c in classes] for p in probs]
+    score = list(emit[0])
+    back: list[list[int]] = []
+    for i in range(1, n):
+        best_prev = max(range(m), key=lambda j: score[j])
+        new_score, bp = [], []
+        for c in range(m):
+            stay = score[c]
+            switch = score[best_prev] - switch_cost
+            if stay >= switch:
+                new_score.append(stay + emit[i][c]); bp.append(c)
             else:
-                bouts.append([i])
-        for b in bouts:
+                new_score.append(switch + emit[i][c]); bp.append(best_prev)
+        score, back = new_score, back + [bp]
+    cur = max(range(m), key=lambda j: score[j])
+    path = [cur]
+    for bp in reversed(back):
+        cur = bp[cur]
+        path.append(cur)
+    path.reverse()
+    return [classes[c] for c in path]
+
+
+def _bouts_hysteresis(pv: list[float], enter: float, stay: float) -> list[list[int]]:
+    """双阈值滞回：≥enter 进入，≥stay 维持。返回 [[i0..i1 的下标列表], ...]"""
+    bouts: list[list[int]] = []
+    cur: list[int] | None = None
+    for i, v in enumerate(pv):
+        if cur is None:
+            if v >= enter:
+                cur = [i]
+        else:
+            if v >= stay:
+                cur.append(i)
+            else:
+                bouts.append(cur); cur = None
+    if cur:
+        bouts.append(cur)
+    return bouts
+
+
+def _merge_gaps(bouts: list[list[int]], zones, gap_s: float) -> list[list[int]]:
+    merged: list[list[int]] = []
+    for b in bouts:
+        if merged and (zones[b[0]][0] - zones[merged[-1][-1]][1]).total_seconds() <= gap_s:
+            merged[-1] = list(range(merged[-1][0], b[-1] + 1))
+        else:
+            merged.append(list(range(b[0], b[-1] + 1)))
+    return merged
+
+
+def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
+              window_s: float, stride_s: float, label_mode: str,
+              params: StableParams | None = None, algo: str = "stable") -> dict[str, list[dict]]:
+    """返回 {label: [{start_ts, end_ts, conf_max, conf_mean, n_windows, spec}]}，跟调试版 segments 同结构。"""
+    p = params or StableParams()
+    n = len(windows)
+    if n == 0:
+        return {lab: [] for lab in target_labels}
+    ts = [_parse_ts(w.get("ts")) for w in windows]
+    if any(t is None for t in ts):
+        return {lab: [] for lab in target_labels}
+    zones = _zones(ts, window_s, stride_s, label_mode)  # type: ignore[arg-type]
+
+    events = [lab for lab in p.event_labels if lab in classes]
+    states = [lab for lab in classes if lab not in events]
+    probs = [w.get("probs") or {} for w in windows]
+    spec = [w.get("spec") for w in windows]
+    raw_label = [w.get("label") for w in windows]
+
+    # ── 状态时间轴 ──
+    if algo == "viterbi":
+        decoded = _viterbi(probs, classes, p.viterbi_switch)
+        # 状态部分：把解码出的事件窗口先按邻居填掉，得到纯状态轴
+        state_label = []
+        last = next((d for d in decoded if d in states), states[0] if states else "")
+        for d in decoded:
+            if d in states:
+                last = d
+            state_label.append(last)
+    else:
+        decoded = None
+        state_label = _absorb_short_runs(_smooth_states(probs, states, n, p.smooth_windows), zones, p.min_state_s)
+
+    # ── 事件 bout ──
+    final = list(state_label)
+    bouts_by_event: dict[str, list[list[int]]] = {}
+    for ev in events:
+        pv = [probs[i].get(ev, 0.0) for i in range(n)]
+        if decoded is not None:
+            idx = [i for i in range(n) if decoded[i] == ev]
+            raw_b = [[i] for i in idx]
+        else:
+            raw_b = _bouts_hysteresis(pv, p.event_enter, p.event_stay)
+        bouts_by_event[ev] = _merge_gaps(raw_b, zones, p.event_gap_s)
+
+    # 抓挠吞并前后的甩身体窗口
+    sl, sh = p.scratch_label, p.shake_label
+    if sl in bouts_by_event and sh in classes:
+        shake_idx = {i for i in range(n) if raw_label[i] == sh or (decoded is not None and decoded[i] == sh)}
+        grown = []
+        for b in bouts_by_event[sl]:
+            i0, i1 = b[0], b[-1]
+            while i0 - 1 >= 0 and (i0 - 1) in shake_idx and (zones[i0][0] - zones[i0 - 1][1]).total_seconds() <= p.shake_absorb_s:
+                i0 -= 1
+            while i1 + 1 < n and (i1 + 1) in shake_idx and (zones[i1 + 1][0] - zones[i1][1]).total_seconds() <= p.shake_absorb_s:
+                i1 += 1
+            grown.append(list(range(i0, i1 + 1)))
+        bouts_by_event[sl] = _merge_gaps(grown, zones, p.event_gap_s)
+        taken = {i for b in bouts_by_event[sl] for i in b}
+        if sh in bouts_by_event:
+            bouts_by_event[sh] = [[i for i in b if i not in taken] for b in bouts_by_event[sh]]
+            bouts_by_event[sh] = [b for b in bouts_by_event[sh] if b]
+
+    # 门槛过滤 + 写到时间轴（抓挠优先于甩身体）
+    for ev in sorted(bouts_by_event, key=lambda e: 0 if e == sl else 1):
+        for b in bouts_by_event[ev]:
             pv = [probs[i].get(ev, 0.0) for i in b]
             mean_c, max_c = sum(pv) / len(pv), max(pv)
             keep = (len(b) >= p.event_min_windows and mean_c >= p.event_min_mean) or max_c >= p.event_single_conf
+            if keep and ev == sl and p.spectral_min > 0:
+                sv = [spec[i] for i in b if spec[i] is not None]
+                if sv and sum(sv) / len(sv) < p.spectral_min:
+                    keep = False
             if not keep:
                 continue
-            for i in range(b[0], b[-1] + 1):   # 间隙里的窗口也归进这个 bout
-                final[i] = ev
+            for i in b:
+                if final[i] not in events or ev == sl:
+                    final[i] = ev
 
-    # ── 按最终标签切片段，置信度用该标签在片段内窗口的原始概率 ──
+    # ── 按最终标签切片段 ──
     out: dict[str, list[dict]] = {lab: [] for lab in target_labels}
     for lab, i0, i1 in _runs(final):
         if lab not in out:
             continue
         pv = [probs[i].get(lab, 0.0) for i in range(i0, i1 + 1)]
+        sv = [spec[i] for i in range(i0, i1 + 1) if spec[i] is not None]
         out[lab].append({
             "start_ts": _fmt_ts(zones[i0][0]),
             "end_ts": _fmt_ts(zones[i1][1]),
             "conf_max": float(max(pv)) if pv else 0.0,
             "conf_mean": float(sum(pv) / len(pv)) if pv else 0.0,
             "n_windows": i1 - i0 + 1,
+            "spec": round(sum(sv) / len(sv), 3) if sv else None,
         })
     return out
