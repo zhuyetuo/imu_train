@@ -1,0 +1,42 @@
+# label_service（数据标注平台用的 AI 服务：推理 + 训练 + 牙齿/皮肤规则）
+#
+#   cd label_service && bash up.sh          起服务（后台常驻，不再占着终端）
+#   docker compose logs -f label-service    看日志
+#
+# 仓库整个挂进 /app：改代码重启容器就生效，训练产出直接落在宿主机仓库里。
+services:
+  label-service:
+    build:
+      # 上下文是仓库根目录，Dockerfile 要 COPY 根目录的 requirements.txt
+      context: ..
+      dockerfile: label_service/Dockerfile
+    image: imu-train-label-service
+    restart: unless-stopped
+    env_file:
+      # 没有这个文件也能起，全部走 config.py 里的默认值
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # NAS 在容器里的路径跟宿主机保持一致，接口里传的相对路径两边才对得上
+      NAS_ROOT: ${NAS_ROOT:-/home/toky/ai_data}
+      MATERIAL_ROOT: ${MATERIAL_ROOT:-/home/toky/alg_material}
+      LABEL_SERVICE_PORT: 8383
+    ports:
+      - "${LABEL_SERVICE_PORT:-8383}:8383"
+    volumes:
+      # 代码 + 模型 + 训练产出，读写挂载（训练要往 data/、results/、tmp/ 写）
+      - ..:/app
+      # 原始数据（推理读 CSV、训练读视频/CSV）
+      - ${NAS_ROOT_HOST:-/home/toky/ai_data}:${NAS_ROOT:-/home/toky/ai_data}
+      # 素材库（牙齿/皮肤照片），只读
+      - ${MATERIAL_ROOT_HOST:-/home/toky/alg_material}:${MATERIAL_ROOT:-/home/toky/alg_material}:ro
+    # 推理是多进程池（默认 CPU 核数 - 2），训练更吃 CPU，别限制得太死
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8383/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # 模型加载 + 进程池预热要一会儿，给足启动时间再开始判健康
+      start_period: 120s
