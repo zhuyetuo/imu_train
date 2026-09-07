@@ -14,6 +14,8 @@
   GET  /api/v1/label/train/{job_id}   轮询训练任务状态
   POST /api/v1/tooth/detect           牙齿/口腔照片 YOLO 检测（label_infra 牙齿识别页用），见 tooth.py
   GET  /api/v1/tooth/status
+  /api/v1/skin/*                      皮肤评估：PM 规则（问答分/C值/S总分）、IMU 日统计扫描、
+                                      ML 模型 A/B，见 skin.py
   GET  /health
 
 启动：  bash label_service/run.sh   （或者直接 uvicorn label_service.app:app --port 8383）
@@ -29,7 +31,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs, pool, tooth
+from label_service import config, jobs, pool, skin, tooth
 from label_service.logging_setup import setup_logging
 
 setup_logging()
@@ -77,6 +79,7 @@ async def health():
         "nas_root": config.NAS_ROOT,
         "infer_workers": config.INFER_WORKERS,
         "tooth": tooth.status(),
+        "skin_ml": skin.ml_status(),
     }
 
 
@@ -251,3 +254,99 @@ async def tooth_detect(req: ToothDetectRequest):
     log.info("牙齿检测 %s  %.2fs  %d 个框 %s", req.path, time.time() - t0, len(result["detections"]),
              [(d["class_name"], d["confidence"]) for d in result["detections"]])
     return {"path": req.path, **result}
+
+
+# ── /skin ───────────────────────────────────────────────────────────────
+
+class QuestionnaireIn(BaseModel):
+    has_hair_loss: str | None = None
+    color: str | None = None
+    odor: str | None = None
+    lesion: str | None = None
+    hair_spot: str | None = None
+    hair_diameter: str | None = None
+    coat: str | None = None
+
+
+class CScoreIn(BaseModel):
+    baseline_count: float | None = 0
+    baseline_duration_min: float | None = 0
+    today_count: float | None = 0
+    today_duration_min: float | None = 0
+    cluster_count: float | None = 0
+    persistence_days: float | None = 0
+    zn: float | None = 0
+    zd: float | None = 0
+    long_scratch: bool = False
+    has_baseline: bool = True
+
+
+class STotalIn(QuestionnaireIn):
+    c_value: float | None = None
+    c_tier_hint: str | None = None
+
+
+class RootsIn(BaseModel):
+    roots: str = Field(..., description="逗号分隔，绝对路径或相对 imu_train 仓库根目录")
+    target_label: str = "抓挠"
+
+
+class MlSelectIn(BaseModel):
+    rows: list[dict]
+    date_label: str
+    imu: str
+    dog_name: str | None = None
+    answers: QuestionnaireIn | None = None
+
+
+@app.get("/api/v1/skin/options")
+async def skin_options():
+    return skin.options()
+
+
+@app.post("/api/v1/skin/questionnaire-score")
+async def skin_questionnaire_score(q: QuestionnaireIn):
+    return skin.questionnaire_score(q.has_hair_loss, q.color, q.odor, q.lesion, q.hair_spot, q.hair_diameter, q.coat)
+
+
+@app.post("/api/v1/skin/c-score")
+async def skin_c_score(c: CScoreIn):
+    return skin.c_score(c.baseline_count, c.baseline_duration_min, c.today_count, c.today_duration_min,
+                        c.cluster_count, c.persistence_days, c.zn, c.zd, c.long_scratch, c.has_baseline)
+
+
+@app.post("/api/v1/skin/s-total")
+async def skin_s_total(s: STotalIn):
+    return skin.s_total(s.c_value, s.c_tier_hint or "", s.has_hair_loss, s.color, s.odor, s.lesion,
+                        s.hair_spot, s.hair_diameter, s.coat)
+
+
+@app.post("/api/v1/skin/stats/scan")
+async def skin_stats_scan(body: RootsIn):
+    return await asyncio.to_thread(skin.scan_stats, body.roots, body.target_label)
+
+
+@app.post("/api/v1/skin/stats/to-c-inputs")
+async def skin_stats_to_c(row: dict):
+    return skin.stats_to_c_inputs(row)
+
+
+@app.post("/api/v1/skin/ml/scan")
+async def skin_ml_scan(body: RootsIn):
+    return await asyncio.to_thread(skin.ml_scan, body.roots)
+
+
+@app.post("/api/v1/skin/ml/preview")
+async def skin_ml_preview(body: MlSelectIn):
+    return await asyncio.to_thread(skin.ml_preview, body.rows, body.date_label, body.imu, body.dog_name)
+
+
+@app.post("/api/v1/skin/ml/predict-c")
+async def skin_ml_predict_c(body: MlSelectIn):
+    return await asyncio.to_thread(skin.ml_predict, body.rows, body.date_label, body.imu, body.dog_name, "c", None)
+
+
+@app.post("/api/v1/skin/ml/predict-s")
+async def skin_ml_predict_s(body: MlSelectIn):
+    ans = body.answers.model_dump() if body.answers else None
+    return await asyncio.to_thread(skin.ml_predict, body.rows, body.date_label, body.imu, body.dog_name, "s", ans)

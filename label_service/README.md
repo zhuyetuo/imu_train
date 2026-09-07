@@ -81,3 +81,19 @@ RF 本身预测很快，慢的是特征提取（纯 CPU 的 Python 循环，10 �
 {"path": "口腔验证/2026-09-02-ok/Bali/微信图片_xxx.jpg", "conf": 0.5, "with_image": true}
 ```
 `path` 相对 `MATERIAL_ROOT`（或 `NAS_ROOT`）。返回 `detections[]`（`class_name/confidence/box[x1,y1,x2,y2]`）、`class_names`、原图尺寸、`annotated_jpeg_b64`（带框图）。`GET /api/v1/tooth/status` 看权重在不在、加载了没。
+
+## 皮肤评估接口（`/api/v1/skin/*`，给 label_infra「皮肤评估」页用）
+
+PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `label_service/skin_rules.py`（`python label_service/tools/sync_skin_rules.py` 重新生成 + 10 万组输入一致性校验），Gradio 那个 app 照旧独立能用。
+
+| 接口 | 作用 |
+|---|---|
+| `GET /skin/options` | 题目/选项/分值、狗名、IMU→狗默认映射、档位阈值、周报表列定义 |
+| `POST /skin/questionnaire-score` | 问答分（分项、两组小计、红旗项、缺答） |
+| `POST /skin/c-score` | C 值（变化幅度/聚集/持续/中断四项、红旗、档位） |
+| `POST /skin/s-total` | S 总分（C×40% + 皮肤组×35% + 毛发组×25%、档位、红旗） |
+| `POST /skin/stats/scan` | 扫 `{root}/{day}/抓挠/imu_daily_scratch_stats.csv`（IMU_STATS=1 产出） |
+| `POST /skin/stats/to-c-inputs` | 一行日统计 → C 值计算的输入 + 警示 |
+| `POST /skin/ml/scan` `/ml/preview` `/ml/predict-c` `/ml/predict-s` | ML 模型 A/B（skin_health/code/rf_infer.py），兼容 `{day}/_infer` 和 `{day}/抓挠/_infer` 两种目录结构 |
+
+记录/周报表的存储在 label_infra 的数据库里，这边只负责算。
