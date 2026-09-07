@@ -125,3 +125,28 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
   批量推理开始/结束的日志里也会带一份。
 - worker 里 `load_csv` 带一个只存最近一个文件的缓存：一次推理原来要把 CSV 读两遍
   （特征一遍、频谱一遍），现在第二次直接命中。频谱也改成所有窗口一次批量 FFT。
+
+## 用 Docker 起（推荐）
+
+前台 `bash label_service/run.sh` 会一直占着终端刷日志，改用容器常驻：
+
+```bash
+bash label_service/up.sh          # 重建并后台启动
+bash label_service/up.sh -p       # 先 git pull 再重建
+bash label_service/up.sh -d       # 只重启（改了 .py 用这个，最快，不重建镜像）
+
+docker compose -f label_service/docker-compose.yml logs -f    # 看日志
+docker compose -f label_service/docker-compose.yml down       # 停
+```
+
+整个仓库以读写方式挂进容器的 `/app`：
+
+- 改 `label_service/*.py` 只要 `up.sh -d` 重启，不用重建镜像
+- 训练产出（`results/`、`data/`、`tmp/`）直接落在宿主机仓库里，跟命令行跑出来的一模一样
+- 模型文件本来就在仓库里，不用额外拷贝
+
+NAS（`NAS_ROOT`）和素材库（`MATERIAL_ROOT`，只读）按**同名路径**挂进容器——接口里传的是相对路径，两边路径一致才对得上。要改路径或端口，把 `.env.example` 复制成 `.env` 再改。
+
+镜像装的是仓库根目录那份完整 `requirements.txt`（训练要 torch/xgboost/lightgbm/catboost，牙齿检测要 ultralytics），第一次构建比较慢、镜像也大，之后只有依赖变了才需要重建。
+
+`run.sh` 保留着，本地调试想看实时输出时还能用。
