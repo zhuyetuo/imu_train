@@ -1,0 +1,30 @@
+# GPU 版覆盖文件。默认（只用 docker-compose.yml）跑 CPU，够用而且构建快。
+#
+#   bash label_service/up.sh -g        用 GPU 起
+#
+# 前提：宿主机装了 NVIDIA 驱动 + nvidia-container-toolkit
+#   nvidia-smi                              # 驱动在不在
+#   docker info | grep -i runtimes          # 有没有 nvidia runtime
+#   sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
+#
+# 说明：能吃到 GPU 的只有牙齿检测（YOLO / ultralytics）和 DL 模型。IMU 那条线
+# 的推理和训练是随机森林 / XGBoost / LightGBM / CatBoost，都是 CPU 算法，
+# 开 GPU 不会变快——所以不确定要不要用的话，就继续用默认的 CPU 版。
+services:
+  label-service:
+    build:
+      args:
+        # 走普通 PyPI（镜像）源，装的就是带 CUDA 的 torch；CPU 版那个源没有 GPU 轮子
+        TORCH_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    # 跟 CPU 版分开存，两个镜像可以并存，来回切不用重建
+    image: imu-train-label-service:gpu
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-all}
+              capabilities: [gpu]
