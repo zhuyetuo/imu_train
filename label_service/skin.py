@@ -197,6 +197,102 @@ def scan_stats(roots_str: str, target_label: str = "抓挠") -> dict:
     return {"ok": True, "rows": all_rows, "date_labels": dates, "message": msg}
 
 
+def stats_from_events(rows: list[dict], target_label: str = "抓挠") -> dict:
+    """
+    跟 scan_stats 同样的输出，但输入不是磁盘上的 stats.csv，而是调用方（label_infra）
+    从标注平台聚合好的事件：
+        rows = [{"date": "2026-08-20", "imu": "IMU1",
+                 "events": [["2026-08-20 09:42:46.000", "2026-08-20 09:42:49.500"], ...],
+                 "wear_seconds": 25200}, ...]
+    统计口径（佩戴时长/聚集/夜间/ZN/ZD/长时抓挠/基线/持续天数）跟
+    src/imu_scratch_daily_stats.py 一致（纯函数复制在 scratch_stats.py），基线/持续天数
+    这一段是照抄 compute_stats 的后半部分——那边是文件系统入口，没法直接喂内存里的事件。
+    所有传进来的天都参与基线计算（同 compute_stats），date 用 ISO 格式。
+    """
+    from statistics import median
+    from label_service import scratch_stats as S
+
+    def _p(ts):
+        for f in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return _dt.datetime.strptime(ts, f)
+            except ValueError:
+                continue
+        return None
+
+    raw: dict[str, dict[str, dict]] = {}
+    for r in rows or []:
+        imu = str(r.get("imu") or "")
+        date = str(r.get("date") or "")
+        if not imu or not date:
+            continue
+        events = []
+        for ev in r.get("events") or []:
+            s, e = _p(ev[0]), _p(ev[1])
+            if s is None or e is None or e <= s:
+                continue
+            events.append((s, e))
+        feat = S.day_features(events)
+        wear_hours = round(float(r.get("wear_seconds") or 0.0) / 3600, 2)
+        feat["valid_wear_hours"] = wear_hours
+        feat["data_quality_flag"] = (
+            "good" if wear_hours >= S.MIN_GOOD_WEAR_HOURS else ("partial" if wear_hours > 0 else "insufficient")
+        )
+        raw.setdefault(imu, {})[date] = feat
+
+    out = []
+    for imu in sorted(raw):
+        by_date = raw[imu]
+        dates_sorted = sorted(by_date)
+        delta_history = []
+        for date in dates_sorted:
+            other = [d for d in dates_sorted if d != date and by_date[d]["data_quality_flag"] == "good"]
+            if other:
+                baseline_count = median(by_date[d]["event_count"] for d in other)
+                baseline_duration_min = median(by_date[d]["total_duration_min"] for d in other)
+                n_baseline_days = len(other)
+            else:
+                baseline_count, baseline_duration_min, n_baseline_days = 0, 0, 0
+            feat = by_date[date]
+            delta = (S.delta_score(feat["event_count"], baseline_count, feat["total_duration_min"], baseline_duration_min)
+                     if n_baseline_days and feat["data_quality_flag"] == "good" else None)
+            delta_history.append(delta)
+            consecutive, insufficient_streak = 0, 0
+            for d in reversed(delta_history):
+                if d is None:
+                    insufficient_streak += 1
+                    if insufficient_streak >= 2:
+                        break
+                    continue
+                insufficient_streak = 0
+                if d >= 10:
+                    consecutive += 1
+                else:
+                    break
+            persistence_days = min(consecutive, 7)
+            out.append({
+                "date": date, "date_iso": date, "imu": imu,
+                "root": "label_infra", "root_label": "标注平台", "stats_label": target_label,
+                "date_label": f"{date} [标注平台]",
+                "valid_wear_hours": feat["valid_wear_hours"],
+                "data_quality_flag": feat["data_quality_flag"],
+                "event_count": feat["event_count"],
+                "total_duration_min": feat["total_duration_min"],
+                "max_event_duration_sec": feat["max_event_duration_sec"],
+                "cluster_count": feat["cluster_count"],
+                "night_event_count": feat["night_event_count"],
+                "zn": feat["zn"], "zd": feat["zd"],
+                "long_scratch": bool(feat["long_scratch"]),
+                "baseline_count": round(baseline_count, 1),
+                "baseline_duration_min": round(baseline_duration_min, 2),
+                "n_baseline_days": n_baseline_days,
+                "has_baseline": n_baseline_days > 0,
+                "persistence_days": persistence_days,
+            })
+    out.sort(key=lambda r: (r["date"], r["imu"]))
+    return {"ok": True, "rows": out, "date_labels": sorted({r["date_label"] for r in out}), "message": f"{len(out)} 条(天,机位)"}
+
+
 def stats_to_c_inputs(row: dict) -> dict:
     """一行日统计 → C 值计算的输入（跟 apply_stats_to_c_calc 的映射一致）+ 警示"""
     warnings = []

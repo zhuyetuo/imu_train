@@ -351,6 +351,18 @@ async def skin_stats_scan(body: RootsIn):
     return await asyncio.to_thread(skin.scan_stats, body.roots, body.target_label)
 
 
+class EventsIn(BaseModel):
+    rows: list[dict] = Field(..., description="[{date, imu, events:[[start_ts,end_ts],...], wear_seconds}]")
+    target_label: str = "抓挠"
+
+
+@app.post("/api/v1/skin/stats/from-events")
+async def skin_stats_from_events(body: EventsIn):
+    """label_infra 把标注平台里的抓挠片段（AI 版 / 人工版）聚合成按天按 IMU 的事件列表
+    发过来，这里按 imu_daily_scratch_stats.py 的口径算成跟 stats.csv 一样的行。"""
+    return await asyncio.to_thread(skin.stats_from_events, body.rows, body.target_label)
+
+
 @app.post("/api/v1/skin/stats/to-c-inputs")
 async def skin_stats_to_c(row: dict):
     return skin.stats_to_c_inputs(row)
