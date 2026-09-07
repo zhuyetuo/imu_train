@@ -11,6 +11,10 @@ label_service 的配置——全部走环境变量，跟 run_review_bins_all_day
   LABEL_SERVICE_PORT  监听端口（默认 8383）
   LABEL_JOBS_DIR    训练任务状态/日志落盘目录（默认 label_service/jobs，gitignore）
   LABEL_LOG_DIR     日志目录（默认 label_service/logs，按天切、留 14 天，见 logging_setup.py）
+  MATERIAL_ROOT     算法任务素材库 NAS 挂载点（默认 /home/toky/算法任务素材库），牙齿照片在它的
+                    口腔验证/ 子目录下；/tooth/detect 里的 path 可以相对它，也可以相对 NAS_ROOT
+  TOOTH_WEIGHTS     牙齿 YOLO 权重（默认 tooth_health/data/runs/tooth_detect/weights/best.pt，不在仓库里）
+  TOOTH_CONF / TOOTH_IMGSZ  检测阈值 0.5 / 输入尺寸 960，跟 tooth_health/code/web_app.py 默认一致
   LABEL_INFER_WORKERS  推理进程数（默认 CPU 核数-2，跟 run_review_bins_all_days.sh 的 WORKERS=-1 一个意思）
 """
 
@@ -32,6 +36,10 @@ NAS_ROOT         = _env("NAS_ROOT", "/home/toky/ai_data")
 PORT             = int(_env("LABEL_SERVICE_PORT", "8383"))
 JOBS_DIR         = _env("LABEL_JOBS_DIR", os.path.join(REPO_ROOT, "label_service", "jobs"))
 LOG_DIR          = _env("LABEL_LOG_DIR", os.path.join(REPO_ROOT, "label_service", "logs"))
+MATERIAL_ROOT    = _env("MATERIAL_ROOT", "/home/toky/算法任务素材库")
+TOOTH_WEIGHTS    = _env("TOOTH_WEIGHTS", os.path.join(REPO_ROOT, "tooth_health", "data", "runs", "tooth_detect", "weights", "best.pt"))
+TOOTH_CONF       = float(_env("TOOTH_CONF", "0.5"))
+TOOTH_IMGSZ      = int(_env("TOOTH_IMGSZ", "960"))
 INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count() or 2) - 2)
 
 

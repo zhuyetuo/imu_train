@@ -12,6 +12,8 @@
                                       一个请求就能把 CPU 吃满），逐个返回成功结果或错误信息
   POST /api/v1/label/train            提交训练任务，立刻返回 job_id，后台跑 train_custom.sh
   GET  /api/v1/label/train/{job_id}   轮询训练任务状态
+  POST /api/v1/tooth/detect           牙齿/口腔照片 YOLO 检测（label_infra 牙齿识别页用），见 tooth.py
+  GET  /api/v1/tooth/status
   GET  /health
 
 启动：  bash label_service/run.sh   （或者直接 uvicorn label_service.app:app --port 8383）
@@ -27,7 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs, pool
+from label_service import config, jobs, pool, tooth
 from label_service.logging_setup import setup_logging
 
 setup_logging()
@@ -74,6 +76,7 @@ async def health():
         "target_labels": config.TARGET_LABELS,
         "nas_root": config.NAS_ROOT,
         "infer_workers": config.INFER_WORKERS,
+        "tooth": tooth.status(),
     }
 
 
@@ -215,3 +218,36 @@ async def get_train_status(job_id: int):
     if job is None:
         raise HTTPException(404, f"训练任务 #{job_id} 不存在")
     return job
+
+
+# ── /tooth ──────────────────────────────────────────────────────────────
+
+class ToothDetectRequest(BaseModel):
+    path: str = Field(..., description="相对 MATERIAL_ROOT（如 口腔验证/2026-09-02-ok/Bali/x.jpg）或相对 NAS_ROOT 的图片路径")
+    conf: float | None = Field(None, ge=0.05, le=0.95, description="置信度阈值，缺省用服务配置（0.5）")
+    with_image: bool = Field(True, description="是否返回带检测框的 JPEG（base64）")
+
+
+@app.get("/api/v1/tooth/status")
+async def tooth_status():
+    return tooth.status()
+
+
+@app.post("/api/v1/tooth/detect")
+async def tooth_detect(req: ToothDetectRequest):
+    try:
+        full_path = tooth.resolve_image_path(req.path)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(422, str(e))
+    t0 = time.time()
+    try:
+        # YOLO 单张几十毫秒到几百毫秒，丢线程池别卡住事件循环；模型在主进程懒加载一次
+        result = await asyncio.to_thread(tooth.detect, full_path, req.conf, None, req.with_image)
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:  # noqa: BLE001
+        log.exception("牙齿检测失败 %s", full_path)
+        raise HTTPException(500, f"检测失败: {type(e).__name__}: {e}") from e
+    log.info("牙齿检测 %s  %.2fs  %d 个框 %s", req.path, time.time() - t0, len(result["detections"]),
+             [(d["class_name"], d["confidence"]) for d in result["detections"]])
+    return {"path": req.path, **result}
