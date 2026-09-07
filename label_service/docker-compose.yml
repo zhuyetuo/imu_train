@@ -7,9 +7,13 @@
 services:
   label-service:
     build:
-      # 上下文是仓库根目录，Dockerfile 要 COPY 根目录的 requirements.txt
       context: ..
       dockerfile: label_service/Dockerfile
+      args:
+        # 构建慢就换源。默认已经是国内镜像；要用官方源填 https://pypi.org/simple
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        # torch 的 CPU 版（容器没 GPU，装默认版会白拉几个 G 的 CUDA 轮子）
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
     image: imu-train-label-service
     restart: unless-stopped
     env_file:
