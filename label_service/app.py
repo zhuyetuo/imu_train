@@ -350,3 +350,26 @@ async def skin_ml_predict_c(body: MlSelectIn):
 async def skin_ml_predict_s(body: MlSelectIn):
     ans = body.answers.model_dump() if body.answers else None
     return await asyncio.to_thread(skin.ml_predict, body.rows, body.date_label, body.imu, body.dog_name, "s", ans)
+
+
+class WeeklyRowsIn(BaseModel):
+    rows: list[list] = Field(..., description="每行 36 列（WEEKLY_REPORT_COLUMNS 顺序），短行自动补空")
+
+
+@app.post("/api/v1/skin/weekly/recompute")
+async def skin_weekly_recompute(body: WeeklyRowsIn):
+    """对比/误差分析列重算（模型vs人工 次数/时长差、人工vs兽医1 差、兽医1vs兽医2 档位一致性），
+    规则同 questionnaire_app.recompute_weekly_errors"""
+    from label_service import skin_rules as R
+    return {"rows": R.recompute_weekly_errors([list(r) for r in body.rows])}
+
+
+@app.post("/api/v1/skin/weekly/defaults")
+async def skin_weekly_defaults(body: WeeklyRowsIn):
+    """按审核链条（模型→人工→兽医1→兽医2）给空格子垫默认值，规则同 _apply_weekly_defaults"""
+    from label_service import skin_rules as R
+    out = []
+    for r in body.rows:
+        row = list(r) + [""] * (len(R.WEEKLY_REPORT_COLUMNS) - len(r))
+        out.append(R._apply_weekly_defaults(row))
+    return {"rows": out}
