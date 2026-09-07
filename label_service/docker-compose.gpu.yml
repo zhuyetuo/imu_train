@@ -7,6 +7,10 @@
 #   docker info | grep -i runtimes          # 有没有 nvidia runtime
 #   sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
 #
+# 显卡对应的 CUDA 版本（TORCH_CUDA_INDEX_URL，默认 cu128）：
+#   RTX 50 系 / Blackwell   → cu128 及以上（必须，低了跑不起来）
+#   RTX 30/40 系            → cu128 也能用；想省点体积可以换 .../whl/cu124
+#
 # 说明：能吃到 GPU 的只有牙齿检测（YOLO / ultralytics）和 DL 模型。IMU 那条线
 # 的推理和训练是随机森林 / XGBoost / LightGBM / CatBoost，都是 CPU 算法，
 # 开 GPU 不会变快——所以不确定要不要用的话，就继续用默认的 CPU 版。
@@ -14,8 +18,11 @@ services:
   label-service:
     build:
       args:
-        # 走普通 PyPI（镜像）源，装的就是带 CUDA 的 torch；CPU 版那个源没有 GPU 轮子
-        TORCH_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        # 带 CUDA 的 torch。默认钉 cu128：RTX 50 系（Blackwell，sm_120）必须用
+        # CUDA 12.8 以上编译的轮子，装到 cu126 及以下会报
+        # "no kernel image is available for execution on the device"。
+        # 老卡（30/40 系）用 cu124 也行，改这个变量即可。
+        TORCH_INDEX_URL: ${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}
     # 跟 CPU 版分开存，两个镜像可以并存，来回切不用重建
     image: imu-train-label-service:gpu
     environment:

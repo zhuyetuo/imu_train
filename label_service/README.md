@@ -153,6 +153,8 @@ sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
 
 GPU 版镜像是单独的 tag（`:gpu`，装带 CUDA 的 torch），跟 CPU 版并存，来回切不用重建。
 
+torch 的 CUDA 版本默认钉在 **cu128**：RTX 50 系（Blackwell，sm_120）必须用 CUDA 12.8 以上编译的轮子，装低了会报 `no kernel image is available for execution on the device`。30/40 系用 cu128 也没问题；想省体积可以 `TORCH_CUDA_INDEX_URL=https://download.pytorch.org/whl/cu124`。
+
 整个仓库以读写方式挂进容器的 `/app`：
 
 - 改 `label_service/*.py` 只要 `up.sh -d` 重启，不用重建镜像
