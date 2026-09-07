@@ -89,7 +89,7 @@ async def health():
 class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
-    mode: Literal["raw", "stable"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（状态平滑+事件合并过滤，见 postprocess.py）")
+    mode: Literal["raw", "stable", "viterbi"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码），见 postprocess.py")
 
 
 class Segment(BaseModel):
@@ -98,6 +98,7 @@ class Segment(BaseModel):
     conf_max: float
     conf_mean: float
     n_windows: int
+    spec: float | None = None   # 陀螺仪 4–8 Hz 能量占比（稳定版才有）
 
 
 class WindowOut(BaseModel):
@@ -105,6 +106,7 @@ class WindowOut(BaseModel):
     label: str
     conf: float
     probs: dict[str, float]
+    spec: float | None = None
 
 
 class InferResponse(BaseModel):
@@ -132,10 +134,15 @@ def _stable_params() -> postprocess.StableParams:
         event_labels=tuple(config.STABLE_EVENT_LABELS),
         smooth_windows=config.STABLE_SMOOTH_WINDOWS,
         min_state_s=config.STABLE_MIN_STATE_S,
+        event_enter=config.STABLE_EVENT_ENTER,
+        event_stay=config.STABLE_EVENT_STAY,
         event_gap_s=config.STABLE_EVENT_GAP_S,
+        shake_absorb_s=config.STABLE_SHAKE_ABSORB_S,
         event_min_windows=config.STABLE_EVENT_MIN_WINDOWS,
         event_min_mean=config.STABLE_EVENT_MIN_MEAN,
         event_single_conf=config.STABLE_EVENT_SINGLE_CONF,
+        spectral_min=config.STABLE_SPECTRAL_MIN,
+        viterbi_switch=config.STABLE_VITERBI_SWITCH,
     )
 
 
@@ -147,11 +154,11 @@ async def _infer_in_pool(full_path: str, mode: str = "raw") -> dict:
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
-    if mode == "stable":
+    if mode in ("stable", "viterbi"):
         # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
         result["segments"] = postprocess.stabilize(
             result["windows"], _bundle["classes"], config.TARGET_LABELS,
-            _bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"], _stable_params(),
+            _bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"], _stable_params(), algo=mode,
         )
     result["mode"] = mode
     counts = {k: len(v) for k, v in result["segments"].items() if v}
@@ -180,7 +187,7 @@ class InferBatchItem(BaseModel):
 
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
-    mode: Literal["raw", "stable"] = "raw"
+    mode: Literal["raw", "stable", "viterbi"] = "raw"
 
 
 class InferBatchResult(BaseModel):
