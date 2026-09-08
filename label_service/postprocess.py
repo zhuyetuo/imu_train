@@ -67,7 +67,9 @@ class StableParams:
     cand_stay: float = 0.25        # 低门槛滞回：维持
     cand_min_windows: int = 2
     cand_min_mean: float = 0.3     # 整段的平均概率也要够，挡掉"就一个窗口冒了一下"
-    cand_spec_min: float = 0.45    # 频谱占比 ≥ 这个且连续 ≥ cand_min_windows 个窗口，模型没判抓挠也列为候选
+    # 只靠频谱把一段拎成候选：默认 0 = 关掉（见 scratch_candidates 里的说明，
+    # 实测这批设备的本底就偏高，抽出来几乎全是模型置信 0% 的噪声）
+    cand_spec_min: float = 0.0
     # 每个文件最多给这么多条（在 app.py 里按置信度从高到低裁，并记日志说明丢了多少）
     cand_max: int = 40
     # 边界微调：在片段起止各 ±refine_margin_s 内按陀螺仪能量找真正的起止
@@ -241,16 +243,23 @@ def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]
         b = [i for i in b if not taken[i]]
         if len(b) >= p.cand_min_windows:
             cands.append((b, "low_conf"))
-    covered = {i for b, _ in cands for i in b}
-    run: list[int] = []
-    for i in range(n + 1):
-        ok = i < n and not taken[i] and i not in covered and spec[i] is not None and spec[i] >= p.cand_spec_min
-        if ok:
-            run.append(i)
-        else:
-            if len(run) >= p.cand_min_windows:
-                cands.append((list(run), "spectral"))
-            run = []
+    # 频谱这一路默认关掉（cand_spec_min <= 0）。当初的设想是"模型之外的独立证据"，
+    # 但实测下来对这批设备完全不具备区分度：抽出来的几百条里绝大多数模型置信度是
+    # 0%、频谱占比却有 0.5~0.68——这只狗的陀螺仪本底在 4–8 Hz 就偏高，阈值定在哪
+    # 都是一片噪声。spec 值仍然照常算、照常在界面上显示，可以用来辅助判断某一条
+    # 候选像不像；只是不再单独凭它把一段拎出来。哪天换了设备想试，把
+    # CAND_SPEC_MIN 设成 >0 即可。
+    if p.cand_spec_min > 0:
+        covered = {i for b, _ in cands for i in b}
+        run: list[int] = []
+        for i in range(n + 1):
+            ok = i < n and not taken[i] and i not in covered and spec[i] is not None and spec[i] >= p.cand_spec_min
+            if ok:
+                run.append(i)
+            else:
+                if len(run) >= p.cand_min_windows:
+                    cands.append((list(run), "spectral"))
+                run = []
 
     out = []
     for b, reason in cands:

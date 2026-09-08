@@ -68,7 +68,10 @@ CAND_ENTER               = float(_env("CAND_ENTER", "0.3"))
 CAND_STAY                = float(_env("CAND_STAY", "0.25"))  # 低于背景噪声上沿会把边界拖长、稀释置信度
 CAND_MIN_WINDOWS         = int(_env("CAND_MIN_WINDOWS", "2"))
 CAND_MIN_MEAN            = float(_env("CAND_MIN_MEAN", "0.3"))   # 整段平均概率下限
-CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0.45"))
+# 只靠频谱拎候选：默认 0 = 关掉。实测这批设备本底在 4–8 Hz 就偏高，抽出来的几百条
+# 里绝大多数模型置信度是 0%、频谱却有 0.5~0.68，阈值定在哪都是噪声。spec 照常算、
+# 照常显示，只是不再单独作为候选来源；换设备想试再设成 >0
+CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0"))
 CAND_MAX                 = int(_env("CAND_MAX", "40"))           # 每个文件最多给几条
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
