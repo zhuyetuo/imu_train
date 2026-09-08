@@ -112,7 +112,7 @@ PM 规则全部从 `pm_skin_scoring/code/questionnaire_app.py` 逐字抽到 `lab
 
 ## 疑似抓挠候选、边界微调、训练闭环
 
-- 稳定版/v2 的响应多一个 `candidates`：低门槛（`CAND_ENTER/CAND_STAY`）滞回抽出来、或频谱占比 ≥ `CAND_SPEC_MIN` 但模型没判抓挠的段，不进正式片段，给人工审核找漏检。
+- 稳定版/v2 的响应多一个 `candidates`：低门槛（`CAND_ENTER/CAND_STAY`）滞回抽出来、或频谱占比 ≥ `CAND_SPEC_MIN` 但模型没判抓挠的段，不进正式片段，给人工审核找漏检。门槛（`CAND_*`）的目标是"一小时能看完的清单"而不是"列出所有可能"：0.2 那种松门槛一小时能抽三百多条、几乎全是 20~30% 的噪声，真正值得看的反而被淹掉。现在默认 0.3 进入、0.25 维持（低于背景噪声上沿会把边界拖长、稀释整段置信度）、整段平均 ≥0.3、频谱那一路 ≥0.45，每个文件最多 40 条按置信度从高到低留，裁掉多少会写进日志。列表按置信度倒序——排最前的那几条往往是被平滑抹掉的真抓挠，最值得先看。
 - `REFINE_ENABLED=1`（默认）时，抓挠/甩身体片段和候选的起止用陀螺仪能量包络（10 Hz）在 ±`REFINE_MARGIN_S` 内精确到 0.1 秒。
 - `/train` 的 `dataset.export_json`：label_infra 从审核通过的任务导出的 Label Studio 格式 JSON（NAS 相对路径），服务整理成 `data/raw_custom/<date>/merged_tmp.json` 并把 CSV 软链进 `data/raw_wit/`；`source_hz`/`hz`/`clean` 直接透传给 `train_custom.sh`。
 - `POST /api/v1/label/model/switch {model_path}`：运行时切换推理模型（重建进程池），重启后回到 `LABEL_MODEL`。

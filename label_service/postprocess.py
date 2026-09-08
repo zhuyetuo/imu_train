@@ -56,10 +56,20 @@ class StableParams:
     spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
     # 疑似抓挠候选（给人工审核找漏检用，不进正式片段）
-    cand_enter: float = 0.2        # 低门槛滞回：进入
-    cand_stay: float = 0.15        # 低门槛滞回：维持
+    #
+    # 门槛定得太松会失去意义：0.2 进入时，一小时能抽出三百多条，绝大多数是
+    # 20%~30% 的噪声，人根本审不过来，真正值得看的那几条反而被淹掉。这里的
+    # 目标不是"把所有可能都列出来"，而是"给人一份一小时能看完的清单"。
+    cand_enter: float = 0.3        # 低门槛滞回：进入（比正式的 0.5 低，但不能太低）
+    # 维持门槛不能比背景噪声低太多：背景在 0.05~0.28 晃时，stay=0.2 会让一段真抓挠
+    # 顺着噪声一路延伸出去，边界拖长、整段平均被稀释（实测 0.57 掉到 0.42），
+    # 反而在按置信度排序时沉下去。0.25 刚好卡在噪声上沿之上
+    cand_stay: float = 0.25        # 低门槛滞回：维持
     cand_min_windows: int = 2
-    cand_spec_min: float = 0.35    # 频谱占比 ≥ 这个且连续 ≥ cand_min_windows 个窗口，模型没判抓挠也列为候选
+    cand_min_mean: float = 0.3     # 整段的平均概率也要够，挡掉"就一个窗口冒了一下"
+    cand_spec_min: float = 0.45    # 频谱占比 ≥ 这个且连续 ≥ cand_min_windows 个窗口，模型没判抓挠也列为候选
+    # 每个文件最多给这么多条（在 app.py 里按置信度从高到低裁，并记日志说明丢了多少）
+    cand_max: int = 40
     # 边界微调：在片段起止各 ±refine_margin_s 内按陀螺仪能量找真正的起止
     refine_margin_s: float = 1.0
     refine_ratio: float = 0.3      # 能量高于片段内中位数 × 这个比例才算"在动"
@@ -246,6 +256,10 @@ def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]
     for b, reason in cands:
         i0, i1 = b[0], b[-1]
         vals = [pv[i] for i in range(i0, i1 + 1)]
+        mean_c = sum(vals) / len(vals)
+        # 低置信那一路要求整段平均够高；频谱那一路本来就是靠物理证据进来的，不看概率
+        if reason == "low_conf" and mean_c < p.cand_min_mean:
+            continue
         sv = [spec[i] for i in range(i0, i1 + 1) if spec[i] is not None]
         out.append({
             "start_ts": _fmt_ts(zones[i0][0]),
@@ -256,7 +270,10 @@ def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]
             "spec": round(sum(sv) / len(sv), 3) if sv else None,
             "reason": reason,
         })
-    out.sort(key=lambda c: c["start_ts"])
+    # 置信度高的排前面：那些多半是被平滑抹掉的真抓挠，最值得先看。
+    # 数量上限不在这里砍——裁剪和"丢了多少条"的日志一起放在调用方（app.py），
+    # 免得这里静悄悄少给几条、外面还不知道
+    out.sort(key=lambda c: c["conf_mean"], reverse=True)
     return out
 
 
