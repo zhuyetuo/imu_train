@@ -207,6 +207,67 @@ def _merge_gaps(bouts: list[list[int]], zones, gap_s: float) -> list[list[int]]:
     return merged
 
 
+# ── 掉数据（MISSING）────────────────────────────────────────────────────
+#
+# 采集端蓝牙断了会把六个轴全写 0 来占帧对齐的位置（也可能写 MISSING → NaN）。
+# 真实佩戴时六轴不可能同时精确为 0——重力总落在某个轴上——所以"六轴全 0"就是
+# 这一段根本没有数据。这种窗口喂给模型只会得到一个凭空的类别（实测多半判成
+# 睡觉），既不能算进有效佩戴，也绝不能进训练集。
+#
+# 处理办法是"挖洞"而不是"丢行"：CSV 里的行照留（不然工作台上看视频会跳帧、
+# 波形和时间轴对不上），只是把这些时间段从预测结果里抠掉。
+def missing_spans(windows: list[dict], window_s: float, stride_s: float, label_mode: str,
+                  min_ratio: float = 0.5) -> list[tuple]:
+    """窗口里缺数据比例 ≥ min_ratio 的，合并成一组不相交的 (start, end) 时间区间。"""
+    ts = [_parse_ts(w.get("ts")) for w in windows]
+    if not ts or any(t is None for t in ts):
+        return []
+    zones = _zones(ts, window_s, stride_s, label_mode)  # type: ignore[arg-type]
+    out: list[list] = []
+    for w, (a, b) in zip(windows, zones):
+        m = w.get("missing")
+        if m is None or m < min_ratio:
+            continue
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def drop_missing(segments: list[dict], holes: list[tuple]) -> list[dict]:
+    """把片段里跟 holes 重叠的部分抠掉；一段被从中间挖开就拆成两段。"""
+    if not holes:
+        return segments
+    out: list[dict] = []
+    for seg in segments:
+        a, b = _parse_ts(seg.get("start_ts")), _parse_ts(seg.get("end_ts"))
+        if a is None or b is None:
+            out.append(seg)
+            continue
+        pieces = [(a, b)]
+        for h0, h1 in holes:
+            nxt = []
+            for x, y in pieces:
+                if h1 <= x or h0 >= y:
+                    nxt.append((x, y))
+                    continue
+                if h0 > x:
+                    nxt.append((x, h0))
+                if h1 < y:
+                    nxt.append((h1, y))
+            pieces = nxt
+        for x, y in pieces:
+            # 挖剩不足一个窗口的碎片没有意义，丢掉
+            if (y - x).total_seconds() < 1.0:
+                continue
+            piece = dict(seg)
+            piece["start_ts"] = _fmt_ts(x)
+            piece["end_ts"] = _fmt_ts(y)
+            out.append(piece)
+    return out
+
+
 def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]],
                        window_s: float, stride_s: float, label_mode: str,
                        params: StableParams | None = None) -> list[dict]:

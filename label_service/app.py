@@ -121,6 +121,10 @@ class InferResponse(BaseModel):
     mode: str = "raw"
     # 疑似抓挠候选（稳定版/v2 才有）：不进正式片段，给人工审核找漏检
     candidates: list[Candidate] = []
+    # 掉数据的时间段（六轴全 0 / MISSING）：这段没有真实数据，已经从 segments 和
+    # candidates 里抠掉了，调用方拿它去扣有效佩戴时长、以及排除出训练集
+    missing: list[dict] = []
+    missing_seconds: float = 0.0
     model_path: str
     classes: list[str]
     n_windows: int
@@ -174,7 +178,18 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         raise
     envelope = result.pop("envelope", None)
     result["candidates"] = []
-    if mode in ("stable", "viterbi"):
+    # 掉数据的时间段（六轴全 0 / MISSING）。这些窗口模型照样会给一个类别，但那
+    # 是凭空来的：既不该算进有效佩戴，也不该进训练集，更不能变成一段"睡觉"。
+    # 三个版本都挖——调试版是拿来看模型说了什么的，同样不该被这种段污染。
+    geom_all = (_bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"])
+    holes = postprocess.missing_spans(result["windows"], *geom_all, config.MISSING_MIN_RATIO)
+    result["missing"] = [
+        {"start_ts": postprocess._fmt_ts(a), "end_ts": postprocess._fmt_ts(b),
+         "seconds": round((b - a).total_seconds(), 1)}
+        for a, b in holes
+    ]
+    result["missing_seconds"] = round(sum(m["seconds"] for m in result["missing"]), 1)
+    if mode in ("stable", "viterbi"):  # noqa: SIM102 - 下面分支多，别合并
         # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
         params = _stable_params()
         geom = (_bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"])
@@ -193,11 +208,14 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
             for lab in config.STABLE_EVENT_LABELS:
                 postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)
             postprocess.refine_boundaries(result["candidates"], envelope, params)
+    if holes:
+        result["segments"] = {k: postprocess.drop_missing(v, holes) for k, v in result["segments"].items()}
+        result["candidates"] = postprocess.drop_missing(result["candidates"], holes)
     result["mode"] = mode
     counts = {k: len(v) for k, v in result["segments"].items() if v}
-    log.info("推理完成[%s] %s  %.1fs  windows=%d  segments=%s  candidates=%d", mode,
+    log.info("推理完成[%s] %s  %.1fs  windows=%d  segments=%s  candidates=%d  掉数据=%.0fs", mode,
              os.path.relpath(full_path, config.NAS_ROOT), time.time() - t0, result["n_windows"], counts,
-             len(result["candidates"]))
+             len(result["candidates"]), result["missing_seconds"])
     return result
 
 

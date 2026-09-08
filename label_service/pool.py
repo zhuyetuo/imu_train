@@ -97,7 +97,7 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
     envelope = None
     try:
         from infer_csv_scratch import load_csv
-        _acc, gyro, ts, _mask, _null = load_csv(full_path)
+        acc, gyro, ts, valid_mask, _null = load_csv(full_path)
         if gyro is None or ts is None or len(gyro) == 0:
             return None
         hz = config.DEVICE_HZ
@@ -120,9 +120,23 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
 
         # 所有窗口一次性堆成矩阵做批量 FFT——逐窗口在 Python 里循环几千次
         # rfft，光解释器开销就比 FFT 本身还贵
+        # 掉数据的样本点。采集端（witmotion_imu）在那一帧对不上 IMU 时六个轴都写
+        # 空串，load_csv 记在 valid_mask 里（False = 这行没数据），并且已经
+        # ffill/bfill 过——所以不能拿返回的数值去判断，填完之后看着完全正常，
+        # 模型看到的是一段"冻住不动"的值，很容易判成睡觉。必须用 valid_mask。
+        # 再兜一层"六轴全 0"：真实佩戴时六轴不可能同时精确为 0（重力总落在某个
+        # 轴上），别的产出源真写 0 占位也能认出来。
+        try:
+            bad = ~np.asarray(valid_mask, dtype=bool)
+            both = np.concatenate([np.asarray(acc, dtype=np.float32), np.asarray(gyro, dtype=np.float32)], axis=1)
+            bad = bad | (np.abs(both) < 1e-9).all(axis=1)
+        except Exception:  # noqa: BLE001 判不出来就不判，别让整次推理失败
+            bad = None
+
         starts, idx_of = [], []
         for k, w in enumerate(windows):
             w["spec"] = None
+            w["missing"] = None
             t = w.get("ts")
             if not t:
                 continue
@@ -131,6 +145,10 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             except ValueError:
                 continue
             i0 = int(np.searchsorted(ts_vals, t0))
+            # 缺数据比例先算——末尾不足半个窗口的会在下面被跳过，但它照样要算
+            if bad is not None:
+                seg = bad[i0 : i0 + n_samp]
+                w["missing"] = round(float(seg.mean()), 3) if len(seg) else None
             if len(mag) - i0 < n_samp // 2:
                 continue
             starts.append(i0)
@@ -149,6 +167,7 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
     except Exception:  # noqa: BLE001 频谱只是附加信息，算不出来不影响推理
         for w in windows:
             w.setdefault("spec", None)
+            w.setdefault("missing", None)
     return envelope
 
 

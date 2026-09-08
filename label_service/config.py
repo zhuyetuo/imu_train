@@ -73,6 +73,9 @@ CAND_MIN_MEAN            = float(_env("CAND_MIN_MEAN", "0.3"))   # 整段平均�
 # 照常显示，只是不再单独作为候选来源；换设备想试再设成 >0
 CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0"))
 CAND_MAX                 = int(_env("CAND_MAX", "40"))           # 每个文件最多给几条
+# 一个窗口里"六轴全 0 / MISSING"的样本点占比超过这个数，就当这段没有数据：
+# 预测结果里抠掉、不算有效佩戴、不进训练集。半个窗口都是空的就已经没法判了
+MISSING_MIN_RATIO        = float(_env("MISSING_MIN_RATIO", "0.5"))
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
 REFINE_ENABLED           = _env("REFINE_ENABLED", "1") == "1"
