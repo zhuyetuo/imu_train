@@ -154,7 +154,9 @@ def _stable_params() -> postprocess.StableParams:
         cand_enter=config.CAND_ENTER,
         cand_stay=config.CAND_STAY,
         cand_min_windows=config.CAND_MIN_WINDOWS,
+        cand_min_mean=config.CAND_MIN_MEAN,
         cand_spec_min=config.CAND_SPEC_MIN,
+        cand_max=config.CAND_MAX,
         refine_margin_s=config.REFINE_MARGIN_S,
         refine_ratio=config.REFINE_RATIO,
     )
@@ -179,7 +181,14 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         result["segments"] = postprocess.stabilize(
             result["windows"], _bundle["classes"], config.TARGET_LABELS, *geom, params, algo=mode,
         )
-        result["candidates"] = postprocess.scratch_candidates(result["windows"], result["segments"], *geom, params)
+        cands = postprocess.scratch_candidates(result["windows"], result["segments"], *geom, params)
+        # 按置信度从高到低裁到上限。裁掉多少要记下来——一小时几百条人根本审不过来，
+        # 但也不能让人以为"就这么点"，日志里说清楚
+        if len(cands) > config.CAND_MAX:
+            log.info("疑似抓挠候选 %d 条，只保留置信度最高的 %d 条（%s）",
+                     len(cands), config.CAND_MAX, os.path.basename(full_path))
+            cands = cands[: config.CAND_MAX]
+        result["candidates"] = cands
         if config.REFINE_ENABLED:
             for lab in config.STABLE_EVENT_LABELS:
                 postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)

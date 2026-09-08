@@ -62,10 +62,14 @@ STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
 # viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
 STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
 # 疑似抓挠候选（低门槛，给人工找漏检）与边界微调
-CAND_ENTER               = float(_env("CAND_ENTER", "0.2"))
-CAND_STAY                = float(_env("CAND_STAY", "0.15"))
+# 门槛太松会失去意义：0.2 进入时一小时能抽出三百多条、绝大多数是 20~30% 的噪声，
+# 人审不过来，真正值得看的那几条反而被淹掉。目标是"一小时能看完的清单"
+CAND_ENTER               = float(_env("CAND_ENTER", "0.3"))
+CAND_STAY                = float(_env("CAND_STAY", "0.25"))  # 低于背景噪声上沿会把边界拖长、稀释置信度
 CAND_MIN_WINDOWS         = int(_env("CAND_MIN_WINDOWS", "2"))
-CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0.35"))
+CAND_MIN_MEAN            = float(_env("CAND_MIN_MEAN", "0.3"))   # 整段平均概率下限
+CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0.45"))
+CAND_MAX                 = int(_env("CAND_MAX", "40"))           # 每个文件最多给几条
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
 REFINE_ENABLED           = _env("REFINE_ENABLED", "1") == "1"
