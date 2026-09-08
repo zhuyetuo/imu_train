@@ -112,10 +112,37 @@ def c_score(baseline_count, baseline_duration_min, today_count, today_duration_m
     return {
         "total": total, "tier": tier,
         "components": {
-            "delta": {"score": delta_score, "max": 30, "by": delta_by, "ratio": delta_ratio, "red_flag": delta_red, "counted": bool(has_baseline)},
-            "cluster": {"score": cluster_score, "max": 20, "red_flag": cluster_red},
-            "persistence": {"score": pers_score, "max": 20, "red_flag": pers_red},
-            "interruption": {"score": int_score, "max": 30, "red_flag": int_red},
+            "delta": {
+                "score": delta_score, "max": 30, "by": delta_by, "ratio": delta_ratio,
+                "red_flag": delta_red, "counted": bool(has_baseline),
+                "note": (
+                    "还没有个人基线，这一项不计分" if not has_baseline else
+                    f"今天{tc}次/{td:.1f}分，基线{bc}次/{bd:.1f}分；"
+                    f"按{delta_by}判，比基线{delta_ratio:.2f}倍"
+                ),
+            },
+            "cluster": {
+                "score": cluster_score, "max": 20, "red_flag": cluster_red,
+                # 光写"聚集时段 0 个"看不出为什么是这个分，把命中的那一档也写出来
+                "note": f"聚集时段{cl}个（≥3 记20分并红旗，1~2 记10分，0 记0分）",
+            },
+            "persistence": {
+                "score": pers_score, "max": 20, "red_flag": pers_red,
+                "note": f"连续{pdays}天（≥3 记20分并红旗，2天10分，1天5分，0天0分）",
+            },
+            "interruption": {
+                "score": int_score, "max": 30, "red_flag": int_red,
+                # 这一项最容易看不懂：ZD=0 也可能得10分，因为普通抓挠次数超过5次
+                "note": (
+                    f"普通抓挠 ZN={zn_}次，打断睡眠 ZD={zd_}次，长时间抓挠{'是' if long_scratch else '否'}；"
+                    + (
+                        "ZD≥3 或有长时间抓挠 → 30分红旗" if int_red else
+                        "ZD 是 1~2 次 → 20分" if zd_ >= 1 else
+                        "ZD=0 但 ZN>5 → 10分" if zn_ > 5 else
+                        "ZD=0 且 ZN≤5 → 0分"
+                    )
+                ),
+            },
         },
         "red_flags": reasons,
         "has_baseline": bool(has_baseline),
