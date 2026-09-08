@@ -202,6 +202,15 @@ def extract_features(X: np.ndarray, hz: int, show_progress: bool = True, workers
         n_feat = _feature_dim(window_size, n_ch, hz)
         return np.empty((0, n_feat), dtype=np.float32)
 
+    # 向量化实现：把窗口维度整个交给 numpy/scipy 算，输出跟下面的逐窗口循环
+    # 完全一致（tests/test_features_vec.py 逐元素比对，含常数、平台、阶梯这些
+    # 边界情况），实测一小时数据 24s → 0.2s。默认走它；万一哪天发现对不上，
+    # 设 IMU_FEATURES_VECTORIZED=0 立刻退回老实现，不用改代码回滚。
+    if os.environ.get("IMU_FEATURES_VECTORIZED", "1") != "0":
+        from features_vec import extract_features_vec
+
+        return extract_features_vec(X, hz)
+
     if workers and workers != 1 and len(X) > 10:
         from joblib import Parallel, delayed
         n_chunks = workers if workers > 0 else (os.cpu_count() or 1)
