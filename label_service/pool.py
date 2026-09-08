@@ -87,7 +87,8 @@ def _init_worker(model_path: str) -> None:
     _memoize_load_csv()
 
 
-def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float) -> dict | None:
+def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float,
+                               device_hz: float | None = None) -> dict | None:
     """
     给每个窗口算陀螺仪 4–8 Hz 能量占 1–15 Hz 的比例，写进 window["spec"]。抓挠是
     后腿高频往复，这个频段有明显峰；模型之外的独立证据，稳定版可按它过滤误报
@@ -100,12 +101,14 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
         acc, gyro, ts, valid_mask, _null = load_csv(full_path)
         if gyro is None or ts is None or len(gyro) == 0:
             return None
-        hz = config.DEVICE_HZ
+        # 采样率按这个文件实际的来：8-11 之前的数据是采集端就降到 16Hz 存的，
+        # 8-11 起才是 50Hz 原始流。用全局默认值去算 16Hz 的文件，频段和窗口长度全错
+        hz = float(device_hz or config.DEVICE_HZ)
         n_samp = int(window_s * hz)
         ts_vals = ts.values.astype("datetime64[ns]")
         mag = np.linalg.norm(gyro, axis=1).astype(np.float32)
         # 能量包络：去均值后的幅值平方按 0.1s 分箱求均值
-        step = max(1, hz // 10)
+        step = max(1, int(hz) // 10)
         dm = mag - float(np.nanmean(mag))
         sq = np.nan_to_num(dm * dm)
         n_bins = len(sq) // step
@@ -171,7 +174,7 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
     return envelope
 
 
-def _infer_one(full_path: str) -> dict:
+def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     from infer_csv_scratch import infer_file  # worker 进程里 src/ 已在 sys.path
     b = _bundle
     model_hz = b["hz"]
@@ -180,7 +183,7 @@ def _infer_one(full_path: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="label_infer_") as tmp:
         infer_file(
             full_path, b["model"], b["classes"], window_size, stride,
-            config.DEVICE_HZ, model_hz, b["gravity_aligned"],
+            float(device_hz or config.DEVICE_HZ), model_hz, b["gravity_aligned"],
             quiet=True, scratch_only=True, label_mode=b["label_mode"], output_dir=tmp,
             resample_method=config.RESAMPLE_METHOD,
             target_labels=config.TARGET_LABELS, is_dl=b["is_dl"],
@@ -196,7 +199,7 @@ def _infer_one(full_path: str) -> dict:
                 data = json.load(f)
             segments[label] = data["scratch_segments"]
             windows, n_windows = data["windows"], data["n_windows"]  # 各类别文件里这两项相同
-    envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"]) if windows else None
+    envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"], device_hz) if windows else None
     return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope}
 
 

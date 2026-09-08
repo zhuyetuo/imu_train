@@ -92,6 +92,7 @@ class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
     mode: Literal["raw", "stable", "viterbi"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码），见 postprocess.py")
+    device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
 
 
 class Segment(BaseModel):
@@ -166,13 +167,14 @@ def _stable_params() -> postprocess.StableParams:
     )
 
 
-async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infer_queue.PRIORITY_BATCH) -> dict:
+async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infer_queue.PRIORITY_BATCH,
+                         device_hz: float | None = None) -> dict:
     loop = asyncio.get_running_loop()
     t0 = time.time()
     try:
         # 批量的要抢槽位排队，交互式的直接进（见 queue.py）
         async with infer_queue.slot(priority):
-            result = await loop.run_in_executor(_pool, pool._infer_one, full_path)
+            result = await loop.run_in_executor(_pool, pool._infer_one, full_path, device_hz)
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
@@ -223,7 +225,7 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
 async def infer(req: InferRequest):
     full_path = _resolve_nas_path(req.path)
     try:
-        result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE)
+        result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE, req.device_hz)
     except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
         raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
@@ -235,6 +237,7 @@ async def infer(req: InferRequest):
 class InferBatchItem(BaseModel):
     path: str
     sample_id: int | None = None
+    device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
 
 
 class InferBatchRequest(BaseModel):
@@ -265,7 +268,7 @@ async def infer_batch(req: InferBatchRequest):
     async def _one(item: InferBatchItem) -> InferBatchResult:
         try:
             full_path = _resolve_nas_path(item.path)
-            result = await _infer_in_pool(full_path, req.mode)
+            result = await _infer_in_pool(full_path, req.mode, device_hz=item.device_hz)
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=True, result=InferResponse(
                 sample_id=item.sample_id, path=item.path, model_path=_bundle["model_path"],
                 classes=_bundle["classes"], **result))
