@@ -265,3 +265,7 @@ pm_skin_scoring/data/*
 
 # train_custom.sh的训练日志目录（项目本地tmp/，不是系统/tmp）
 tmp/
+
+# vision_service：SAM 权重和日志不进仓库
+vision_service/weights/
+vision_service/logs/

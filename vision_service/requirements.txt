@@ -1,0 +1,9 @@
+# vision_service 的依赖。故意跟 label_service 分开装：那边是纯 CPU 的 IMU 推理，
+# 不该被 torch/SAM 这套 GPU 依赖拖着走。
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2
+numpy>=1.24
+opencv-python-headless>=4.8
+# SAM 2.1（Apache-2.0）。装法见 README：pip install git+https://github.com/facebookresearch/sam2.git
+# torch 按机器上的 CUDA 版本单独装，不在这里钉版本——钉错了会把人家现成的环境搞坏
