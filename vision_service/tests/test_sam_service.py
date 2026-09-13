@@ -118,3 +118,51 @@ def test_模型不可用时是_503_不是_500(material):
 def test_点的坐标必须是归一化的(material):
     r = client.post("/api/v1/sam/segment", json={"path": "口腔验证/a.jpg", "points": [{"x": 640, "y": 480}]})
     assert r.status_code == 422, "像素坐标应该被 schema 拦下来——两边对不齐迟早错一次"
+
+
+# ── 加载失败要能自己恢复 ────────────────────────────────────────────────
+#
+# 审查查出来的：_load_error 一旦缓存就是永久的。最常见的失败是"权重还没下完"，
+# 下好之后还要重启进程才能用——运维不会想到这一点，只会觉得服务坏了。
+
+def test_权重出现之后不用重启也能重试(tmp_path, monkeypatch):
+    """最常见的失败是"权重还没下完"。下好之后不该还要重启进程——
+    运维不会想到这一点，只会觉得服务坏了。
+
+    这台机器上没装 torch，所以加载注定失败；这里验的是**它有没有再试一次**，
+    而不是试的结果（结果要有卡有包才看得到）。"""
+    ckpt = tmp_path / "还没下.pt"
+    monkeypatch.setattr(config, "SAM_CHECKPOINT", str(ckpt))
+    sam._model = None
+    sam._load_error = None
+    sam._last_try = 0.0
+
+    calls = []
+    orig = sam._load_locked
+    monkeypatch.setattr(sam, "_load_locked", lambda: (calls.append(1), orig())[1])
+
+    sam.status()
+    assert len(calls) == 1
+    sam.status()
+    assert len(calls) == 1, "权重还没出现，不该反复重试"
+
+    ckpt.write_bytes(b"fake")            # 权重到位
+    sam.status()
+    assert len(calls) == 2, "权重到位了还在念缓存的错误，只能重启进程才能恢复"
+
+
+def test_退避期内不会每次请求都重试加载(tmp_path, monkeypatch):
+    """反过来也不能每次请求都去试——加载失败有时要几秒，
+    每个请求都试一遍会把服务拖死。"""
+    monkeypatch.setattr(config, "SAM_CHECKPOINT", str(tmp_path / "没有.pt"))
+    sam._model = None
+    sam._load_error = None
+    sam._last_try = 0.0
+
+    calls = []
+    orig = sam._load_locked
+    monkeypatch.setattr(sam, "_load_locked", lambda: (calls.append(1), orig())[1])
+
+    for _ in range(3):
+        sam.status()
+    assert len(calls) == 1, f"退避没生效，试了 {len(calls)} 次"

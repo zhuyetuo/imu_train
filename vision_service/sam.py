@@ -14,6 +14,7 @@ SAM 3 走 Meta 自定的许可，衍生分发要沿用同一许可。而 SAM 3 �
 
 import os
 import threading
+import time
 
 import numpy as np
 
@@ -21,15 +22,32 @@ from . import config
 
 _model = None
 _load_error: str | None = None
-# 单卡上并发跑 SAM 只会买到显存峰值翻倍和碎片化，本来就串行，索性排队
-_lock = threading.Lock()
+# 单卡上并发跑 SAM 只会买到显存峰值翻倍和碎片化，本来就串行，索性排队。
+# 加载也走这把锁：不然两个并发的首请求会各自加载一份模型，显存直接翻倍。
+_lock = threading.RLock()
+# 上次尝试加载的时间。失败原因不能永久缓存——最常见的失败是"权重还没下完"，
+# 下好之后不该还要重启进程才能用。
+_last_try = 0.0
+_RETRY_AFTER_S = 60.0
 
 
-def _load():
+def _load(force: bool = False):
     """真正加载模型。装不上/没权重都不抛到调用方，记下原因让 /status 去说。"""
-    global _model, _load_error
-    if _model is not None or _load_error is not None:
+    global _model, _load_error, _last_try
+    if _model is not None:
         return
+    if _load_error is not None and not force and (time.monotonic() - _last_try) < _RETRY_AFTER_S:
+        return
+    with _lock:
+        if _model is not None:
+            return
+        _last_try = time.monotonic()
+        _load_error = None
+        _load_locked()
+
+
+def _load_locked():
+    global _model, _load_error
     try:
         import torch
         from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -52,7 +70,9 @@ def _load():
 
 
 def status() -> dict:
-    _load()
+    # 权重文件出现了就立刻重试一次，不等退避——运维刚把权重拷进去，
+    # 下一件事一定是刷这个接口看好没好
+    _load(force=os.path.isfile(config.SAM_CHECKPOINT) and _model is None)
     return {
         "available": _model is not None,
         "checkpoint": config.SAM_CHECKPOINT,
