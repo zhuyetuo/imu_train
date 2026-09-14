@@ -78,3 +78,57 @@ python -m pytest vision_service/tests -q
 
 不需要 GPU、不需要 sam2、不需要权重。测的是掩膜换算、路径沙箱、以及**没有 SAM 时的
 降级行为**——后者恰恰是新机器上最常遇到的状态。SAM 本身测不了，这里也没假装测。
+
+## 画面里有没有狗（第一步）
+
+不训练任何模型，用 COCO 预训练权重里现成的 `dog` 类。要回答的只有一个问题：
+**这段视频里到底有没有狗**。整段没狗的片段，平台上直接标出来，人不用点进去
+看波形才发现这半小时狗根本不在画面里。
+
+```bash
+pip install ultralytics
+./vision_service/run.sh -d
+curl -s localhost:8385/api/v1/dog/status      # available / loaded_weights
+```
+
+扫一段：
+
+```bash
+curl -s localhost:8385/api/v1/dog/scan -H 'Content-Type: application/json' \
+  -d '{"path":"data_raw/2026_9_4/xxx_cam1_imu1_raw.mp4","every_sec":10}' \
+  | python -m json.tool | head -20
+```
+
+`verdict` 三档：`no_dog`（整段没看见狗）/ `mostly_empty`（八成时间空镜）/
+`has_dog`。**第四档是 `unknown`——一帧都没采到**，那是「没看成」不是「确认没狗」，
+两者后果相反，不能混。
+
+### 验一下 nano 够不够
+
+默认权重是 `yolo26n.pt`（最小那档）。这是个**赌**：赌新架构的小模型已经够用。
+
+按道理这一步该选大模型——它要的是**召回**不是速度（漏一只狗 = 人跳过一整段
+真有素材的视频；多报一只 = 人点进去看一眼），而且按时间采样、一小时才 720 帧，
+最大的模型也就几十秒跑完，速度几乎不花钱。
+
+所以这个赌要拿真实素材验。同一批片段用两个型号各扫一遍，比 `verdict`：
+
+```bash
+for w in yolo26n.pt yolo26m.pt; do        # 第二个换成这个版本有的更大一档
+  DOG_WEIGHTS=$w ./vision_service/run.sh down >/dev/null
+  DOG_WEIGHTS=$w ./vision_service/run.sh -d >/dev/null
+  echo "== $w"
+  for f in <挑十来段真实的相对路径>; do
+    curl -s localhost:8385/api/v1/dog/scan -H 'Content-Type: application/json' \
+      -d "{\"path\":\"$f\",\"every_sec\":10}" \
+      | python -c 'import sys,json;d=json.load(sys.stdin);print(d["verdict"], d["no_dog_ratio"], d["max_dogs"])'
+  done
+done
+```
+
+只要出现 **「n 说 no_dog、大的说 has_dog」** 的片段，就是赌输了——把
+`DOG_WEIGHTS` 换成大一档。反过来（大的说没狗、n 说有狗）不要紧，那是误报，
+人点进去看一眼就排掉了。
+
+挑片段的时候要**专门挑难的**：夜里红外的、笼子栏杆挡着的、狗蜷成一团睡觉的、
+白毛比熊贴浅色背景的。全挑白天大场面的话，两个型号都会全对，等于没验。

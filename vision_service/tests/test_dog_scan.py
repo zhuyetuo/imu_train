@@ -234,3 +234,45 @@ def test_模型没加载时不静默返回空(monkeypatch):
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
     with pytest.raises(RuntimeError, match="ultralytics"):
         dog.scan_video("x.mp4")
+
+
+# ── 权重选哪个 ──────────────────────────────────────────────────────────
+
+def test_默认权重是可配的且没写死在代码里():
+    """型号是会换的（yolov8n → yolo11x → yolo26n 都发生在同一天），
+    所以代码里不该出现型号字符串，只该出现"读配置"。"""
+    import io as _io
+    from vision_service import config
+    assert config.DOG_WEIGHTS, "总得有个默认值，不然装完不配就用不了"
+    # 只找**型号**（yolo 后面跟数字），不找 `from ultralytics import YOLO`——
+    # 那是类名，不是型号
+    import re as _re
+    src = _io.open("vision_service/dog.py", encoding="utf-8").read()
+    hits = _re.findall(r"yolo\s*\d+\w*", src, _re.I)
+    assert not hits, f"型号不该写死在 dog.py 里（{hits}），只该读 config.DOG_WEIGHTS"
+
+
+def test_换权重只要改环境变量(monkeypatch):
+    """代码里不该写死型号——有更新的模型时，换法应该是一个环境变量。"""
+    import importlib
+    from vision_service import config as c
+    monkeypatch.setenv("DOG_WEIGHTS", "yolo12x.pt")
+    importlib.reload(c)
+    assert c.DOG_WEIGHTS == "yolo12x.pt"
+    monkeypatch.delenv("DOG_WEIGHTS")
+    importlib.reload(c)
+
+
+def test_下不动权重时错误里要说怎么办(monkeypatch):
+    """最常见的失败是这台机器下不了权重（离线/防火墙）。这时候人需要知道的是
+    "换成哪个、怎么换"，不是一句"加载失败"。"""
+    import sys, types
+    fake = types.ModuleType("ultralytics")
+    fake.YOLO = lambda *a, **kw: (_ for _ in ()).throw(OSError("connection refused"))
+    monkeypatch.setitem(sys.modules, "ultralytics", fake)
+    monkeypatch.setattr(dog, "_model", None)
+    monkeypatch.setattr(dog, "_load_error", None)
+    monkeypatch.setattr(dog, "_last_try", 0.0)
+    dog._load(force=True)
+    assert dog._load_error and "DOG_WEIGHTS" in dog._load_error, dog._load_error
+    assert "weights/" in dog._load_error, "要告诉人权重手动放哪儿"
