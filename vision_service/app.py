@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, sam
+from . import config, dog, sam
 
 _logger = logging.getLogger("vision_service")
 
@@ -56,22 +56,35 @@ def _warmup_on_startup():
             _logger.info("SAM 预热完成，耗时 %.1fs，之后每刀都是热的", r.get("warm_seconds") or 0.0)
         else:
             _logger.warning("SAM 预热没成：%s（不影响启动，退回第一次调用时加载）", r.get("error"))
+        # 狗检测单独预热一次。串行不并行：两个模型同时往一张卡上搬，显存峰值叠加，
+        # 8G 的卡上很容易就 OOM——而预热 OOM 会让两个都用不了，比慢几秒糟得多
+        d = dog.warmup()
+        if d.get("warm"):
+            _logger.info("画面狗检测预热完成")
+        else:
+            _logger.warning("画面狗检测预热没成：%s（不影响启动和 SAM）", d.get("error"))
 
-    threading.Thread(target=run, name="sam-warmup", daemon=True).start()
+    threading.Thread(target=run, name="vision-warmup", daemon=True).start()
 
 
-def _resolve(rel_path: str) -> str:
-    """相对素材库的路径 → 绝对路径，realpath 必须仍在素材库之内。
+def _resolve_under(root_dir: str, rel_path: str) -> str:
+    """相对某个根的路径 → 绝对路径，realpath 必须仍在那个根之内。
 
     跟 label_service/tooth.py 一个思路：只认相对路径，`..` 穿越在这里被挡住。
+    照片和视频是两棵不同的树（素材库 vs 采集 NAS），所以根要能传进来——
+    但**只能是配置里那两个**，不接受调用方随便给一个根，不然沙箱就没了。
     """
-    root = os.path.realpath(config.MATERIAL_ROOT)
+    root = os.path.realpath(root_dir)
     full = os.path.realpath(os.path.join(root, rel_path))
     if full != root and not full.startswith(root + os.sep):
         raise HTTPException(422, "非法路径")
     if not os.path.isfile(full):
         raise HTTPException(422, f"文件不存在: {rel_path}")
     return full
+
+
+def _resolve(rel_path: str) -> str:
+    return _resolve_under(config.MATERIAL_ROOT, rel_path)
 
 
 class Point(BaseModel):
@@ -109,6 +122,38 @@ def sam_segment(body: SegmentIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"分割失败: {type(e).__name__}: {e}") from e
+
+
+class DogScanIn(BaseModel):
+    path: str = Field(..., description="相对 VIDEO_ROOT 的视频路径")
+    every_sec: float = Field(5.0, ge=0.2, le=60.0, description="多少秒看一眼")
+    conf: float = Field(0.35, ge=0.05, le=0.95)
+
+
+@app.get("/api/v1/dog/status")
+def dog_status():
+    return dog.status()
+
+
+@app.post("/api/v1/dog/scan")
+def dog_scan(body: DogScanIn):
+    """这段视频里有没有狗、有几只。
+
+    一小时的视频按 5 秒采样是 720 个点，跑完几十秒——所以调用方要当成后台任务，
+    别挂在一个用户点击上等。
+    """
+    full = _resolve_under(config.VIDEO_ROOT, body.path)
+    st = dog.status()
+    if not st["available"]:
+        # 503 而不是 500：平台据此当成"还没扫"，不是"扫出来没狗"。这两个的
+        # 后果完全相反——后者会让人直接跳过一整段真有狗的素材
+        raise HTTPException(503, st["error"] or "画面狗检测不可用")
+    try:
+        return dog.scan_video(full, every_sec=body.every_sec, conf=body.conf)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"扫描失败: {type(e).__name__}: {e}") from e
 
 
 def main():
