@@ -276,3 +276,62 @@ def test_下不动权重时错误里要说怎么办(monkeypatch):
     dog._load(force=True)
     assert dog._load_error and "DOG_WEIGHTS" in dog._load_error, dog._load_error
     assert "weights/" in dog._load_error, "要告诉人权重手动放哪儿"
+
+
+# ── dog 是哪个类别号：按名字查，不写死 ──────────────────────────────────
+#
+# 写死 16 的理由曾经是"这属于 COCO 数据集定义，不会变"。这个理由站不住：
+# 16 是不是 dog 取决于**这份权重**的 names 表。换家族、换自训权重、官方调顺序，
+# 16 就是别的东西了——而且不报错，只会让「有没有狗」整个失真。
+
+class _M:
+    def __init__(self, names):
+        self.names = names
+
+
+@pytest.mark.parametrize("names,expect", [
+    ({0: "person", 16: "dog"}, 16),                    # COCO 的常规位置
+    ({0: "cat", 1: "dog"}, 1),                         # 自训的小类别表
+    ({0: "person", 5: "DOG"}, 5),                      # 大小写
+    ({0: "person", 7: " dog "}, 7),                    # 前后空格
+    (["person", "bicycle", "dog"], 2),                 # names 是 list 不是 dict
+])
+def test_按名字从权重里查出类别号(names, expect):
+    assert dog._resolve_dog_class(_M(names)) == expect
+
+
+@pytest.mark.parametrize("names", [{}, None, {0: "cat", 1: "bird"}, {0: "狗"}])
+def test_查不到就退回兜底值并出声(names, caplog):
+    """退回是对的（总比不干活强），但必须让人知道是在猜——
+    不出声的话，一个非 COCO 权重会静默地按 16 过滤出别的类别。"""
+    with caplog.at_level("WARNING"):
+        assert dog._resolve_dog_class(_M(names)) == dog._DOG_FALLBACK_CLASS
+    assert "dog" in caplog.text
+
+
+def test_scan_用的是查出来的类别号不是写死的(fake_cv2, monkeypatch):
+    """真正要守的一条：predict 收到的 classes 得跟查出来的一致。
+    查归查、用归用地脱节的话，前面那些测试全是白测。"""
+    got = {}
+
+    class M:
+        names = {0: "cat", 3: "dog"}
+
+        def predict(self, *a, **kw):
+            got.update(kw)
+            return []
+
+    m = M()
+    monkeypatch.setattr(dog, "_model", m)
+    monkeypatch.setattr(dog, "_dog_class", dog._resolve_dog_class(m))
+    fake_cv2._cap = FakeCap([0])
+    dog.scan_video("x.mp4")
+    assert got["classes"] == [3], got
+
+
+def test_类别号会在_status_里报出来(monkeypatch):
+    """万一退回了兜底值，看 status 就该看得见，而不是等结果不对才去查。"""
+    monkeypatch.setattr(dog, "_model", object())
+    monkeypatch.setattr(dog, "_dog_class", 16)
+    monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    assert dog.status()["dog_class"] == 16
