@@ -269,3 +269,7 @@ tmp/
 # vision_service：SAM 权重和日志不进仓库
 vision_service/weights/
 vision_service/logs/
+
+# vision_service 后台模式的运行时文件
+vision_service/.run.pid
+vision_service/.run.log
