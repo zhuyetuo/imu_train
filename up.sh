@@ -78,6 +78,21 @@ esac
 rc=0
 if want label; then
     line "label_service（端口 8383）"
+    # 不加 -d 会走 `docker compose up -d --build`，重建镜像要几分钟。代码是挂载
+    # 进去的，改了 .py 根本不用重建——只有改了 Dockerfile / requirements-docker.txt
+    # 才需要。默认行为跟 label_service/up.sh 保持一致（那边不加 -d 也是重建），
+    # 但不能默默就开始烧几分钟：先说清楚，留三秒给人 Ctrl-C。
+    if [ "$RESTART_ONLY" = "0" ]; then
+        echo "⚠ 没加 -d：要重建镜像，几分钟起步。"
+        echo "  只是改了 .py 的话不用重建（代码走挂载），用 ./up.sh${PASS[@]+ ${PASS[*]}} -d 秒起。"
+        echo "  3 秒后开始重建，不想重建现在 Ctrl-C。"
+        # 必须显式 trap：脚本是 `set -uo pipefail`（故意不开 -e），Ctrl-C 只会
+        # 打断 sleep，然后若无其事地往下走去重建——等于这句"现在 Ctrl-C"是骗人的。
+        # 实测过：不加这个 trap，等待期间按 Ctrl-C 重建照样启动。
+        trap 'echo; echo "已取消，没有重建。要只重启用: ./up.sh -d"; exit 130' INT
+        sleep 3
+        trap - INT
+    fi
     bash label_service/up.sh ${PASS[@]+"${PASS[@]}"} || rc=1
 fi
 
