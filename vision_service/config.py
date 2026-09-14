@@ -8,7 +8,7 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   SAM_DEVICE          cuda / cpu（默认 cuda，没有卡会自动退回 cpu）
   VISION_WARMUP       启动时预热模型（默认 1；设 0 退回懒加载，第一刀要多等十几秒）
   VIDEO_ROOT          采集视频的 NAS 挂载点（默认 /home/toky/ai_data），扫描路径相对它
-  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 vision_service/weights/yolov8n.pt）
+  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 yolo11x.pt；换更新的模型改这个就行）
   VISION_LOG_DIR      日志目录（默认 vision_service/logs）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
@@ -40,5 +40,20 @@ WARMUP         = _env("VISION_WARMUP", "1") not in ("0", "false", "False", "")
 # 跟 smart-label 的 nas_root 指同一个目录。
 VIDEO_ROOT     = _env("VIDEO_ROOT", "/home/toky/ai_data")
 # COCO 预训练权重，不训练、不微调——只要现成的 dog 类。ultralytics 找不到会自己下。
-DOG_WEIGHTS    = _env("DOG_WEIGHTS", os.path.join(HERE, "weights", "yolov8n.pt"))
+#
+# 为什么用最大的那档（x）而不是 n：
+#
+# 这一步是**按时间采样**的，不是逐帧——一小时视频按 5 秒采 720 帧。最大的模型
+# 一帧 30ms 也就 20 秒跑完一小时素材，速度在这个场景里几乎不花钱。
+#
+# 而错的代价是不对称的：漏掉一只狗 → 这段被标成「没狗」→ 人直接跳过一整段真有
+# 素材的视频；多报一只 → 人点进去看一眼发现是空的。所以这里要的是**召回**。
+# 拿 nano 换速度，等于用最贵的那种错误去换一个不值钱的收益。
+#
+# 而且我们的画面正是小模型容易翻的那几种：夜里红外、笼子栏杆挡着、狗蜷成一团、
+# 白毛比熊贴着浅色背景。
+#
+# 换更新的模型只要改这个环境变量，代码一行不用动——ultralytics 按文件名解析，
+# 本地没有就自己下。哪天有了更好的，`DOG_WEIGHTS=yolo12x.pt` 这样直接换。
+DOG_WEIGHTS    = _env("DOG_WEIGHTS", "yolo11x.pt")
 LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))

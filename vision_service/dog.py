@@ -68,14 +68,24 @@ def _load(force: bool = False):
         try:
             _model = YOLO(config.DOG_WEIGHTS)
         except Exception as e:  # noqa: BLE001 权重不存在/下载失败/torch 版本不对，全都要能报出来
-            _load_error = f"加载失败：{type(e).__name__}: {e}"
+            # 把换法一起写进错误里：最常见的失败是这台机器下不了权重（离线/防火墙），
+            # 而这种时候人需要知道的是"换成哪个、怎么换"，不是一句"加载失败"
+            _load_error = (
+                f"加载失败：{type(e).__name__}: {e}"
+                f"（权重 {config.DOG_WEIGHTS}。下不动的话把 .pt 手动放到 vision_service/weights/ "
+                f"并设 DOG_WEIGHTS 指过去，或者换小一档 DOG_WEIGHTS=yolo11m.pt）"
+            )
 
 
 def status() -> dict:
     _load()
     return {
         "available": _model is not None,
+        # 把**实际加载的**那个也报出来：DOG_WEIGHTS 改了但服务没重启的话，
+        # 只看配置值会以为换成功了
         "weights": config.DOG_WEIGHTS,
+        "loaded_weights": getattr(getattr(_model, "ckpt_path", None), "__str__", lambda: None)()
+        if _model is not None else None,
         "device": config.SAM_DEVICE,
         "error": _load_error,
         "warm": _warm,
