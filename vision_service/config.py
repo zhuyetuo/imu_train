@@ -6,6 +6,7 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   SAM_CHECKPOINT      SAM 2.1 权重（默认 vision_service/weights/sam2.1_hiera_base_plus.pt，不在仓库里）
   SAM_MODEL_CFG       SAM 2.1 的 config 名（默认 configs/sam2.1/sam2.1_hiera_b+.yaml，由 sam2 包提供）
   SAM_DEVICE          cuda / cpu（默认 cuda，没有卡会自动退回 cpu）
+  VISION_WARMUP       启动时预热模型（默认 1；设 0 退回懒加载，第一刀要多等十几秒）
   VISION_LOG_DIR      日志目录（默认 vision_service/logs）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
@@ -28,4 +29,7 @@ PORT           = int(_env("VISION_SERVICE_PORT", "8385"))
 SAM_CHECKPOINT = _env("SAM_CHECKPOINT", os.path.join(HERE, "weights", "sam2.1_hiera_base_plus.pt"))
 SAM_MODEL_CFG  = _env("SAM_MODEL_CFG", "configs/sam2.1/sam2.1_hiera_b+.yaml")
 SAM_DEVICE     = _env("SAM_DEVICE", "cuda")
+# 启动时预热（加载权重 + 空跑一次推理）。设 0 退回原来的懒加载：
+# 第一次调用才加载，那一刀要多等十几秒。
+WARMUP         = _env("VISION_WARMUP", "1") not in ("0", "false", "False", "")
 LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))
