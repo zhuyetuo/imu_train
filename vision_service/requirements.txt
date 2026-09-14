@@ -10,3 +10,7 @@ numpy>=1.24
 opencv-python-headless>=4.8
 # SAM 2.1（Apache-2.0）。装法见 README：pip install git+https://github.com/facebookresearch/sam2.git
 # torch 按机器上的 CUDA 版本单独装，不在这里钉版本——钉错了会把人家现成的环境搞坏
+# 画面狗检测（第一步：这段视频里有没有狗）。只用 COCO 预训练的 dog 类，
+# 不训练不微调。ultralytics 是 AGPL-3.0——内部自用不分发，不受影响；
+# 哪天要把权重或服务对外分发，这一项要先换掉（RT-DETRv2 / D-FINE 是 Apache-2.0）。
+ultralytics>=8.0
