@@ -238,11 +238,18 @@ def test_模型没加载时不静默返回空(monkeypatch):
 
 # ── 权重选哪个 ──────────────────────────────────────────────────────────
 
-def test_默认不是_nano():
-    """这一步要的是召回不是速度：按时间采样，一小时才 720 帧，最大的模型也就
-    几十秒跑完。而漏一只狗 = 人跳过一整段真有素材的视频。"""
+def test_默认权重是可配的且没写死在代码里():
+    """型号是会换的（yolov8n → yolo11x → yolo26n 都发生在同一天），
+    所以代码里不该出现型号字符串，只该出现"读配置"。"""
+    import io as _io
     from vision_service import config
-    assert "n.pt" not in config.DOG_WEIGHTS, f"{config.DOG_WEIGHTS} 是最小那档，召回不够"
+    assert config.DOG_WEIGHTS, "总得有个默认值，不然装完不配就用不了"
+    # 只找**型号**（yolo 后面跟数字），不找 `from ultralytics import YOLO`——
+    # 那是类名，不是型号
+    import re as _re
+    src = _io.open("vision_service/dog.py", encoding="utf-8").read()
+    hits = _re.findall(r"yolo\s*\d+\w*", src, _re.I)
+    assert not hits, f"型号不该写死在 dog.py 里（{hits}），只该读 config.DOG_WEIGHTS"
 
 
 def test_换权重只要改环境变量(monkeypatch):

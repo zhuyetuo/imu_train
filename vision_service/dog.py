@@ -72,8 +72,9 @@ def _load(force: bool = False):
             # 而这种时候人需要知道的是"换成哪个、怎么换"，不是一句"加载失败"
             _load_error = (
                 f"加载失败：{type(e).__name__}: {e}"
-                f"（权重 {config.DOG_WEIGHTS}。下不动的话把 .pt 手动放到 vision_service/weights/ "
-                f"并设 DOG_WEIGHTS 指过去，或者换小一档 DOG_WEIGHTS=yolo11m.pt）"
+                f"（权重 {config.DOG_WEIGHTS}。这个名字 ultralytics 解析不出来、或者这台机器"
+                f"下不动的话：把 .pt 手动放到 vision_service/weights/ 并设 DOG_WEIGHTS 指过去，"
+                f"或者换一个这个版本的 ultralytics 认得的型号）"
             )
 
 
