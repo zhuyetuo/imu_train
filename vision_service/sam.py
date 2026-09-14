@@ -29,6 +29,10 @@ _lock = threading.RLock()
 # 下好之后不该还要重启进程才能用。
 _last_try = 0.0
 _RETRY_AFTER_S = 60.0
+# 预热过没有：加载完 + 空跑过一次推理。跟 available 分开报——
+# available 说的是"模型在不在"，warm 说的是"第一刀还要不要等十几秒"
+_warm = False
+_warm_seconds: float | None = None
 
 
 def _load(force: bool = False):
@@ -78,7 +82,46 @@ def status() -> dict:
         "checkpoint": config.SAM_CHECKPOINT,
         "device": config.SAM_DEVICE,
         "error": _load_error,
+        # 平台据此区分「模型坏了」和「还在预热」：前者置灰按钮并显示原因，
+        # 后者显示「模型加载中」。以前只有 available，这两种情况长得一模一样
+        "warm": _warm,
+        "warm_seconds": _warm_seconds,
     }
+
+
+def warmup() -> dict:
+    """加载权重 + 空跑一次推理，把首次调用的开销挪到启动时。
+
+    首刀慢是两笔钱叠在一起，光 _load() 只付掉第一笔：
+      1. build_sam2 + 权重搬上显存——几秒
+      2. **第一次前向**：CUDA context、kernel 编译、cudnn autotune——同样几秒
+    所以这里必须真跑一次 predict，不能只加载完就算数。
+
+    空跑用随机噪声而不是全零图：全零的话某些算子会走到退化分支，预热不到
+    真实路径，第一刀照样慢。
+
+    不抛异常：预热失败就是没预热，服务照常起，退回懒加载那条路。
+    """
+    global _warm, _warm_seconds
+    t0 = time.monotonic()
+    _load(force=True)
+    if _model is None:
+        return {"warm": False, "error": _load_error}
+    try:
+        rng = np.random.default_rng(0)
+        img = rng.integers(0, 256, size=(1024, 1024, 3), dtype=np.uint8)
+        with _lock:
+            _model.set_image(np.asarray(img))
+            _model.predict(
+                point_coords=np.array([[512.0, 512.0]], dtype=np.float32),
+                point_labels=np.array([1], dtype=np.int32),
+                multimask_output=True,
+            )
+    except Exception as e:  # noqa: BLE001 预热失败不该把服务带倒
+        return {"warm": False, "error": f"预热推理失败：{type(e).__name__}: {e}"}
+    _warm = True
+    _warm_seconds = round(time.monotonic() - t0, 1)
+    return {"warm": True, "error": None, "warm_seconds": _warm_seconds}
 
 
 def mask_to_shapes(mask: np.ndarray) -> dict | None:

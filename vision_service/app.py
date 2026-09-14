@@ -10,14 +10,54 @@ vision_service：给标注平台用的 GPU 视觉服务。目前只有 SAM 2.1 �
 路径安全：请求里只传相对 MATERIAL_ROOT 的路径，realpath 之后必须仍在它之内。
 """
 
+import contextlib
+import logging
 import os
+import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from . import config, sam
 
-app = FastAPI(title="vision_service", version="0.1.0")
+_logger = logging.getLogger("vision_service")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _warmup_on_startup()
+    yield
+
+
+app = FastAPI(title="vision_service", version="0.1.0", lifespan=_lifespan)
+
+
+def _warmup_on_startup():
+    """启动就把模型加载好、空跑一次，别让第一个标注员替所有人等。
+
+    首刀慢是两笔钱叠在一起：权重搬上显存几秒，**第一次前向**（CUDA context、
+    kernel 编译、cudnn autotune）又是几秒。懒加载的话这十几秒结结实实落在
+    第一次点「SAM 辅助」的人头上，而且界面上只是个转圈，看不出在干什么，
+    多半会被当成卡死了再点几下。
+
+    放后台线程，不阻塞启动：
+      - 端口立刻就能连上，/status 立刻能答「还在预热」而不是超时；
+      - 预热要是卡住了（比如权重在 NAS 上、网又慢），服务不会跟着起不来。
+    线程里走的是 sam 模块那把 RLock，预热没完时进来的请求会排在它后面，
+    不会加载出第二份模型。
+    """
+    if not config.WARMUP:
+        _logger.info("VISION_WARMUP=0，跳过预热，第一次调用时才加载模型")
+        return
+
+    def run():
+        r = sam.warmup()
+        if r.get("warm"):
+            _logger.info("SAM 预热完成，耗时 %.1fs，之后每刀都是热的", r.get("warm_seconds") or 0.0)
+        else:
+            _logger.warning("SAM 预热没成：%s（不影响启动，退回第一次调用时加载）", r.get("error"))
+
+    threading.Thread(target=run, name="sam-warmup", daemon=True).start()
 
 
 def _resolve(rel_path: str) -> str:
