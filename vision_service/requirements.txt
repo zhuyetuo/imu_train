@@ -13,4 +13,6 @@ opencv-python-headless>=4.8
 # 画面狗检测（第一步：这段视频里有没有狗）。只用 COCO 预训练的 dog 类，
 # 不训练不微调。ultralytics 是 AGPL-3.0——内部自用不分发，不受影响；
 # 哪天要把权重或服务对外分发，这一项要先换掉（RT-DETRv2 / D-FINE 是 Apache-2.0）。
-ultralytics>=8.0
+# YOLO26 是 2026 年的那一代（ultralytics 仓库上确认过），太旧的 ultralytics
+# 解析不出 yolo26n.pt 这个名字——报错里会提示 pip install -U ultralytics。
+ultralytics>=8.3

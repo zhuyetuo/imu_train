@@ -29,16 +29,44 @@
 扫描接口返回 503，平台那边把这一项当"还没扫"处理，其它功能一概不受影响。
 """
 
+import logging
 import os
 import threading
 import time
 
 from . import config
 
-# COCO 里 dog 的类别号。写死是有意的：ultralytics 的 names 表里 16 就是 dog，
-# 这个映射属于 COCO 数据集定义，不会变。按名字找反而脆——不同权重的 names
-# 可能是英文也可能被人改过。
-COCO_DOG_CLASS = 16
+_logger = logging.getLogger("vision_service.dog")
+
+# COCO 里 dog 的类别号。**按名字从模型自己的 names 表里查**，查不到才退回 16。
+#
+# 一开始是写死 16 的，理由是"这属于 COCO 数据集定义，不会变"。这个理由站不住：
+# 16 是不是 dog 取决于**这份权重**的 names 表，不取决于 COCO 规范——换个家族、
+# 换个自训权重、或者哪天官方调了顺序，16 就是别的东西了。而这种错不会报任何
+# 错，只会让「有没有狗」整个失真：画面里明明有狗被判成没狗，人跳过一整段素材。
+#
+# 查 names 就没这个问题：权重里写的是什么就是什么。查不到 dog 这个名字时退回
+# 16 并记一条日志——总比直接不干活强，但要让人知道是在猜。
+_DOG_FALLBACK_CLASS = 16
+_dog_class: int | None = None
+
+
+def _resolve_dog_class(model) -> int:
+    """从权重自己的 names 表里找 dog 的类别号。"""
+    names = getattr(model, "names", None) or {}
+    try:
+        items = names.items() if hasattr(names, "items") else enumerate(names)
+        for k, v in items:
+            if str(v).strip().lower() == "dog":
+                return int(k)
+    except Exception:  # noqa: BLE001 names 的形状各版本不一样，查不动就退回
+        pass
+    _logger.warning(
+        "这份权重（%s）的 names 表里找不到 dog，退回用类别号 %d。"
+        "如果它不是 COCO 80 类的模型，检测结果会是错的类别。",
+        config.DOG_WEIGHTS, _DOG_FALLBACK_CLASS,
+    )
+    return _DOG_FALLBACK_CLASS
 
 _model = None
 _load_error: str | None = None
@@ -67,14 +95,15 @@ def _load(force: bool = False):
             return
         try:
             _model = YOLO(config.DOG_WEIGHTS)
+            globals()["_dog_class"] = _resolve_dog_class(_model)
         except Exception as e:  # noqa: BLE001 权重不存在/下载失败/torch 版本不对，全都要能报出来
             # 把换法一起写进错误里：最常见的失败是这台机器下不了权重（离线/防火墙），
             # 而这种时候人需要知道的是"换成哪个、怎么换"，不是一句"加载失败"
             _load_error = (
                 f"加载失败：{type(e).__name__}: {e}"
-                f"（权重 {config.DOG_WEIGHTS}。这个名字 ultralytics 解析不出来、或者这台机器"
-                f"下不动的话：把 .pt 手动放到 vision_service/weights/ 并设 DOG_WEIGHTS 指过去，"
-                f"或者换一个这个版本的 ultralytics 认得的型号）"
+                f"（权重 {config.DOG_WEIGHTS}。名字解析不出来多半是 ultralytics 太旧——"
+                f"先试 pip install -U ultralytics；这台机器下不动权重的话，把 .pt 手动放到 "
+                f"vision_service/weights/ 并设 DOG_WEIGHTS 指过去）"
             )
 
 
@@ -90,6 +119,8 @@ def status() -> dict:
         "device": config.SAM_DEVICE,
         "error": _load_error,
         "warm": _warm,
+        # 报出来：万一退回了兜底值，人看 status 就该看得见，而不是等结果不对才查
+        "dog_class": _dog_class,
     }
 
 
@@ -151,7 +182,8 @@ def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames
                 continue
             next_t = ms / 1000.0 + every_sec
             with _lock:
-                res = _model.predict(frame, verbose=False, conf=conf, classes=[COCO_DOG_CLASS],
+                res = _model.predict(frame, verbose=False, conf=conf,
+                                     classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
                                      device=config.SAM_DEVICE)
             h, w = frame.shape[:2]
             boxes = []
