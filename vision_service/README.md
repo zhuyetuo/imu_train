@@ -86,10 +86,14 @@ python -m pytest vision_service/tests -q
 看波形才发现这半小时狗根本不在画面里。
 
 ```bash
-pip install ultralytics
-./vision_service/run.sh -d
-curl -s localhost:8385/api/v1/dog/status      # available / loaded_weights
+./vision_service/run.sh -d                    # 缺的依赖它自己会装
+curl -s localhost:8385/api/v1/dog/status      # available / loaded_weights / dog_class
 ```
+
+起之前会检查依赖，缺了就按 requirements.txt 装上。**torch 和 sam2 不自动装**——
+它们的版本取决于机器上的 CUDA，装错会把现成环境搞坏（GPU 版被覆盖成 CPU 版，
+SAM 会悄悄退回 CPU 跑、慢十几倍还不报错）。缺了会提示怎么装。
+不想让它自己装：加 `--no-install`，或者设 `VISION_NO_INSTALL=1`。
 
 扫一段：
 
