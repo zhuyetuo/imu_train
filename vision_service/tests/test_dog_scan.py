@@ -335,3 +335,64 @@ def test_类别号会在_status_里报出来(monkeypatch):
     monkeypatch.setattr(dog, "_dog_class", 16)
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
     assert dog.status()["dog_class"] == 16
+
+
+# ── CUDA 到底用上没有 ───────────────────────────────────────────────────
+#
+# 原来 /status 里的 device 报的是**配置值**（config.SAM_DEVICE），不是实际用的。
+# 而 SAM 加载时有一句"cuda 不可用就退回 cpu"——于是配置写着 cuda、实际跑在
+# CPU 上、status 还理直气壮地报 cuda。慢十几倍，一点提示都没有。
+
+def test_没装torch时说清楚是没装(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "torch", None)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is None and "没装 torch" in r["why"]
+
+
+def _fake_torch(monkeypatch, cuda_build, available, name="NVIDIA GeForce RTX 4090"):
+    import sys, types
+    t = types.ModuleType("torch")
+    t.__version__ = "2.5.1"
+    t.version = types.SimpleNamespace(cuda=cuda_build)
+    t.cuda = types.SimpleNamespace(
+        is_available=lambda: available,
+        get_device_name=lambda i: name,
+    )
+    monkeypatch.setitem(sys.modules, "torch", t)
+    return t
+
+
+def test_装成cpu版torch是最常见的原因(monkeypatch):
+    """torch.version.cuda 是 None = CPU 版轮子。这是最常见的、而且从版本号上
+    看不出来的原因（2.5.1 和 2.5.1+cpu 有时都显示成 2.5.1）。"""
+    _fake_torch(monkeypatch, cuda_build=None, available=False)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is False
+    assert "CPU 版" in r["why"] and "download.pytorch.org" in r["why"]
+
+
+def test_有cuda版但用不了_指向驱动和容器(monkeypatch):
+    """torch 是 GPU 版但 is_available() False——驱动对不上、或者容器没给 --gpus。
+    跟上一条的处理办法完全不同，不能笼统说一句"CUDA 不可用"。"""
+    _fake_torch(monkeypatch, cuda_build="12.1", available=False)
+    r = dog.cuda_report()
+    assert "驱动" in r["why"] and "--gpus" in r["why"]
+    assert "CPU 版" not in r["why"]
+
+
+def test_能用的时候报出是哪块卡(monkeypatch):
+    _fake_torch(monkeypatch, cuda_build="12.1", available=True)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is True and r["why"] is None
+    assert "4090" in r["gpu"] and r["cuda_build"] == "12.1"
+
+
+def test_status_报的是实际设备不是配置值(monkeypatch):
+    """这条就是那个 bug：配置 cuda、实际 cpu，status 不能还报 cuda。"""
+    monkeypatch.setattr(dog, "_model", object())
+    monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    monkeypatch.setattr(dog, "_device_used", "cpu")
+    assert dog.status()["device"] == "cpu"
+    monkeypatch.setattr(dog, "_device_used", None)
+    assert dog.status()["device"] == "cuda", "读不到实际设备时才退回配置值"

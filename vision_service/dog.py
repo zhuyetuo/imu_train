@@ -75,6 +75,8 @@ _lock = threading.RLock()
 _last_try = 0.0
 _RETRY_AFTER_S = 60.0
 _warm = False
+#: 实际跑在哪个设备上（从模型里读，不是配置值）
+_device_used: str | None = None
 
 
 def _load(force: bool = False):
@@ -96,6 +98,10 @@ def _load(force: bool = False):
         try:
             _model = YOLO(config.DOG_WEIGHTS)
             globals()["_dog_class"] = _resolve_dog_class(_model)
+            try:
+                globals()["_device_used"] = str(next(_model.model.parameters()).device)
+            except Exception:  # noqa: BLE001 拿不到就留空，不猜
+                pass
         except Exception as e:  # noqa: BLE001 权重不存在/下载失败/torch 版本不对，全都要能报出来
             # 把换法一起写进错误里：最常见的失败是这台机器下不了权重（离线/防火墙），
             # 而这种时候人需要知道的是"换成哪个、怎么换"，不是一句"加载失败"
@@ -116,7 +122,9 @@ def status() -> dict:
         "weights": config.DOG_WEIGHTS,
         "loaded_weights": getattr(getattr(_model, "ckpt_path", None), "__str__", lambda: None)()
         if _model is not None else None,
-        "device": config.SAM_DEVICE,
+        # 实际设备从模型身上读，读不到才退回配置值——配置值只代表"想要哪个"
+        "device": _device_used or config.SAM_DEVICE,
+        "cuda": cuda_report(),
         "error": _load_error,
         "warm": _warm,
         # 报出来：万一退回了兜底值，人看 status 就该看得见，而不是等结果不对才查
@@ -226,3 +234,45 @@ def summarize(frames: list[dict]) -> dict:
         verdict = "has_dog"
     return {"sampled": n, "frames_with_dog": with_dog,
             "no_dog_ratio": round(ratio, 3), "max_dogs": max_dogs, "verdict": verdict}
+
+
+def cuda_report() -> dict:
+    """CUDA 到底能不能用、为什么不能。
+
+    这一块单独抽出来，是因为原来 /status 里的 `device` 报的是**配置值**
+    （config.SAM_DEVICE），不是实际用的那个。而 SAM 加载时有一句
+    "cuda 不可用就退回 cpu"——于是配置写着 cuda、实际跑在 CPU 上、
+    status 还理直气壮地报 cuda。慢十几倍，一点提示都没有。
+
+    状态接口宁可多报几个字段，也不能报一个"看起来对"的值。
+    """
+    out = {"wanted": config.SAM_DEVICE, "cuda_available": None,
+           "torch": None, "cuda_build": None, "gpu": None, "why": None}
+    try:
+        import torch
+    except ImportError as e:
+        out["why"] = f"没装 torch：{e}"
+        return out
+    out["torch"] = torch.__version__
+    # torch.version.cuda 是 None = 装的是 CPU 版的轮子。这是最常见的原因，
+    # 而且从版本号上看不出来（2.x.y 和 2.x.y+cpu 有时都显示成 2.x.y）
+    out["cuda_build"] = getattr(getattr(torch, "version", None), "cuda", None)
+    try:
+        out["cuda_available"] = bool(torch.cuda.is_available())
+    except Exception as e:  # noqa: BLE001
+        out["why"] = f"torch.cuda.is_available() 出错：{type(e).__name__}: {e}"
+        return out
+    if out["cuda_available"]:
+        try:
+            out["gpu"] = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+    if not out["cuda_build"]:
+        out["why"] = ("装的是 CPU 版 torch（torch.version.cuda 是 None）。"
+                      "按机器上的 CUDA 版本重装 GPU 版："
+                      "pip install torch --index-url https://download.pytorch.org/whl/cu121 之类")
+    else:
+        out["why"] = (f"torch 是带 CUDA {out['cuda_build']} 的版本，但 torch.cuda.is_available() 是 False——"
+                      "多半是驱动版本对不上、或者进程看不到 GPU（容器没给 --gpus）")
+    return out
