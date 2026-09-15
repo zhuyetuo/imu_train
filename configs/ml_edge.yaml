@@ -1,0 +1,87 @@
+# 端侧尺寸的 ML 配置。**这是新增文件，configs/ml.yaml 一个字都没动。**
+#
+# 用法（不走 train_custom.sh，因为它不转发 --config）：
+#   python src/ml/train.py --hz 16 --model xgb \
+#     --config configs/ml_edge.yaml \
+#     --processed_dir data/processed_<DATE>_missing_drop_window \
+#     --remap configs/remap_custom_3class.yaml \
+#     --results_dir results_edge
+#
+# 跟 configs/ml.yaml 的区别只有一个目的：**让模型能塞进 GR5513 的 flash**。
+# 端侧预算大约给模型 128KB，按每个节点约 20 字节算（feature u16 + threshold f32
+# + 左右孩子 i32，叶子再加 3 个类别概率 × f32），128KB ≈ 6500 个节点。
+#
+# 两条硬规律：
+#   1. 深度每加一层，满树的节点数翻倍；
+#   2. **多分类的 GBDT 每一轮给每个类别各训一棵树**——3 分类 50 轮是 150 棵，
+#      不是 50 棵。算预算时容易漏掉这一条，漏了就会差 3 倍。
+#
+# 下面的 xgboost：50 轮 × 3 类 × 深度 6（满树 127 节点，实际通常 30~60）
+#   最坏情况 150 × 127 × 20B ≈ 372KB，实际多半在 100~150KB。
+#   **所以要拿 python/resource_report.py 实测，别信这里的估算。**
+
+random_forest:
+  # RF 留在这里只是为了能跑对照。**不是端侧候选**：
+  # configs/ml.yaml 里是 max_depth: null（不限深），几万条窗口能训出几百万个节点，
+  # 比预算大两个数量级。这里限深 4 + min_samples_leaf 10 才勉强进得去，
+  # 但那时候 RF 的优势（深树低偏差 + bagging 降方差）已经没了——
+  # bagging 只降方差不降偏差，一堆欠拟合的浅树平均起来还是欠拟合。
+  # 同样的节点预算下 GBDT 几乎一定更好，所以这一项只用来量"限深要付多少代价"。
+  #
+  # ⚠ **这里不能写 min_samples_leaf**：src/ml/models/random_forest.py 的 build_rf
+  # 只读 n_estimators / max_depth / n_jobs / random_state 四个键，写了也会被
+  # 静默忽略——那比不写更糟，人会以为自己设过了。min_samples_leaf 这个杠杆
+  # 要么改 imu_train 的代码（本次不动），要么训完之后用
+  # algo_tinyml 的 python/prune_rf.py --min-samples-leaf 事后剪，效果一样。
+  n_estimators: 200
+  max_depth: 4
+  n_jobs: -1
+  random_state: 42
+
+xgboost:
+  # 端侧的主力候选。depth 6 是 GBDT 的常规配置不是妥协——boosting 一轮轮拟合
+  # 残差，偏差靠轮数补，所以它天生就适合浅树。
+  n_estimators: 50
+  max_depth: 6
+  learning_rate: 0.2      # 轮数从 200 降到 50，学习率相应调大，否则欠拟合
+  n_jobs: -1
+  random_state: 42
+
+lightgbm:
+  # num_leaves 直接控制每棵树的叶子数——对端侧来说这比 max_depth 更好使，
+  # 因为它直接就是"这棵树多少个叶子"，不用再去猜树满不满。
+  # 31 个叶子 → 61 个节点；50 轮 × 3 类 × 61 × 20B ≈ 179KB（上界）
+  n_estimators: 50
+  max_depth: 6
+  num_leaves: 31
+  learning_rate: 0.2
+  n_jobs: -1
+  random_state: 42
+
+catboost:
+  iterations: 50
+  depth: 6
+  learning_rate: 0.2
+  random_state: 42
+
+# 下面这些不是端侧候选，原样抄过来只是为了这个配置文件能被完整加载
+extra_trees:
+  n_estimators: 300
+  max_depth: null
+  n_jobs: -1
+  random_state: 42
+
+svm:
+  C: 1.0
+  kernel: rbf
+  probability: true
+
+histgb:
+  n_estimators: 300
+  max_depth: null
+  learning_rate: 0.1
+  random_state: 42
+
+features:
+  time_domain: [mean, std, min, max, range, rms, skewness, kurtosis, zero_crossing_rate]
+  freq_domain: [spectral_mean, spectral_std, dominant_freq, spectral_entropy]
