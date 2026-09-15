@@ -172,12 +172,49 @@ def mask_to_shapes(mask: np.ndarray) -> dict | None:
     }
 
 
-def segment(image_path: str, points: list[dict], box: list[float] | None = None) -> dict:
+def pick_mask(shapes: list[dict], scores: list[float], has_box: bool, prefer: str = "auto") -> int:
+    """三个候选里挑哪一个。
+
+    ── 为什么不能用 argmax(score) ────────────────────────────────────────
+
+    2026-09-15 拿真实牙齿照片实测，四张里三张是错的，而且错得很自信：
+
+        点在嘴下方的毛 → 切出**整个狗头**，score 0.97
+        点在脸颊       → 切出前景一个物件，score 0.96
+        点在嘴角       → 切出整个口鼻部（鼻子+嘴唇+牙一起），score 0.44
+        点正好在牙上   → 一颗牙，score 0.84
+
+    score 是"SAM 有多确信这是**一个物体**"，不是"这是不是你要的那个"。切整个
+    狗头它当然确信——那本来就是个完整、边界清楚的物体。而 argmax(score) 恰好
+    就是在挑"最完整的那个物体"，对切单颗牙来说方向是反的。
+
+    SAM 的三个掩膜大致是 子部件 / 部件 / 整体 三档。标牙齿永远要最细那一档。
+
+    ── 挑法 ──────────────────────────────────────────────────────────────
+
+    auto（默认）：
+      给了框  → 用 argmax(score)。框本身已经把歧义消掉了，这时候 score 是可信的。
+      只给点  → 挑**面积最小**的那个非退化掩膜。点提示的歧义永远是
+                "这颗牙 / 这排牙 / 整个嘴 / 整张脸"，而要的永远是最小那个。
+    score：老行为（argmax）。留着是为了能一键对比，以及万一别的场景要用。
+    """
+    if prefer == "score" or (prefer == "auto" and has_box):
+        return int(max(range(len(scores)), key=lambda i: scores[i]))
+    # 面积为 0 的（mask_to_shapes 返回 None）不参与挑选
+    usable = [i for i, sh in enumerate(shapes) if sh and sh["area_ratio"] > 0]
+    if not usable:
+        return int(max(range(len(scores)), key=lambda i: scores[i]))
+    return min(usable, key=lambda i: shapes[i]["area_ratio"])
+
+
+def segment(image_path: str, points: list[dict], box: list[float] | None = None,
+            prefer: str = "auto") -> dict:
     """按提示分割。
 
     points：[{x, y, label}]，x/y 是**归一化**的 0-1（前端拿到的图是缩放过的，
     传像素坐标就得两边都知道原图尺寸，迟早错一次）；label 1=正点 0=负点。
     box：可选的框提示，同样归一化。
+    prefer：三个候选怎么挑，见 pick_mask。
     """
     _load()
     if _model is None:
@@ -204,11 +241,25 @@ def segment(image_path: str, points: list[dict], box: list[float] | None = None)
             multimask_output=True,  # 一个点是有歧义的（牙面/整颗牙/一排牙），让它出三个再挑
         )
 
-    best = int(np.argmax(scores))
-    shapes = mask_to_shapes(masks[best])
+    # 三个都转出来再挑。原来是先 argmax 再转，于是另外两个候选**根本看不到**——
+    # 而实测发现对的那个经常就在没被选中的里面
+    cand = [mask_to_shapes(m) for m in masks]
+    best = pick_mask(cand, [float(x) for x in scores], has_box=bx is not None, prefer=prefer)
+    shapes = cand[best]
     if shapes is None:
         raise ValueError("没分割出东西来，换个位置再点一下")
-    return {**shapes, "score": float(scores[best]), "width": w, "height": h}
+    return {
+        **shapes,
+        "score": float(scores[best]),
+        "chosen": best,
+        # 把三个候选的大小和分数都带出来：挑得对不对，只有把没被选中的那两个
+        # 也摆出来才判得了。前端也可以据此给个"换一个"的按钮
+        "candidates": [
+            {"area_ratio": (c["area_ratio"] if c else 0.0), "score": float(sc)}
+            for c, sc in zip(cand, scores)
+        ],
+        "width": w, "height": h,
+    }
 
 
 def cuda_report() -> dict:
