@@ -166,3 +166,57 @@ def test_退避期内不会每次请求都重试加载(tmp_path, monkeypatch):
     for _ in range(3):
         sam.status()
     assert len(calls) == 1, f"退避没生效，试了 {len(calls)} 次"
+
+
+# ── 三个候选里挑哪一个 ──────────────────────────────────────────────────
+#
+# 2026-09-15 拿真实牙齿照片实测，argmax(score) 四张错三张，而且错得很自信：
+#   点在嘴下方的毛 → 整个狗头，score 0.97
+#   点在脸颊       → 前景一个物件，score 0.96
+#   点在嘴角       → 整个口鼻部，score 0.44
+#   点正好在牙上   → 一颗牙，score 0.84
+# score 是"有多确信这是一个物体"，不是"这是不是你要的那个"。切整个狗头它当然
+# 确信——那本来就是个完整、边界清楚的物体。
+
+from vision_service.sam import pick_mask
+
+
+def _sh(a):
+    return {"area_ratio": a} if a is not None else None
+
+
+def test_只给点时挑最小的那个():
+    """SAM 的三个掩膜大致是 子部件/部件/整体。标牙齿永远要最细那一档。"""
+    shapes = [_sh(0.8035), _sh(0.0643), _sh(0.0003)]
+    scores = [0.97, 0.44, 0.84]
+    assert pick_mask(shapes, scores, has_box=False) == 2
+
+
+def test_那张切出整个狗头的_按老规则会选错():
+    """把实测那一组原样钉下来：argmax(score) 会选中 0.80（整个狗头）。
+    没有这条的话，以后有人把挑法改回 score 不会有测试变红。"""
+    shapes = [_sh(0.8035), _sh(0.0643), _sh(0.0003)]
+    scores = [0.97, 0.44, 0.84]
+    assert pick_mask(shapes, scores, has_box=False, prefer="score") == 0
+    assert pick_mask(shapes, scores, has_box=False) == 2
+
+
+def test_给了框就用score挑():
+    """框本身已经把歧义消掉了（人已经指明要哪块），这时 score 是可信的；
+    再挑最小的话，会在框里挑出一个小碎片。"""
+    shapes = [_sh(0.05), _sh(0.004), _sh(0.0001)]
+    scores = [0.9, 0.7, 0.3]
+    assert pick_mask(shapes, scores, has_box=True) == 0
+
+
+def test_退化掩膜不参与挑选():
+    """mask_to_shapes 对空掩膜返回 None。不排掉的话会选中一个"面积最小"的空掩膜，
+    然后 segment 抛"没分割出东西来"——而其实有可用的候选。"""
+    shapes = [None, _sh(0.0), _sh(0.004)]
+    scores = [0.99, 0.98, 0.5]
+    assert pick_mask(shapes, scores, has_box=False) == 2
+
+
+def test_全都退化时退回score():
+    """一个能用的都没有——这时挑谁都一样，别抛异常，交给上层去报"没分割出东西"。"""
+    assert pick_mask([None, None, None], [0.1, 0.9, 0.2], has_box=False) == 1

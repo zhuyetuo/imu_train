@@ -97,6 +97,9 @@ class SegmentIn(BaseModel):
     path: str = Field(..., description="相对 MATERIAL_ROOT 的路径，比如 口腔验证/2026-09-01-ok/巴利/a.jpg")
     points: list[Point] = Field(default_factory=list, max_length=32)
     box: list[float] | None = Field(None, min_length=4, max_length=4, description="可选框提示 [x,y,w,h] 归一化")
+    # auto：给了框用 score 挑，只给点挑最小的那个（点提示的歧义永远是
+    # "这颗牙/这排牙/整个嘴"，要的永远是最小那个）。score = 老行为，留着能对比
+    prefer: str = Field("auto", pattern="^(auto|score)$")
 
 
 @app.get("/health")
@@ -117,7 +120,7 @@ def sam_segment(body: SegmentIn):
         # 503 而不是 500：平台据此把按钮置灰并提示原因，而不是弹一个红叉
         raise HTTPException(503, st["error"] or "SAM 模型不可用")
     try:
-        return sam.segment(full, [p.model_dump() for p in body.points], body.box)
+        return sam.segment(full, [p.model_dump() for p in body.points], body.box, prefer=body.prefer)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
