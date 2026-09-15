@@ -335,3 +335,135 @@ def test_类别号会在_status_里报出来(monkeypatch):
     monkeypatch.setattr(dog, "_dog_class", 16)
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
     assert dog.status()["dog_class"] == 16
+
+
+# ── CUDA 到底用上没有 ───────────────────────────────────────────────────
+#
+# 原来 /status 里的 device 报的是**配置值**（config.SAM_DEVICE），不是实际用的。
+# 而 SAM 加载时有一句"cuda 不可用就退回 cpu"——于是配置写着 cuda、实际跑在
+# CPU 上、status 还理直气壮地报 cuda。慢十几倍，一点提示都没有。
+
+def test_没装torch时说清楚是没装(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "torch", None)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is None and "没装 torch" in r["why"]
+
+
+def _fake_torch(monkeypatch, cuda_build, available, name="NVIDIA GeForce RTX 4090"):
+    import sys, types
+    t = types.ModuleType("torch")
+    t.__version__ = "2.5.1"
+    t.version = types.SimpleNamespace(cuda=cuda_build)
+    t.cuda = types.SimpleNamespace(
+        is_available=lambda: available,
+        get_device_name=lambda i: name,
+    )
+    monkeypatch.setitem(sys.modules, "torch", t)
+    return t
+
+
+def test_装成cpu版torch是最常见的原因(monkeypatch):
+    """torch.version.cuda 是 None = CPU 版轮子。这是最常见的、而且从版本号上
+    看不出来的原因（2.5.1 和 2.5.1+cpu 有时都显示成 2.5.1）。"""
+    _fake_torch(monkeypatch, cuda_build=None, available=False)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is False
+    assert "CPU 版" in r["why"] and "download.pytorch.org" in r["why"]
+
+
+def test_有cuda版但用不了_指向驱动和容器(monkeypatch):
+    """torch 是 GPU 版但 is_available() False——驱动对不上、或者容器没给 --gpus。
+    跟上一条的处理办法完全不同，不能笼统说一句"CUDA 不可用"。"""
+    _fake_torch(monkeypatch, cuda_build="12.1", available=False)
+    r = dog.cuda_report()
+    assert "驱动" in r["why"] and "--gpus" in r["why"]
+    assert "CPU 版" not in r["why"]
+
+
+def test_能用的时候报出是哪块卡(monkeypatch):
+    _fake_torch(monkeypatch, cuda_build="12.1", available=True)
+    r = dog.cuda_report()
+    assert r["cuda_available"] is True and r["why"] is None
+    assert "4090" in r["gpu"] and r["cuda_build"] == "12.1"
+
+
+def test_status_报的是实际设备不是配置值(monkeypatch):
+    """这条就是那个 bug：配置 cuda、实际 cpu，status 不能还报 cuda。"""
+    monkeypatch.setattr(dog, "_model", object())
+    monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    monkeypatch.setattr(dog, "_device_used", "cpu")
+    assert dog.status()["device"] == "cpu"
+    monkeypatch.setattr(dog, "_device_used", None)
+    assert dog.status()["device"] == "cuda", "读不到实际设备时才退回配置值"
+
+
+# ── SAM 能用 CUDA 但 YOLO 不行：两边加载方式不一样 ──────────────────────
+#
+# ultralytics 的 YOLO(权重) 加载到 **CPU**，predict(device="cuda") 才逐次搬；
+# SAM 是 build_sam2(..., device=device)，加载时就在卡上。
+# 不统一的话：status 读参数永远是 cpu，而且每采一帧就搬一次几十 MB 权重。
+
+class _FakeYOLO:
+    def __init__(self, *a, **kw):
+        self.names = {16: "dog"}
+        self.moved_to = None
+
+    def to(self, dev):
+        self.moved_to = dev
+        return self
+
+    def predict(self, *a, **kw):
+        return []
+
+
+def _install_fake_yolo(monkeypatch, cuda_ok):
+    import sys, types
+    ul = types.ModuleType("ultralytics")
+    made = {}
+    def YOLO(*a, **kw):
+        made["m"] = _FakeYOLO()
+        return made["m"]
+    ul.YOLO = YOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", ul)
+    _fake_torch(monkeypatch, cuda_build="12.1", available=cuda_ok)
+    monkeypatch.setattr(dog, "_model", None)
+    monkeypatch.setattr(dog, "_load_error", None)
+    monkeypatch.setattr(dog, "_device_used", None)
+    monkeypatch.setattr(dog, "_last_try", 0.0)
+    return made
+
+
+def test_加载时就把模型搬上卡_不靠每次predict搬(monkeypatch):
+    made = _install_fake_yolo(monkeypatch, cuda_ok=True)
+    dog._load(force=True)
+    assert made["m"].moved_to == "cuda", "没在加载时 .to(cuda) 的话，权重每次 predict 都要搬一趟"
+    assert dog._device_used == "cuda"
+    assert dog.status()["device"] == "cuda"
+
+
+def test_cuda用不了就退回cpu而且报出来(monkeypatch):
+    """不判断的话，ultralytics 会在每次 predict 里抛错或自己退回——两种都没人看见。"""
+    _install_fake_yolo(monkeypatch, cuda_ok=False)
+    dog._load(force=True)
+    assert dog._device_used == "cpu"
+    assert dog.status()["device"] == "cpu"
+    assert dog.status()["cuda"]["cuda_available"] is False
+
+
+def test_predict用的是实际设备不是配置值(fake_cv2, monkeypatch):
+    """配置写 cuda、实际退回 cpu 时，还往 predict 里传 cuda 就会当场抛错。"""
+    got = {}
+
+    class M:
+        names = {16: "dog"}
+        def predict(self, *a, **kw):
+            got.update(kw)
+            return []
+
+    monkeypatch.setattr(dog, "_model", M())
+    monkeypatch.setattr(dog, "_dog_class", 16)
+    monkeypatch.setattr(dog, "_device_used", "cpu")
+    fake_cv2._cap = FakeCap([0])
+    dog.scan_video("x.mp4")
+    assert got["device"] == "cpu"
