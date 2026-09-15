@@ -396,3 +396,74 @@ def test_status_报的是实际设备不是配置值(monkeypatch):
     assert dog.status()["device"] == "cpu"
     monkeypatch.setattr(dog, "_device_used", None)
     assert dog.status()["device"] == "cuda", "读不到实际设备时才退回配置值"
+
+
+# ── SAM 能用 CUDA 但 YOLO 不行：两边加载方式不一样 ──────────────────────
+#
+# ultralytics 的 YOLO(权重) 加载到 **CPU**，predict(device="cuda") 才逐次搬；
+# SAM 是 build_sam2(..., device=device)，加载时就在卡上。
+# 不统一的话：status 读参数永远是 cpu，而且每采一帧就搬一次几十 MB 权重。
+
+class _FakeYOLO:
+    def __init__(self, *a, **kw):
+        self.names = {16: "dog"}
+        self.moved_to = None
+
+    def to(self, dev):
+        self.moved_to = dev
+        return self
+
+    def predict(self, *a, **kw):
+        return []
+
+
+def _install_fake_yolo(monkeypatch, cuda_ok):
+    import sys, types
+    ul = types.ModuleType("ultralytics")
+    made = {}
+    def YOLO(*a, **kw):
+        made["m"] = _FakeYOLO()
+        return made["m"]
+    ul.YOLO = YOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", ul)
+    _fake_torch(monkeypatch, cuda_build="12.1", available=cuda_ok)
+    monkeypatch.setattr(dog, "_model", None)
+    monkeypatch.setattr(dog, "_load_error", None)
+    monkeypatch.setattr(dog, "_device_used", None)
+    monkeypatch.setattr(dog, "_last_try", 0.0)
+    return made
+
+
+def test_加载时就把模型搬上卡_不靠每次predict搬(monkeypatch):
+    made = _install_fake_yolo(monkeypatch, cuda_ok=True)
+    dog._load(force=True)
+    assert made["m"].moved_to == "cuda", "没在加载时 .to(cuda) 的话，权重每次 predict 都要搬一趟"
+    assert dog._device_used == "cuda"
+    assert dog.status()["device"] == "cuda"
+
+
+def test_cuda用不了就退回cpu而且报出来(monkeypatch):
+    """不判断的话，ultralytics 会在每次 predict 里抛错或自己退回——两种都没人看见。"""
+    _install_fake_yolo(monkeypatch, cuda_ok=False)
+    dog._load(force=True)
+    assert dog._device_used == "cpu"
+    assert dog.status()["device"] == "cpu"
+    assert dog.status()["cuda"]["cuda_available"] is False
+
+
+def test_predict用的是实际设备不是配置值(fake_cv2, monkeypatch):
+    """配置写 cuda、实际退回 cpu 时，还往 predict 里传 cuda 就会当场抛错。"""
+    got = {}
+
+    class M:
+        names = {16: "dog"}
+        def predict(self, *a, **kw):
+            got.update(kw)
+            return []
+
+    monkeypatch.setattr(dog, "_model", M())
+    monkeypatch.setattr(dog, "_dog_class", 16)
+    monkeypatch.setattr(dog, "_device_used", "cpu")
+    fake_cv2._cap = FakeCap([0])
+    dog.scan_video("x.mp4")
+    assert got["device"] == "cpu"

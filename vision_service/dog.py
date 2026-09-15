@@ -98,10 +98,20 @@ def _load(force: bool = False):
         try:
             _model = YOLO(config.DOG_WEIGHTS)
             globals()["_dog_class"] = _resolve_dog_class(_model)
+            # **加载时就搬上卡**，不要靠 predict(device=...) 每次搬。
+            #
+            # ultralytics 的 YOLO(权重) 是加载到 CPU 的，predict(device="cuda")
+            # 才把权重挪过去——而且是每次调用都挪一趟。SAM 那边是
+            # build_sam2(..., device=device)，加载时就在卡上。两边不一样，
+            # 表现出来就是"SAM 能用 CUDA、YOLO 不行"：
+            #   - 读 next(model.parameters()).device 永远是 cpu（加载时的状态）
+            #   - 每采一帧就搬一次几十 MB 的权重，白烧带宽
+            globals()["_device_used"] = _pick_device()
             try:
-                globals()["_device_used"] = str(next(_model.model.parameters()).device)
-            except Exception:  # noqa: BLE001 拿不到就留空，不猜
-                pass
+                _model.to(_device_used)
+            except Exception as e:  # noqa: BLE001 搬不过去就留在 CPU 上，但要说出来
+                _logger.warning("把检测模型搬到 %s 失败，留在 CPU 上：%s", _device_used, e)
+                globals()["_device_used"] = "cpu"
         except Exception as e:  # noqa: BLE001 权重不存在/下载失败/torch 版本不对，全都要能报出来
             # 把换法一起写进错误里：最常见的失败是这台机器下不了权重（离线/防火墙），
             # 而这种时候人需要知道的是"换成哪个、怎么换"，不是一句"加载失败"
@@ -111,6 +121,22 @@ def _load(force: bool = False):
                 f"先试 pip install -U ultralytics；这台机器下不动权重的话，把 .pt 手动放到 "
                 f"vision_service/weights/ 并设 DOG_WEIGHTS 指过去）"
             )
+
+
+def _pick_device() -> str:
+    """想要 cuda 就先确认 cuda 真的能用，不能用就退回 cpu——**并且让 status 报出来**。
+
+    跟 SAM 那边同一个判断。不做这一步的话，cuda 用不了时 ultralytics 会在每次
+    predict 里抛错或自己退回，两种都不会有人看见。
+    """
+    want = config.SAM_DEVICE
+    if want != "cuda":
+        return want
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001
+        return "cpu"
 
 
 def status() -> dict:
@@ -144,7 +170,7 @@ def warmup() -> dict:
         rng = np.random.default_rng(0)
         img = rng.integers(0, 256, size=(640, 640, 3), dtype="uint8")
         with _lock:
-            _model.predict(img, verbose=False, device=config.SAM_DEVICE)
+            _model.predict(img, verbose=False, device=_device_used or "cpu")
     except Exception as e:  # noqa: BLE001 预热失败不该把服务带倒
         return {"warm": False, "error": f"预热推理失败：{type(e).__name__}: {e}"}
     _warm = True
@@ -192,7 +218,7 @@ def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames
             with _lock:
                 res = _model.predict(frame, verbose=False, conf=conf,
                                      classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
-                                     device=config.SAM_DEVICE)
+                                     device=_device_used or "cpu")
             h, w = frame.shape[:2]
             boxes = []
             for r in res:
