@@ -107,32 +107,49 @@ curl -s localhost:8385/api/v1/dog/scan -H 'Content-Type: application/json' \
 `has_dog`。**第四档是 `unknown`——一帧都没采到**，那是「没看成」不是「确认没狗」，
 两者后果相反，不能混。
 
-### 验一下 nano 够不够
+### nano 不够用——实测过了（2026-09-15）
 
-默认权重是 `yolo26n.pt`（最小那档）。这是个**赌**：赌新架构的小模型已经够用。
+默认是 `yolo26x.pt`（最大那档）。这**不是**按经验选的，是量出来的：
 
-按道理这一步该选大模型——它要的是**召回**不是速度（漏一只狗 = 人跳过一整段
-真有素材的视频；多报一只 = 人点进去看一眼），而且按时间采样、一小时才 720 帧，
-最大的模型也就几十秒跑完，速度几乎不花钱。
+```
+素材：data_raw/2026_9_12/multicam_20260912_230430647_cam1_imu1_raw.mp4
+      3329 秒，23:04 开始（夜里红外），每 10 秒采一个点，共 333 个点
 
-所以这个赌要拿真实素材验。同一批片段用两个型号各扫一遍，比 `verdict`：
+  yolo26n   mostly_empty     5/333 个点有狗（1.5%）
+  yolo26x   has_dog        273/333 个点有狗（82%）
+```
+
+nano 漏掉了 **268 个**有狗的采样点。夜里红外把它打穿了。
+
+这正好是最坏的那种错：nano 会让平台显示「这一小时大部分是空镜」，人就跳过了
+——实际上 82% 的时间画面里有狗。这一步**要的是召回不是速度**（漏一只狗 =
+人跳过一整段真有素材的视频；多报一只 = 人点进去看一眼），而按时间采样、
+不逐帧，5090 上 x 也就一两分钟，速度几乎不花钱。
+
+### 想换小模型省显存的话，先重验
+
+方法就是上面那次做的：同一段素材、两个型号各扫一遍，比 `verdict`。
 
 ```bash
-for w in yolo26n.pt yolo26m.pt; do        # 第二个换成这个版本有的更大一档
-  DOG_WEIGHTS=$w ./vision_service/run.sh down >/dev/null
-  DOG_WEIGHTS=$w ./vision_service/run.sh -d >/dev/null
-  echo "== $w"
-  for f in <挑十来段真实的相对路径>; do
-    curl -s localhost:8385/api/v1/dog/scan -H 'Content-Type: application/json' \
-      -d "{\"path\":\"$f\",\"every_sec\":10}" \
-      | python -c 'import sys,json;d=json.load(sys.stdin);print(d["verdict"], d["no_dog_ratio"], d["max_dogs"])'
+VID="data_raw/2026_9_12/multicam_20260912_230430647_cam1_imu1_raw.mp4"
+for W in yolo26n.pt yolo26x.pt; do
+  echo "== $W"
+  DOG_WEIGHTS=$W ./vision_service/run.sh down >/dev/null
+  DOG_WEIGHTS=$W ./vision_service/run.sh -d >/dev/null
+  # 权重要现下，固定 sleep 不够——轮询到 available 为止
+  for i in $(seq 120); do
+    curl -s localhost:8385/api/v1/dog/status | grep -q '"available":true' && break
+    sleep 5
   done
+  curl -s --max-time 1800 localhost:8385/api/v1/dog/scan -H 'Content-Type: application/json' \
+    -d "{\"path\":\"$VID\",\"every_sec\":10}" \
+    | python -c 'import sys,json;d=json.load(sys.stdin);print(d["verdict"], d["frames_with_dog"],"/",d["sampled"])'
 done
 ```
 
-只要出现 **「n 说 no_dog、大的说 has_dog」** 的片段，就是赌输了——把
-`DOG_WEIGHTS` 换成大一档。反过来（大的说没狗、n 说有狗）不要紧，那是误报，
-人点进去看一眼就排掉了。
+**素材要专挑难的**：夜里红外、笼子栏杆挡着、狗蜷成一团、白毛比熊贴浅色背景。
+全挑白天大场面的话两个型号都会全对，等于没验——上面那次要不是挑了 23:04
+那一段，nano 这个坑就留下了。
 
-挑片段的时候要**专门挑难的**：夜里红外的、笼子栏杆挡着的、狗蜷成一团睡觉的、
-白毛比熊贴浅色背景的。全挑白天大场面的话，两个型号都会全对，等于没验。
+判据：只要出现「小的说 no_dog/mostly_empty、大的说 has_dog」，就是小的不够。
+反过来不要紧（误报，人点进去看一眼就排掉）。

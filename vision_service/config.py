@@ -8,7 +8,7 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   SAM_DEVICE          cuda / cpu（默认 cuda，没有卡会自动退回 cpu）
   VISION_WARMUP       启动时预热模型（默认 1；设 0 退回懒加载，第一刀要多等十几秒）
   VIDEO_ROOT          采集视频的 NAS 挂载点（默认 /home/toky/ai_data），扫描路径相对它
-  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 yolo26n.pt；换型号改这个就行）
+  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 yolo26x.pt，实测 nano 在夜里红外上漏 98%）
   VISION_LOG_DIR      日志目录（默认 vision_service/logs）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
@@ -41,23 +41,28 @@ WARMUP         = _env("VISION_WARMUP", "1") not in ("0", "false", "False", "")
 VIDEO_ROOT     = _env("VIDEO_ROOT", "/home/toky/ai_data")
 # COCO 预训练权重，不训练、不微调——只要现成的 dog 类。ultralytics 找不到会自己下。
 #
-# 为什么是 yolo26 的 nano（2026-09-14 定）：
+# 为什么是最大那档（x）——**这是实测出来的，不是选出来的**。
 #
-# 一句话——新架构在小模型这一档提升最大，yolo26n 很可能比上一代的 x 还强，
-# 同时又省显存（这张卡还要同时挂着 SAM）。
+# 2026-09-14 先按"新架构小模型提升最大"的想法默认用了 yolo26n，并说好拿真实
+# 素材验。2026-09-15 在狗场夜里那段上验完，赌输了，而且不是边界差异：
 #
-# 这里有个要记下来的取舍。这一步**要的是召回不是速度**：
+#   素材：data_raw/2026_9_12/multicam_20260912_230430647_cam1_imu1_raw.mp4
+#         3329 秒（23:04 开始，夜里红外），每 10 秒采一个点，共 333 个点
+#
+#           yolo26n   mostly_empty    5/333 个点有狗（1.5%）
+#           yolo26x   has_dog       273/333 个点有狗（82%）
+#
+# nano 漏掉了 268 个有狗的采样点。夜里红外把它打穿了。
+#
+# 而这正好是最坏的那种错：nano 会让平台显示"这一小时大部分是空镜"，人就跳过了
+# ——实际上 82% 的时间画面里有狗。这一步**要的是召回不是速度**：
 #
 #   漏掉一只狗 → 这段被标成「没狗」→ 人直接跳过一整段真有素材的视频
 #   多报一只   → 人点进去看一眼发现是空的
 #
-# 而且是按时间采样、不是逐帧（一小时才 720 帧），最大的模型也就几十秒跑完——
-# 速度在这个场景里几乎不花钱。按这个道理本来该选最大那档。选 n 是赌新架构
-# 的小模型已经够用。**这个赌要拿真实素材验**，验法见 vision_service/README.md
-# 「验一下 nano 够不够」那一节：同一批片段用 n 和 m/l 各扫一遍，比 verdict。
-# 出现"n 说没狗、大的说有狗"的片段，就说明赌输了，把这里换成大一档。
+# 代价可以忽略：按时间采样、不逐帧（一小时 720 帧），5090 上 x 也就一两分钟。
 #
 # 换型号只要改这个环境变量，代码一行不用动——ultralytics 按文件名解析，
-# 本地没有就自己下。
-DOG_WEIGHTS    = _env("DOG_WEIGHTS", "yolo26n.pt")
+# 本地没有就自己下。省显存想换小的话，**先拿夜里的素材重验一遍**再换。
+DOG_WEIGHTS    = _env("DOG_WEIGHTS", "yolo26x.pt")
 LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))
