@@ -247,3 +247,40 @@ def test_empty_label_models_is_the_old_behavior():
     "格式不对，跳过"的告警，而那是每次都会出现的噪声。
     """
     assert R.parse_spec("") == []
+
+
+def test_up_sh_has_a_recreate_without_rebuild_option():
+    """up.sh 要有"不重建镜像、但重新创建容器"这一档。
+
+    少了这一档的话，改 LABEL_MODELS 只剩两个选择：
+      · -d（restart）—— 读不到新环境变量，**不生效而且不报错**
+      · 默认（--build）—— 冷缓存的机器上要十几分钟装 torch 和一堆轮子
+
+    第一次给部署命令时就是漏了这一档，让人白等了十几分钟，
+    而且那次 LABEL_MODELS 还没透传，等完也没生效。
+    """
+    with open(os.path.join(_HERE, "up.sh"), encoding="utf-8") as f:
+        src = f.read()
+    assert "-u|--up)" in src, "up.sh 没有 -u（不重建镜像，只重新创建容器）"
+    # 那一档**不能**带 --build，带了就跟默认那档一样慢了。
+    #
+    # **只看真正的命令行，把注释剥掉**——那一段的注释里正好写着"不 --build"，
+    # 扫原文会被自己的说明绊住。这类错（源码扫描撞上自己的注释）
+    # 在这个项目里犯过四次了。
+    body = src[src.index("-u|--up)"):]
+    body = body[:body.index("exit 0")]
+    code = [ln.split("#", 1)[0] for ln in body.splitlines()]
+    assert "--build" not in "\n".join(code), "-u 那档带了 --build，就跟默认一样慢了"
+    assert any("up -d" in ln for ln in code), "-u 那档没有真的跑 docker compose up -d"
+
+
+def test_restart_warns_that_env_vars_do_not_take_effect():
+    """-d 那档要提醒一句。
+
+    不提醒的话，改完 LABEL_MODELS 跑个 -d，服务重启了、日志一切正常，
+    只是平台下拉里少一组——人会以为是平台没刷新。
+    """
+    with open(os.path.join(_HERE, "up.sh"), encoding="utf-8") as f:
+        src = f.read()
+    seg = src[src.index("-d|--restart)"):src.index("-u|--up)")]
+    assert "LABEL_MODELS" in seg and "不生效" in seg
