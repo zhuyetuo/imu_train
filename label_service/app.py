@@ -41,6 +41,7 @@ log = logging.getLogger("label_service")
 
 sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
 from label_service.model_loader import load_model_bundle  # noqa: E402
+from label_service.registry import DEFAULT_TAG, registry  # noqa: E402
 
 _bundle: dict = {}      # 主进程只留元数据（health 用），真正推理在 pool 的 worker 进程里
 _pool = None
@@ -60,9 +61,15 @@ async def lifespan(app: FastAPI):
     if missing:
         log.warning("TARGET_LABELS 里这些类别模型没有: %s  模型类别: %s", missing, _bundle["classes"])
     _pool = pool.create_pool(model_path)
+    # 默认模型登记进注册表，**同一个 pool、同一份 bundle**，不是再建一份。
+    # 另建一份的话默认模型会有两个进程池，内存翻倍，而且 model/switch
+    # 只换得掉其中一个
+    registry.set_default(model_path, _bundle, _pool)
+    registry.load_extra(config.EXTRA_MODELS)
     infer_queue.setup(config.INFER_WORKERS, config.INFER_RESERVE)
     yield
     log.info("关闭")
+    registry.shutdown()
     _pool.shutdown(wait=False, cancel_futures=True)
 
 
@@ -93,6 +100,8 @@ class InferRequest(BaseModel):
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
     mode: Literal["raw", "stable", "viterbi"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码），见 postprocess.py")
     device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
+    model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
+                                                "不传 = 默认模型，行为跟以前一样")
 
 
 class Segment(BaseModel):
@@ -168,13 +177,22 @@ def _stable_params() -> postprocess.StableParams:
 
 
 async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infer_queue.PRIORITY_BATCH,
-                         device_hz: float | None = None) -> dict:
+                         device_hz: float | None = None,
+                         bundle: dict | None = None, pool_obj=None) -> dict:
+    """bundle/pool 不传 = 默认模型，跟以前完全一样。
+
+    **几何必须跟着模型走**（window_s / stride_s / label_mode 都从 bundle 读）。
+    用默认模型的几何去给另一个模型的窗口做后处理**不会报错**，只会让片段的
+    时间戳整体偏掉——而偏掉的片段看起来完全正常。
+    """
+    b = bundle if bundle is not None else _bundle
+    px = pool_obj if pool_obj is not None else _pool
     loop = asyncio.get_running_loop()
     t0 = time.time()
     try:
         # 批量的要抢槽位排队，交互式的直接进（见 queue.py）
         async with infer_queue.slot(priority):
-            result = await loop.run_in_executor(_pool, pool._infer_one, full_path, device_hz)
+            result = await loop.run_in_executor(px, pool._infer_one, full_path, device_hz)
     except Exception:
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
@@ -183,7 +201,7 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
     # 掉数据的时间段（六轴全 0 / MISSING）。这些窗口模型照样会给一个类别，但那
     # 是凭空来的：既不该算进有效佩戴，也不该进训练集，更不能变成一段"睡觉"。
     # 三个版本都挖——调试版是拿来看模型说了什么的，同样不该被这种段污染。
-    geom_all = (_bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"])
+    geom_all = (b["window_s"], b["stride_s"], b["label_mode"])
     holes = postprocess.missing_spans(result["windows"], *geom_all, config.MISSING_MIN_RATIO)
     result["missing"] = [
         {"start_ts": postprocess._fmt_ts(a), "end_ts": postprocess._fmt_ts(b),
@@ -194,9 +212,9 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
     if mode in ("stable", "viterbi"):  # noqa: SIM102 - 下面分支多，别合并
         # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
         params = _stable_params()
-        geom = (_bundle["window_s"], _bundle["stride_s"], _bundle["label_mode"])
+        geom = (b["window_s"], b["stride_s"], b["label_mode"])
         result["segments"] = postprocess.stabilize(
-            result["windows"], _bundle["classes"], config.TARGET_LABELS, *geom, params, algo=mode,
+            result["windows"], b["classes"], config.TARGET_LABELS, *geom, params, algo=mode,
         )
         cands = postprocess.scratch_candidates(result["windows"], result["segments"], *geom, params)
         # 按置信度从高到低裁到上限。裁掉多少要记下来——一小时几百条人根本审不过来，
@@ -221,16 +239,41 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
     return result
 
 
+def _pick_model(tag: str | None):
+    """标签 → (bundle, pool)。不认识的标签 **422**，不退回默认模型。
+
+    退回默认的话，结果存进库里标着 acc3、内容却是默认模型跑的，
+    而这件事没有任何迹象——模型对比里混进一个冒名顶替的，比报错糟得多。
+    """
+    try:
+        resolved = registry.resolve_tag(tag)
+    except KeyError as e:
+        raise HTTPException(422, str(e)) from e
+    try:
+        return registry.get(resolved)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"模型 {resolved} 加载失败: {type(e).__name__}: {e}") from e
+
+
+@app.get("/api/v1/label/models")
+async def list_models():
+    """挂着哪些模型。平台的「版本」下拉靠它——列出来而不是写死，
+    换了模型界面上要能看到新的那个。"""
+    return {"models": registry.describe(), "default": DEFAULT_TAG}
+
+
 @app.post("/api/v1/label/infer", response_model=InferResponse)
 async def infer(req: InferRequest):
     full_path = _resolve_nas_path(req.path)
+    b, px = _pick_model(req.model)
     try:
-        result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE, req.device_hz)
+        result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE,
+                                      req.device_hz, bundle=b, pool_obj=px)
     except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
         raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
-        sample_id=req.sample_id, path=req.path, model_path=_bundle["model_path"],
-        classes=_bundle["classes"], **result,
+        sample_id=req.sample_id, path=req.path, model_path=b["model_path"],
+        classes=b["classes"], **result,
     )
 
 
@@ -243,6 +286,8 @@ class InferBatchItem(BaseModel):
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
     mode: Literal["raw", "stable", "viterbi"] = "raw"
+    model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
+                                                "不传 = 默认模型，行为跟以前一样")
 
 
 class InferBatchResult(BaseModel):
@@ -265,13 +310,15 @@ async def infer_batch(req: InferBatchRequest):
     ok/error。几百个样本一次发一个请求就行，不用调用方自己控制并发。"""
     log.info("批量推理开始 %d 个  队列=%s", len(req.items), infer_queue.stats())
     t0 = time.time()
+    b, px = _pick_model(req.model)      # 一批共用一个模型，解析一次就够
     async def _one(item: InferBatchItem) -> InferBatchResult:
         try:
             full_path = _resolve_nas_path(item.path)
-            result = await _infer_in_pool(full_path, req.mode, device_hz=item.device_hz)
+            result = await _infer_in_pool(full_path, req.mode, device_hz=item.device_hz,
+                                          bundle=b, pool_obj=px)
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=True, result=InferResponse(
-                sample_id=item.sample_id, path=item.path, model_path=_bundle["model_path"],
-                classes=_bundle["classes"], **result))
+                sample_id=item.sample_id, path=item.path, model_path=b["model_path"],
+                classes=b["classes"], **result))
         except HTTPException as e:
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=False, error=str(e.detail))
         except Exception as e:  # noqa: BLE001

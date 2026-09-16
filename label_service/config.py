@@ -29,6 +29,12 @@ def _env(name: str, default: str) -> str:
 
 
 MODEL_GLOB       = _env("LABEL_MODEL", "results/processed_2026_8_11-2026_8_27_raw_missing_drop_window/16hz_remap_custom_3class/rf/*.pkl")
+# 额外挂几个模型给平台做对比，`标签=路径` 逗号分隔，路径支持通配符。
+# 不配 = 只有 LABEL_MODEL 那一个，跟以前完全一样。见 registry.py。
+#   LABEL_MODELS='acc3=results_acc3/*_acc3/16hz_remap_custom_3class/rf/ml_rf.pkl'
+# 找不到文件的条目**跳过不报错**（实验模型在别的机器上可能没训），
+# 但启动日志里会吵一句——线上标注不能因为一个实验模型没训就起不来。
+EXTRA_MODELS     = _env("LABEL_MODELS", "")
 DEVICE_HZ        = int(_env("DEVICE_HZ", "50"))
 RESAMPLE_METHOD  = _env("RESAMPLE_METHOD", "training_match")
 TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "活动,睡觉,抓挠,未佩戴,甩身体").split(",") if t.strip()]
