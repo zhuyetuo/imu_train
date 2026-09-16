@@ -26,6 +26,16 @@ services:
       NAS_ROOT: ${NAS_ROOT:-/home/toky/ai_data}
       MATERIAL_ROOT: ${MATERIAL_ROOT:-/home/toky/alg_material}
       LABEL_SERVICE_PORT: 8383
+      # 额外挂几个模型给平台做对比（见 registry.py）。**必须在这里透传**：
+      # 不列出来的话，`LABEL_MODELS=... bash up.sh` 那个变量只到了宿主机的
+      # shell，容器里看不到——服务照常起、日志一切正常，只是平台的下拉里
+      # 少一组，人会以为是平台没刷新。
+      #
+      # 默认空字符串 = 没有额外模型 = 原来的行为。
+      # **LABEL_MODEL（单数，默认模型）故意不放这里**：它在 config.py 里有
+      # 非空默认值，透传一个空字符串进来会把默认模型路径清掉，服务直接起不来。
+      # 要改默认模型就写进 .env（env_file 那条已经读了）。
+      LABEL_MODELS: ${LABEL_MODELS:-}
     ports:
       - "${LABEL_SERVICE_PORT:-8383}:8383"
     volumes:

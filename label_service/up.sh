@@ -2,11 +2,24 @@
 # 起 label_service（后台常驻），完成后打印访问地址。
 #
 # 用法：
-#   bash label_service/up.sh        重建并启动（CPU）
+#   bash label_service/up.sh -d     ← **平时用这个**。只重启，秒级
+#   bash label_service/up.sh -u     改了环境变量（LABEL_MODELS 之类）用这个
+#   bash label_service/up.sh        重建镜像再启动（**只有依赖变了才需要**）
 #   bash label_service/up.sh -g     用 GPU 起（需要宿主机装了 nvidia-container-toolkit）
-#   bash label_service/up.sh -p     先 git pull 再重建
-#   bash label_service/up.sh -d     只重启，不重建镜像（改了 .py 用这个，最快）
+#   bash label_service/up.sh -p     先 git pull
 #   bash label_service/up.sh down   停服务
+#
+# 三档的区别，选错了很费时间（默认那档在冷缓存的机器上要十几分钟：
+# torch + 一堆科学计算的轮子）：
+#
+#   -d  docker compose restart   重启进程。**代码是挂载的**（Dockerfile 里
+#                                没有 COPY 代码），所以改 .py 这就够了。
+#                                但它用的是容器创建时的那套环境变量，
+#                                **改了 LABEL_MODELS 之类不会生效**。
+#   -u  docker compose up -d     配置变了就重建容器，镜像不动。
+#                                改环境变量用这个。
+#   默认 up -d --build           连镜像一起重建。只有 requirements-docker.txt
+#                                或 Dockerfile 变了才需要。
 #
 # 几个开关可以叠：bash label_service/up.sh -p -g
 set -e
@@ -31,6 +44,16 @@ while [[ $# -gt 0 ]]; do
     -d|--restart)
       "${COMPOSE[@]}" restart
       echo "已重启（代码走挂载，不需要重建镜像）"
+      echo "注意：restart 用的是容器创建时的环境变量——改过 LABEL_MODELS"
+      echo "      之类的话这样不生效，用 -u 重新创建容器。"
+      exit 0
+      ;;
+    -u|--up)
+      # 不 --build：镜像不动，只在 compose 配置/环境变量变了时重建容器。
+      # 改 LABEL_MODELS 要走这条——restart 读不到新的环境变量，
+      # 而"没生效"的表现是平台下拉里少一组，服务日志一切正常
+      "${COMPOSE[@]}" up -d
+      echo "已按当前配置起好（镜像没重建）"
       exit 0
       ;;
     *)
