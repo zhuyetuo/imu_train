@@ -132,15 +132,36 @@ jerk 全部直接调 `src/ml/features.py` 里那几个函数，只是换了拼�
 
 ## 在平台上验证
 
+**挂到 AI 服务（label_service）上，不是端侧服务。** 这个模型跑的是服务器上的
+sklearn，不是烧进项圈的那份 C —— 挂到端侧那组里，人会以为它是板子会跑的东西。
+
+起服务时加一个环境变量就行：
+
 ```bash
-mkdir -p ~/algo_tinyml/models/acc3_rf
-cp ~/imu_train/results_acc3/*_acc3/16hz_remap_custom_3class/rf/ml_rf.{pkl,json} \
-   ~/algo_tinyml/models/acc3_rf/
-cd ~/algo_tinyml && git pull && ./serve.sh -d
+LABEL_MODELS='acc3=results_acc3/*_acc3/16hz_remap_custom_3class/rf/ml_rf.pkl' \
+  bash label_service/up.sh
 ```
 
-平台「版本」下拉里会多出 **端侧 · acc3_rf · 稳定版 v2**。后处理跟线上
-「稳定版 v2」是同一份代码，所以并排比时差的只有模型本身。
+（或者写进 label_service 的 .env / docker-compose 的 environment 里。
+`LABEL_MODEL` 那个**不要动**——那是默认模型，线上标注在用。）
+
+平台「版本」下拉里会多出一组**服务端模型**：
+
+```
+服务端模型（同一台 AI 服务，换了个模型）
+  rf · 稳定版 v2     ← srv:acc3
+  rf · 调试版        ← srv:acc3@raw
+```
+
+后处理跟线上「稳定版 v2」是同一份代码，所以并排比时差的只有模型本身。
+
+确认挂上了：
+
+```bash
+curl -s localhost:8383/api/v1/label/models | python -m json.tool
+```
+
+没训出来的机器上这一项**会被跳过**（服务照起），启动日志里有一行 ⚠。
 
 ---
 
