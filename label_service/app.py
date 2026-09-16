@@ -98,7 +98,9 @@ async def health():
 class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
-    mode: Literal["raw", "stable", "viterbi"] = Field("raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码），见 postprocess.py")
+    mode: Literal["raw", "stable", "viterbi",
+                  "stable_noshake", "viterbi_noshake"] = Field(
+        "raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码）；**_noshake 后缀**=同样的解码但不让抓挠吞并甩身体，用来并排对比那条规则值不值（见 postprocess.py）")
     device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
@@ -209,7 +211,9 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         for a, b in holes
     ]
     result["missing_seconds"] = round(sum(m["seconds"] for m in result["missing"]), 1)
-    if mode in ("stable", "viterbi"):  # noqa: SIM102 - 下面分支多，别合并
+    # **别写死成 ("stable", "viterbi")**：加了 _noshake 之后漏在这里的话，
+    # 那两个版本会静默退化成"调试版"——一堆碎片段，而错误看起来像模型变差了
+    if mode != "raw":  # noqa: SIM102 - 下面分支多，别合并
         # 同一次推理的逐窗口结果做后处理，模型不用再跑一遍
         params = _stable_params()
         geom = (b["window_s"], b["stride_s"], b["label_mode"])
@@ -285,7 +289,8 @@ class InferBatchItem(BaseModel):
 
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
-    mode: Literal["raw", "stable", "viterbi"] = "raw"
+    mode: Literal["raw", "stable", "viterbi",
+                  "stable_noshake", "viterbi_noshake"] = "raw"
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
 

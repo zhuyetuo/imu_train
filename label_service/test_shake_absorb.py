@@ -198,3 +198,100 @@ def test_config_default_is_documented_as_seconds():
     assert "STABLE_SHAKE_ABSORB_S" in src
     line = next(ln for ln in src.splitlines() if ln.startswith("STABLE_SHAKE_ABSORB_S"))
     assert "秒" in line
+
+
+# ── `_noshake` 那个版本后缀 ───────────────────────────────────────────────
+#
+# 做成一个独立的 algo（而不是让调用方改 params），是为了它在平台上是一个
+# **独立的版本**：结果按 (样本, 模型, 版本) 存，版本串不同才不会互相覆盖。
+
+
+@pytest.mark.parametrize("base", ["stable", "viterbi"])
+def test_noshake_suffix_disables_absorption(base):
+    """带后缀的版本不吞，**而且传进去的 absorb 参数是默认的 3 秒**。
+
+    也就是说不用改配置——这正是要做成一个版本的理由。
+    """
+    on = _run(SCRATCH_THEN_SHAKE, 3.0, algo=base)
+    off = _run(SCRATCH_THEN_SHAKE, 3.0, algo=base + pp.NOSHAKE_SUFFIX)
+    assert off == (1.0, 4.5), f"{base}_noshake 应该一秒都不吞，实际 {off}"
+    assert on != off, f"{base} 和 {base}_noshake 的结果一样，后缀没起作用"
+
+
+def _blurry_states(n=24):
+    """活动/睡觉势均力敌地来回闪。
+
+    **stable 和 viterbi 在这段数据上结果不同**（滑动平均 vs 付切换代价），
+    所以能用来验"后缀有没有顺手把解码方式也换掉"。
+    第一版用的是一段干净数据，两种解码结果本来就一样，
+    于是"把 algo 换成 stable"这个变异活了下来。
+    """
+    import random
+
+    rnd = random.Random(7)
+    out = []
+    for i in range(n):
+        a = 0.45 + rnd.uniform(-0.1, 0.1)
+        probs = {c: 0.02 for c in CLASSES}
+        probs["活动"], probs["睡觉"] = a, 0.9 - a
+        out.append({"ts": (T0 + dt.timedelta(seconds=STRIDE_S * i)).strftime(
+                        "%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "label": max(probs, key=probs.get),
+                    "conf": max(probs.values()), "probs": probs, "spec": None})
+    return out
+
+
+def _states(windows, algo):
+    """这段数据里没有事件类，看活动/睡觉各自的总时长。"""
+    p = pp.StableParams(event_labels=("抓挠", "甩身体"), shake_absorb_s=3.0,
+                        smooth_windows=7, min_state_s=2, event_gap_s=4,
+                        event_min_windows=2, event_min_mean=0.45,
+                        event_single_conf=0.85, viterbi_switch=3.0)
+    segs = pp.stabilize(windows, CLASSES, ["活动", "睡觉"],
+                        WINDOW_S, STRIDE_S, "majority", p, algo=algo)
+    return {k: round(sum(
+        (dt.datetime.strptime(x["end_ts"], "%Y-%m-%d %H:%M:%S.%f")
+         - dt.datetime.strptime(x["start_ts"], "%Y-%m-%d %H:%M:%S.%f")
+         ).total_seconds() for x in v), 1) for k, v in segs.items() if v}
+
+
+def test_the_two_decoders_really_differ_on_this_fixture():
+    """先证明这段数据能分辨两种解码——否则下面那条测了个寂寞。"""
+    ws = _blurry_states()
+    assert _states(ws, "stable") != _states(ws, "viterbi")
+
+
+@pytest.mark.parametrize("base", ["stable", "viterbi"])
+def test_noshake_only_changes_that_one_rule(base):
+    """**只改吞并这一件事**，解码方式要跟不带后缀的那个一致。
+
+    要是后缀顺手把 algo 也换了（比如都退回 stable），两个版本比出来的
+    差异里就混进了解码方式的差异——而那个差异不显示在任何地方。
+    """
+    ws = _blurry_states()      # 这段数据里没有甩身体，吞并规则无从生效
+    assert _states(ws, base) == _states(ws, base + pp.NOSHAKE_SUFFIX)
+
+
+def test_noshake_does_not_mutate_the_caller_params():
+    """params 是同一个对象在多次请求间复用的（app.py 里每次现造，
+    但 edge 那边会缓存）。就地改的话**第一次请求之后所有版本都变成不吞了**。
+    """
+    p = _params(3.0)
+    pp.stabilize(SCRATCH_THEN_SHAKE, CLASSES, ["抓挠", "甩身体"],
+                 WINDOW_S, STRIDE_S, "majority", p, algo="viterbi_noshake")
+    assert p.shake_absorb_s == 3.0, "传进去的 params 被就地改掉了"
+
+
+def test_the_two_versions_are_stored_separately():
+    """版本串不同 → 平台按 (样本, 模型, 版本) 分开存 → 能并排比。
+
+    这条钉的是后缀本身存在（而不是被做成一个配置项）。改成配置的话，
+    两次跑出来 mode 都是 "viterbi"，后一次把前一次顶掉。
+    """
+    assert pp.NOSHAKE_SUFFIX and pp.NOSHAKE_SUFFIX.startswith("_")
+    with open(os.path.join(_HERE, "app.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert "viterbi_noshake" in src, "app.py 的 mode 白名单里没有它"
+    # 后处理分支不能写死成 ("stable", "viterbi")，不然这两个版本会
+    # 静默退化成调试版——一堆碎片段，看起来像模型变差了
+    assert 'if mode in ("stable", "viterbi")' not in src

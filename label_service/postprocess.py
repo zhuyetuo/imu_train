@@ -33,10 +33,18 @@ viterbi —— 稳定版 v2
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 _TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+#: 版本串后缀：加上它就是"同样的解码，但不让抓挠吞并甩身体"。
+#
+# 为什么要有这个：那条吞并规则（shake_absorb_s）是为了修"模型爱把抓挠的
+# 剧烈段判成甩身体"而加的，但它反过来会把真的甩身体并进抓挠。到底哪个
+# 更划算，只能拿真实样本并排跑一遍看——所以做成两个版本，而不是一个配置。
+NOSHAKE_SUFFIX = "_noshake"
 
 
 @dataclass
@@ -390,8 +398,22 @@ def refine_boundaries(segments: list[dict], envelope: dict | None, params: Stabl
 def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
               window_s: float, stride_s: float, label_mode: str,
               params: StableParams | None = None, algo: str = "stable") -> dict[str, list[dict]]:
-    """返回 {label: [{start_ts, end_ts, conf_max, conf_mean, n_windows, spec}]}，跟调试版 segments 同结构。"""
+    """返回 {label: [{start_ts, end_ts, conf_max, conf_mean, n_windows, spec}]}，跟调试版 segments 同结构。
+
+    algo 认这几个：
+      stable / viterbi                    两套解码，见模块顶部
+      stable_noshake / viterbi_noshake    同上，但**不让抓挠吞并甩身体**
+
+    `_noshake` 后缀单独做成一个 algo、而不是让调用方改 params，是为了让它
+    在平台上是一个**独立的版本**：结果按 (样本, 模型, 版本) 存，版本串不同
+    才不会互相覆盖，两边才能并排对比。改配置的话两次跑出来的 mode 都是
+    "viterbi"，后一次直接把前一次顶掉。
+    """
     p = params or StableParams()
+    if algo.endswith(NOSHAKE_SUFFIX):
+        # 只改这一个参数，别的一律照旧——要比的就是"吞不吞"这一件事
+        p = replace(p, shake_absorb_s=0.0)
+        algo = algo[: -len(NOSHAKE_SUFFIX)]
     n = len(windows)
     if n == 0:
         return {lab: [] for lab in target_labels}
