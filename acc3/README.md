@@ -135,15 +135,26 @@ jerk 全部直接调 `src/ml/features.py` 里那几个函数，只是换了拼�
 **挂到 AI 服务（label_service）上，不是端侧服务。** 这个模型跑的是服务器上的
 sklearn，不是烧进项圈的那份 C —— 挂到端侧那组里，人会以为它是板子会跑的东西。
 
-起服务时加一个环境变量就行：
+推荐写进 `label_service/.env`（重启之后一直生效，不用每次记着带）：
+
+```bash
+echo "LABEL_MODELS=acc3=results_acc3/*_acc3/16hz_remap_custom_3class/rf/ml_rf.pkl" \
+  >> label_service/.env
+bash label_service/up.sh -d        # -d = 只重启，不重建镜像
+```
+
+也可以临时从命令行给：
 
 ```bash
 LABEL_MODELS='acc3=results_acc3/*_acc3/16hz_remap_custom_3class/rf/ml_rf.pkl' \
-  bash label_service/up.sh
+  docker compose -f label_service/docker-compose.yml up -d
 ```
 
-（或者写进 label_service 的 .env / docker-compose 的 environment 里。
-`LABEL_MODEL` 那个**不要动**——那是默认模型，线上标注在用。）
+⚠ 这种写法**必须用 `up -d`，不能用 `up.sh -d`**：后者是
+`docker compose restart`，重启容器用的是它创建时的那套环境变量，
+新给的值**不会生效**——而服务照常起、日志一切正常，只是下拉里少一组。
+
+`LABEL_MODEL`（单数）那个**不要动**——那是默认模型，线上标注在用。
 
 平台「版本」下拉里会多出一组**服务端模型**：
 

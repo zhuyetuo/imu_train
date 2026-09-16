@@ -204,3 +204,46 @@ def test_unknown_tag_is_422_not_a_silent_default():
 
 def test_models_endpoint_exists():
     assert '@app.get("/api/v1/label/models")' in _src("app.py")
+
+
+# ── 部署层面：环境变量得真的能进到容器里 ──────────────────────────────────
+
+
+def test_compose_passes_label_models_through():
+    """`LABEL_MODELS=... bash up.sh` 要真的生效。
+
+    compose 的 environment 里不列出来的话，那个变量**只到了宿主机的 shell**，
+    容器里看不到——服务照常起、日志一切正常，只是平台的下拉里少一组，
+    人会以为是平台没刷新。这个坑踩过一次。
+    """
+    import yaml
+
+    p = os.path.join(_HERE, "docker-compose.yml")
+    with open(p, encoding="utf-8") as f:
+        env = yaml.safe_load(f)["services"]["label-service"]["environment"]
+    assert "LABEL_MODELS" in env, "compose 没透传 LABEL_MODELS，命令行给的值进不去容器"
+
+
+def test_compose_does_not_pass_the_default_model_through():
+    """**LABEL_MODEL（单数）不能透传。**
+
+    它在 config.py 里有非空默认值。按 ${LABEL_MODEL:-} 透传的话，宿主机没设
+    这个变量时会往容器里塞一个空字符串，把默认模型路径清掉——
+    服务直接起不来，而报错是"通配符没有匹配到任何文件"，
+    跟"compose 多列了一行"看不出关系。
+    """
+    import yaml
+
+    p = os.path.join(_HERE, "docker-compose.yml")
+    with open(p, encoding="utf-8") as f:
+        env = yaml.safe_load(f)["services"]["label-service"]["environment"]
+    assert "LABEL_MODEL" not in env
+
+
+def test_empty_label_models_is_the_old_behavior():
+    """compose 默认透传的是空字符串，那必须等于"没有额外模型"。
+
+    要是空字符串被当成一条配置去解析，启动日志里会多出一堆
+    "格式不对，跳过"的告警，而那是每次都会出现的噪声。
+    """
+    assert R.parse_spec("") == []
