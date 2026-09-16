@@ -433,15 +433,27 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
         bouts_by_event[ev] = _merge_gaps(raw_b, zones, p.event_gap_s)
 
     # 抓挠吞并前后的甩身体窗口
+    #
+    # ⚠ 这里的判据是**从抓挠边界往外扩了多少秒（累计）**，不是相邻窗口之间
+    # 的间隔。曾经写成后者，结果这个参数形同虚设：
+    # majority 模式下相邻窗口的 zone 首尾相接（见 _zones），间隔**恒等于 0**，
+    # 于是 `间隔 <= absorb_s` 对任何非负的 absorb_s 都成立，while 循环
+    # 一路链式吞到底——**一串 4.5 秒的甩身体会被 3 秒的参数整段吞掉**，
+    # 而且 STABLE_SHAKE_ABSORB_S=0 也关不掉（0 <= 0 为真）。
+    #
+    # absorb_s <= 0 = 关闭，跟 spectral_min 一个约定。
     sl, sh = p.scratch_label, p.shake_label
-    if sl in bouts_by_event and sh in classes:
+    if sl in bouts_by_event and sh in classes and p.shake_absorb_s > 0:
         shake_idx = {i for i in range(n) if raw_label[i] == sh or (decoded is not None and decoded[i] == sh)}
         grown = []
         for b in bouts_by_event[sl]:
             i0, i1 = b[0], b[-1]
-            while i0 - 1 >= 0 and (i0 - 1) in shake_idx and (zones[i0][0] - zones[i0 - 1][1]).total_seconds() <= p.shake_absorb_s:
+            lo_edge, hi_edge = zones[i0][0], zones[i1][1]
+            while (i0 - 1 >= 0 and (i0 - 1) in shake_idx
+                   and (lo_edge - zones[i0 - 1][0]).total_seconds() <= p.shake_absorb_s):
                 i0 -= 1
-            while i1 + 1 < n and (i1 + 1) in shake_idx and (zones[i1 + 1][0] - zones[i1][1]).total_seconds() <= p.shake_absorb_s:
+            while (i1 + 1 < n and (i1 + 1) in shake_idx
+                   and (zones[i1 + 1][1] - hi_edge).total_seconds() <= p.shake_absorb_s):
                 i1 += 1
             grown.append(list(range(i0, i1 + 1)))
         bouts_by_event[sl] = _merge_gaps(grown, zones, p.event_gap_s)

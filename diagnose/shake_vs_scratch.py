@@ -58,8 +58,9 @@ def report_postprocess_rules():
 
     print(f"   1. 吞并：抓挠 bout 前后 {absorb} 秒内的甩身体窗口**并进抓挠**")
     print(f"      （STABLE_SHAKE_ABSORB_S={absorb}）")
-    print("      而且是 while 循环**链式往外扩**：只要挨着的还是甩身体、间隔还在")
-    print(f"      {absorb} 秒内就继续吞。窗口步长 0.5 秒的话，一串甩身体可以被整段吞掉。")
+    print("      往外扩的**累计**秒数不超过这个值。")
+    print("      （早先的写法看的是相邻窗口的间隔，而那个间隔恒等于 0，")
+    print("       于是链式吞到底——参数形同虚设，写 0 也关不掉。已修。）")
     print("   2. 被吞掉的窗口**从甩身体那边删掉**，不是两边都算")
     print("   3. 写时间轴时**抓挠优先**：抓挠能覆盖已经写上的甩身体，反过来不行")
     print()
@@ -76,7 +77,7 @@ def report_postprocess_rules():
     print("       · 调试版里是甩身体、稳定版里变抓挠  → 100% 是后处理这几条规则")
     print("       · 两个版本都判成抓挠                → 才是模型/数据的问题，看下面 ②③")
     print()
-    print("   ▸ 要关掉吞并：起 label_service 时加 STABLE_SHAKE_ABSORB_S=0")
+    print("   ▸ 要关掉吞并：STABLE_SHAKE_ABSORB_S=0（0 = 关闭，跟 spectral_min 一个约定）")
     print("     （写进 label_service/.env，然后 bash label_service/up.sh -u）")
     print()
 
