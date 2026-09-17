@@ -81,6 +81,17 @@ CAND_SPEC_MIN            = float(_env("CAND_SPEC_MIN", "0"))
 CAND_MAX                 = int(_env("CAND_MAX", "40"))           # 每个文件最多给几条
 # 一个窗口里"六轴全 0 / MISSING"的样本点占比超过这个数，就当这段没有数据：
 # 预测结果里抠掉、不算有效佩戴、不进训练集。半个窗口都是空的就已经没法判了
+# 疑似舔/啃候选（只靠加速度姿态，不靠模型；见 grooming.py）。跟疑似抓挠走同一条
+# 确认/排除通道，label_name 是 GROOM_LABEL。目的是给「舔/啃哪个部位」攒标注：
+# 人只看候选那几段，不用翻 24 小时视频。
+GROOM_ENABLED            = _env("GROOM_ENABLED", "1") == "1"
+GROOM_LABEL              = _env("GROOM_LABEL", "舔身体")
+GROOM_MAX                = int(_env("GROOM_MAX", "40"))           # 每个文件最多给几条
+GROOM_TILT_MIN_DEG       = float(_env("GROOM_TILT_MIN_DEG", "25"))  # 头偏离平时姿态多少度起算
+GROOM_MOTION_MIN         = float(_env("GROOM_MOTION_MIN", "0.03"))  # 动作量下限（低于 = 趴着不动）
+GROOM_MOTION_MAX         = float(_env("GROOM_MOTION_MAX", "0.35"))  # 动作量上限（高于 = 走/跑）
+GROOM_MIN_S              = float(_env("GROOM_MIN_S", "3"))          # 短于这个的不要
+GROOM_GAP_S              = float(_env("GROOM_GAP_S", "2"))          # 断开不超过这么久算同一段
 MISSING_MIN_RATIO        = float(_env("MISSING_MIN_RATIO", "0.5"))
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
