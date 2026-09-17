@@ -5,6 +5,8 @@
 #   ./up.sh -g           GPU 模式（透传给 label_service）
 #   ./up.sh -d           只重启，不重建镜像（改了 .py 用这个，最快）
 #   ./up.sh -p           先 git pull 再起
+#   ./up.sh deploy       **更新到最新的一条命令**：git pull + 子模块 → label_service 依赖变了才重建
+#                        镜像、否则重建容器+重启 → vision_service 停了再起 → 逐个探健康检查
 #   ./up.sh status       两个分别在不在跑
 #   ./up.sh down         两个都停
 #
@@ -48,7 +50,7 @@ while [ $# -gt 0 ]; do
         --only) ONLY="${2:-}"; shift 2 ;;
         -d|--restart)   RESTART_ONLY=1; PASS+=("$1"); shift ;;
         -g|--gpu|-p|--pull) PASS+=("$1"); shift ;;
-        down|stop|status) SUB="$1"; shift ;;
+        down|stop|status|deploy) SUB="$1"; shift ;;
         -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "不认识的参数: $1（-h 看用法）"; exit 1 ;;
     esac
@@ -56,6 +58,77 @@ done
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 line() { echo; echo "────────── $* ──────────"; }
+
+# ── deploy：更新到最新，一条命令 ────────────────────────────────────────
+# 跟平台那边的 deploy_all.sh 是同一套逻辑（那边发现这台机器上有 imu_train 就直接调这里）。
+# DRY_RUN=1 只打印命令不执行。
+deploy_run() { echo "  \$ $*"; [ "${DRY_RUN:-0}" = "1" ] && return 0; "$@"; }
+deploy_probe() {   # $1 名字 $2 url $3 秒数
+    local name=$1 url=$2 tries=${3:-30} i
+    [ "${DRY_RUN:-0}" = "1" ] && { echo "  （DRY_RUN）$name $url"; return 0; }
+    for ((i = 1; i <= tries; i++)); do
+        curl -fsS -o /dev/null --max-time 2 "$url" 2>/dev/null && { echo "  ✓ $name"; return 0; }
+        sleep 1
+    done
+    echo "  ✗ $name 等了 ${tries}s 还没通：$url"; return 1
+}
+deploy_field() {
+    [ "${DRY_RUN:-0}" = "1" ] && { echo "?"; return; }
+    curl -fsS --max-time 3 "$1" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('$2'))" 2>/dev/null || echo "?"
+}
+if [ "$SUB" = "deploy" ]; then
+    FAILED=()
+    GPU_FLAG=""
+    for a in ${PASS[@]+"${PASS[@]}"}; do [ "$a" = "-g" ] || [ "$a" = "--gpu" ] && GPU_FLAG="-g"; done
+    [ "${DEPLOY_GPU:-0}" = "1" ] && GPU_FLAG="-g"
+
+    line "拉代码"
+    OLD_REV="$(git rev-parse HEAD 2>/dev/null || echo none)"
+    deploy_run git pull --ff-only || FAILED+=("git pull 失败（本地有改动？先 git stash）")
+    # 采集端代码（witmotion_imu 子模块）跟着钉的版本走
+    deploy_run git submodule update --init --recursive || true
+    NEW_REV="$(git rev-parse HEAD 2>/dev/null || echo none)"
+
+    if want label; then
+        line "label_service（端口 8383）"
+        if [ "$OLD_REV" != "$NEW_REV" ] && [ -n "$(git diff --name-only "$OLD_REV" "$NEW_REV" -- label_service/Dockerfile label_service/requirements-docker.txt 2>/dev/null)" ]; then
+            echo "  依赖变了 → 重建镜像（冷缓存十几分钟）"
+            deploy_run bash label_service/up.sh $GPU_FLAG || FAILED+=("label_service 重建没成")
+        else
+            # -u：镜像不动，配置/环境变量变了就重建容器；-d 重启让挂载的新代码生效
+            { deploy_run bash label_service/up.sh $GPU_FLAG -u && deploy_run bash label_service/up.sh $GPU_FLAG -d; } \
+                || FAILED+=("label_service 重启没成")
+        fi
+    fi
+    if want vision; then
+        line "vision_service（端口 8385）"
+        deploy_run ./vision_service/run.sh down
+        deploy_run ./vision_service/run.sh -d || FAILED+=("vision_service 起不来（看 vision_service/.run.log）")
+    fi
+
+    line "都通了吗"
+    if want label; then
+        deploy_probe "label_service " "http://127.0.0.1:${LABEL_SERVICE_PORT:-8383}/health" 30 || FAILED+=("label_service 不通")
+    fi
+    if want vision; then
+        VB="http://127.0.0.1:${VISION_SERVICE_PORT:-8385}"
+        if deploy_probe "vision_service" "$VB/health" 60; then
+            if [ "${DRY_RUN:-0}" != "1" ]; then
+                echo "    狗检测   available=$(deploy_field "$VB/api/v1/dog/status" available)"
+                echo "    找片段   available=$(deploy_field "$VB/api/v1/seek/status" available)   （false = 环境变量没 key；用平台「大模型 API」页的 key 不看这个）"
+                echo "    向量索引 available=$(deploy_field "$VB/api/v1/embed/status" available)   indexed=$(deploy_field "$VB/api/v1/embed/status" indexed_videos)"
+                echo "    SAM      available=$(deploy_field "$VB/api/v1/sam/status" available)"
+            fi
+        else
+            FAILED+=("vision_service 不通")
+        fi
+    fi
+    echo
+    if [ ${#FAILED[@]} -eq 0 ]; then echo "=== imu_train 这台全部更新完成 ==="; exit 0; fi
+    echo "=== 有 ${#FAILED[@]} 项没成 ==="
+    for f in "${FAILED[@]}"; do echo "  - $f"; done
+    exit 1
+fi
 
 case "$SUB" in
     status)
