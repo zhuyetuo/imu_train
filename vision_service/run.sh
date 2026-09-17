@@ -73,9 +73,20 @@ ensure_deps() {
         fi
     fi
 
-    # ffmpeg：系统包，有它解码抽帧快好几倍（还能走 NVDEC）；没有退回 cv2，慢但能用
+    # ffmpeg：系统包，有它解码抽帧快好几倍（还能走 NVDEC）；没有退回 cv2，慢但能用。
+    # 是 apt 装的，要 sudo：能免密就直接装，不能就问一次密码（不想装就 --no-install）
     if ! command -v ffmpeg >/dev/null 2>&1; then
-        echo "ℹ 没装 ffmpeg，建索引/找片段的解码会退回 cv2（慢 3~5 倍）。装一下：sudo apt install ffmpeg"
+        if command -v apt-get >/dev/null 2>&1; then
+            echo "缺 ffmpeg（解码快 3~5 倍），用 apt 装一下（可能要输 sudo 密码）..."
+            if sudo -n true 2>/dev/null || [ -t 0 ]; then
+                sudo apt-get install -y ffmpeg && echo "ffmpeg 装好了" \
+                    || echo "⚠ ffmpeg 没装上，解码退回 cv2（慢）。手动：sudo apt-get install -y ffmpeg"
+            else
+                echo "⚠ 没有终端输不了 sudo 密码，跳过。手动装：sudo apt-get install -y ffmpeg"
+            fi
+        else
+            echo "ℹ 没装 ffmpeg，解码退回 cv2（慢 3~5 倍）。装一下：sudo apt install ffmpeg"
+        fi
     fi
 
     # torch / sam2：只提示，不动手
