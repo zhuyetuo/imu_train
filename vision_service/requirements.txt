@@ -24,3 +24,6 @@ httpx>=0.25
 # 画面向量索引（以图搜图 / 一句话搜）：SigLIP，只在本地跑。torch 同上不钉版本
 transformers>=4.44
 pillow>=10
+# SigLIP 的分词器要它（文本搜索那一半），没装的话整个模型加载失败
+sentencepiece>=0.1.99
+protobuf>=3.20
