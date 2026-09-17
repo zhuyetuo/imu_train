@@ -178,7 +178,8 @@ done
   → 相邻同类合并成片段，带类别/部位/置信度
 ```
 
-**大模型不在本地起，走 API。** 配 key：
+**用哪家、哪个模型、key，在平台「大模型 API」页配**（Claude / GPT / 豆包 / Gemini / 本地 vLLM），
+每次请求随 `llm` 字段带过来，这边不存 key。老方式（只配环境变量里的 Claude key）也还能用：
 
 ```bash
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> vision_service/.env    # 不进 git
@@ -194,7 +195,8 @@ curl -s localhost:8385/api/v1/seek/status                     # available 要是
 
 ```
 GET  /api/v1/seek/status
-POST /api/v1/seek   {path, labels:[{name, description, parts}], max_clips, dry_run, start_s, end_s, ...}
+POST /api/v1/llm/test  {llm:{provider, model, api_key, base_url}}   → {ok, latency_ms, reply, error}
+POST /api/v1/seek   {path, labels:[{name, description, parts}], llm?, max_clips, dry_run, start_s, end_s, ...}
                     → {segments:[{start_s, end_s, label, body_part, confidence, note}], windows, stats}
 ```
 
@@ -207,3 +209,15 @@ POST /api/v1/seek   {path, labels:[{name, description, parts}], max_clips, dry_r
 一小时 720p 视频的量级：本地筛选一两分钟（狗检测每秒一帧）；狗在场且在动的窗
 一般一两百个，默认 `max_clips=120` 封顶；每段 6 张 512px 图约 3000 token，
 Opus 5 一段不到 2 美分，一个视频最多一两美元。
+
+### 本地起模型（5090 32G 单卡）
+
+`provider=local` 就是一个 OpenAI 兼容口，vLLM / SGLang / Ollama 都行。建议 vLLM：
+
+```bash
+pip install vllm
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct-AWQ --port 8000 --max-model-len 8192 --gpu-memory-utilization 0.6
+```
+
+`--gpu-memory-utilization 0.6` 给 SAM/YOLO 留显存（它们在同一张卡上）。换模型就 Ctrl-C 重起一个，
+显存立刻释放；平台「大模型 API」页 local 那一行改成对应的模型名即可。

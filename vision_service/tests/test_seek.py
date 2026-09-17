@@ -21,8 +21,10 @@ import types
 import numpy as np
 import pytest
 
-from vision_service import dog, seek
+from vision_service import dog, llm as llmmod, seek
 from vision_service.seek import Label, Window
+
+CLAUDE = llmmod.LLM("anthropic", "m", "k", price_in=5.0, price_out=25.0)
 
 
 # ── 假视频 ────────────────────────────────────────────────────────────
@@ -217,7 +219,7 @@ class _FakeClient:
 
 def test_ask_把帧和文字都送了_并返回用量():
     c = _FakeClient(['{"label":"舔身体","body_part":"前肢爪","confidence":0.7,"note":"n"}'])
-    a = seek.ask([b"\xff\xd8a", b"\xff\xd8b"], LABELS, 6, client=c, model="m")
+    a = seek.ask([b"\xff\xd8a", b"\xff\xd8b"], LABELS, 6, CLAUDE, client=c)
     assert a["label"] == "舔身体" and a["usage"] == {"input": 1000, "output": 20}
     kw = c.calls[0]
     assert kw["model"] == "m"
@@ -264,7 +266,7 @@ def test_dry_run_不调模型_但给出会送多少段(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(30)])
     monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
     c = _FakeClient([])
-    r = seek.seek_video("x.mp4", LABELS, dry_run=True, client=c, motion_min=0.0)
+    r = seek.seek_video("x.mp4", LABELS, dry_run=True, llm=CLAUDE, client=c, motion_min=0.0)
     assert r["dry_run"] and r["segments"] == [] and c.calls == []
     assert r["stats"]["clips_candidate"] == len(r["windows"]) > 0
     assert r["stats"]["clips_sent"] == 0 and r["stats"]["usage"]["est_usd"] == 0
@@ -276,9 +278,8 @@ def test_整条_送去问_合成片段_并算花费(fake_video, monkeypatch):
     # 前三段说舔、其余 none；其中一段抛异常也不能让整条挂
     answers = ['{"label":"舔身体","body_part":"前肢爪","confidence":0.8}'] * 3 + [RuntimeError("boom")]
     c = _FakeClient(answers)
-    monkeypatch.setattr(seek.config, "SEEK_PRICE_PER_M", {"claude-opus-5": (5.0, 25.0)})
-    monkeypatch.setattr(seek.config, "SEEK_MODEL", "claude-opus-5")
-    r = seek.seek_video("x.mp4", LABELS, client=c, motion_min=0.0, concurrency=1, max_clips=50)
+    r = seek.seek_video("x.mp4", LABELS, llm=CLAUDE, client=c, motion_min=0.0, concurrency=1, max_clips=50)
+    assert r["stats"]["llm"] == {"provider": "anthropic", "model": "m"}
     assert not r["dry_run"]
     assert r["stats"]["clips_sent"] == len(c.calls) == len(r["windows"]) > 4
     assert r["stats"]["errors"] == 1 and r["stats"]["hits"] == 3
@@ -296,14 +297,22 @@ def test_没有窗时不问也不炸(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
     monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
     c = _FakeClient([])
-    r = seek.seek_video("x.mp4", LABELS, client=c)
+    r = seek.seek_video("x.mp4", LABELS, llm=CLAUDE, client=c)
     assert r["segments"] == [] and c.calls == [] and r["stats"]["with_dog"] == 0
+
+
+def test_没带_llm_也没环境变量_真跑要报错_dry_run不用(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
+    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    monkeypatch.setattr(seek.config, "ANTHROPIC_API_KEY", "")
+    with pytest.raises(RuntimeError, match="llm"):
+        seek.seek_video("x.mp4", LABELS)
+    assert seek.seek_video("x.mp4", LABELS, dry_run=True)["dry_run"] is True
 
 
 # ── 接口 ──────────────────────────────────────────────────────────────
 
 def test_status_没_key_如实说(monkeypatch):
-    monkeypatch.setattr(seek, "_client", None)
     monkeypatch.setitem(sys.modules, "anthropic", types.ModuleType("anthropic"))   # 装作 SDK 在
     monkeypatch.setattr(seek.config, "ANTHROPIC_API_KEY", "")
     monkeypatch.setattr(dog, "status", lambda: {"available": True})
@@ -331,4 +340,14 @@ def test_接口_狗检测不可用给503_dry_run不需要key(monkeypatch, tmp_pa
         assert r.status_code == 200 and r.json()["dry_run"] is True           # dry_run 不要 key
         r = tc.post("/api/v1/seek", json=body | {"dry_run": False})
         assert r.status_code == 503 and "ANTHROPIC_API_KEY" in r.json()["detail"]
+        # 请求里带了 llm 就不看环境变量；没 key 是 422；瞎写的提供方 422
+        got = {}
+        monkeypatch.setattr(seek, "seek_video", lambda *a, **kw: got.update(kw) or {"segments": [], "windows": [], "stats": {}, "dry_run": False})
+        llm = {"provider": "gemini", "model": "gemini-2.5-flash", "api_key": "g", "price_in": 0.3}
+        r = tc.post("/api/v1/seek", json=body | {"dry_run": False, "llm": llm})
+        assert r.status_code == 200 and got["llm"].provider == "gemini" and got["llm"].price_in == 0.3
+        r = tc.post("/api/v1/seek", json=body | {"dry_run": False, "llm": llm | {"api_key": ""}})
+        assert r.status_code == 422
+        r = tc.post("/api/v1/seek", json=body | {"llm": llm | {"provider": "baidu"}})
+        assert r.status_code == 422
         assert tc.post("/api/v1/seek", json=body | {"path": "../x.mp4"}).status_code == 422
