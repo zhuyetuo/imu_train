@@ -1,0 +1,334 @@
+"""
+画面找片段。
+
+要守住的：
+  1. 时间是 PTS 不是帧号（候选按时间跟 IMU 对，差几秒就对错动作）。
+  2. 门槛真的在控花费：没狗 / 不动 / 超过上限的窗不会送去问模型。
+  3. 模型答什么都不会炸：不在候选里的类别、部位乱填、非 JSON，一律当 none。
+  4. dry_run 一个 API 调用都不发。
+  5. 合并：相邻同类合一段，置信度取最大，部位取多数。
+
+视频用一个假的 VideoCapture 喂真的 numpy 帧，所以裁图、缩放、JPEG 编码走的是
+真 cv2；狗检测和大模型客户端换成桩。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import types
+
+import numpy as np
+import pytest
+
+from vision_service import dog, seek
+from vision_service.seek import Label, Window
+
+
+# ── 假视频 ────────────────────────────────────────────────────────────
+
+class _Cap:
+    """PTS 列表驱动；每帧是 720p，"狗"是左上角一块会动的亮方块。"""
+
+    def __init__(self, pts_ms, moving=None, w=1280, h=720):
+        self.pts = list(pts_ms)
+        self.i = -1
+        self.w, self.h = w, h
+        self.moving = moving if moving is not None else (lambda t: True)
+
+    def isOpened(self):
+        return True
+
+    def grab(self):
+        self.i += 1
+        return self.i < len(self.pts)
+
+    def get(self, _prop):
+        return self.pts[self.i]
+
+    def retrieve(self):
+        t = self.pts[self.i] / 1000.0
+        img = np.zeros((self.h, self.w, 3), dtype="uint8")
+        # 动的话方块位置随时间挪；不动就固定
+        dx = int(t * 20) % 80 if self.moving(t) else 0
+        img[100:200, 100 + dx:250 + dx] = 200
+        return True, img
+
+    def release(self):
+        pass
+
+
+@pytest.fixture()
+def fake_video(monkeypatch):
+    import cv2 as real_cv2
+
+    holder = {}
+
+    class _CV2Proxy(types.ModuleType):
+        def __getattr__(self, name):
+            return getattr(real_cv2, name)
+
+    proxy = _CV2Proxy("cv2")
+    proxy.VideoCapture = lambda p: holder["cap"]
+    monkeypatch.setitem(sys.modules, "cv2", proxy)
+    monkeypatch.setattr(dog, "_model", object())
+    monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    return holder
+
+
+def _dog_at(monkeypatch, has_dog):
+    """狗检测桩：has_dog(t_sec) 决定这一帧有没有狗。"""
+    def detect(frame, conf=0.35):
+        # 框就是那块亮方块所在的大概位置（归一化）
+        return [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] if has_dog(_dog_at.t) else []
+    monkeypatch.setattr(dog, "detect", detect)
+
+
+# ── crop_rect ─────────────────────────────────────────────────────────
+
+def test_crop_rect_留边_撑到最小边_贴边():
+    r = seek.crop_rect([{"bbox": [0.5, 0.5, 0.05, 0.05]}], 1000, 1000, margin=0.25, min_side=224)
+    x1, y1, x2, y2 = r
+    assert x2 - x1 >= 224 and y2 - y1 >= 224                  # 小狗撑到最小边
+    assert x1 < 500 < x2 and y1 < 500 < y2                    # 围着狗
+    r2 = seek.crop_rect([{"bbox": [0.0, 0.0, 0.05, 0.05]}], 1000, 1000)
+    assert r2[0] == 0 and r2[1] == 0                          # 贴边不越界
+    r3 = seek.crop_rect([{"bbox": [0.1, 0.1, 0.2, 0.2]}, {"bbox": [0.6, 0.6, 0.2, 0.2]}], 1000, 1000)
+    assert r3[0] <= 100 and r3[2] >= 800                      # 多只狗取并集
+
+
+# ── 采样 ──────────────────────────────────────────────────────────────
+
+def test_采样按_pts_每秒一张_有狗才裁图(fake_video, monkeypatch):
+    # PTS 不均匀：0.0 0.3 1.1 1.9 2.05 3.2 ... 按帧号算会错
+    pts = [0, 300, 1100, 1900, 2050, 3200, 4010, 5500]
+    fake_video["cap"] = _Cap(pts)
+    seen = []
+
+    def detect(frame, conf=0.35):
+        seen.append(len(seen))
+        return [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] if len(seen) != 3 else []
+    monkeypatch.setattr(dog, "detect", detect)
+
+    s = seek.sample_video("x.mp4", every_sec=1.0)
+    # 跨过采样点才取（1.1 之后下一个点是 ≥2.1，2.05 不取；3.2 之后 ≥4.2，4.01 不取），时间是 PTS
+    assert [r["t"] for r in s] == [0.0, 1.1, 3.2, 5.5]
+    assert s[2]["jpeg"] is None and s[2]["boxes"] == []             # 第三次检测没狗 → 不裁
+    assert all(r["jpeg"] is not None for i, r in enumerate(s) if i != 2)
+    assert s[0]["motion"] is None                                    # 第一张没得比
+    assert s[1]["motion"] is not None and s[1]["motion"] > 0         # 方块在动
+    assert s[3]["motion"] is None                                    # 前一张没狗，断掉重新比
+    import cv2
+    img = cv2.imdecode(np.frombuffer(s[0]["jpeg"], dtype="uint8"), cv2.IMREAD_COLOR)
+    assert max(img.shape[:2]) <= 512                                 # 缩到 max_side
+
+
+def test_采样_start_end_只取区间(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(20)])
+    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    s = seek.sample_video("x.mp4", every_sec=1.0, start_s=5, end_s=8)
+    assert [r["t"] for r in s] == [5.0, 6.0, 7.0, 8.0]
+
+
+# ── 选窗 ──────────────────────────────────────────────────────────────
+
+def _samples(n, dog_at=lambda t: True, motion=0.05):
+    out = []
+    for t in range(n):
+        has = dog_at(t)
+        out.append({"t": float(t), "boxes": [{}] if has else [],
+                    "jpeg": b"x" if has else None,
+                    "motion": (motion(t) if callable(motion) else motion) if has and t > 0 else None})
+    return out
+
+
+def test_选窗_没狗和不动的窗不送():
+    s = _samples(30, dog_at=lambda t: t < 12 or t >= 24, motion=lambda t: 0.05 if t < 12 else 0.001)
+    wins = seek.pick_windows(s, clip_s=6, stride_s=3, motion_min=0.02)
+    starts = [w.start for w in wins]
+    assert starts and all(st + 6 <= 12 + 1e-6 for st in starts), starts   # 12-24 没狗；24-30 不动
+    assert all(w.dog_frac >= 0.8 for w in wins)
+
+
+def test_选窗_上限按动作量取最强():
+    s = _samples(60, motion=lambda t: t / 60.0)
+    wins = seek.pick_windows(s, clip_s=6, stride_s=3, max_clips=3, motion_max=1.0)
+    assert len(wins) == 3
+    assert wins == sorted(wins, key=lambda w: w.start)              # 返回仍按时间排
+    assert min(w.motion for w in wins) > 0.7                         # 挑的是动作最大的几个
+
+
+def test_选窗_动得太厉害也不要():
+    s = _samples(30, motion=0.9)
+    assert seek.pick_windows(s, motion_max=0.5) == []
+
+
+def test_选窗_空输入():
+    assert seek.pick_windows([]) == []
+
+
+# ── 问模型：提示词与解析 ─────────────────────────────────────────────
+
+LABELS = [Label("舔身体", "用舌头舔自己", ["前肢爪", "后肢臀尾"]), Label("蹭身体", "在地上/墙上蹭")]
+
+
+def test_提示词包含类别_描述_部位():
+    system, user = seek.build_prompt(LABELS, 6, 6)
+    assert "none" in system
+    for s in ("舔身体", "用舌头舔自己", "前肢爪", "蹭身体", "输出格式", "label"):
+        assert s in user
+
+
+@pytest.mark.parametrize("text,label,part,conf", [
+    ('{"label":"舔身体","body_part":"前肢爪","confidence":0.8,"note":"x"}', "舔身体", "前肢爪", 0.8),
+    ('前面废话 {"label":"舔身体","body_part":"脑袋","confidence":"0.6"} 后面废话', "舔身体", None, 0.6),  # 部位不在表里
+    ('{"label":"蹭身体","body_part":"前肢爪","confidence":1.7}', "蹭身体", None, 1.0),   # 别的类别的部位不算；conf 截到 1
+    ('{"label":"抓挠","confidence":0.9}', None, None, 0.0),                               # 不在候选里
+    ('{"label":"none","confidence":0.9}', None, None, 0.0),
+    ('不是 json', None, None, 0.0),
+    ('{"label": 5}', None, None, 0.0),
+])
+def test_解析回答_一律不炸(text, label, part, conf):
+    a = seek.parse_answer(text, LABELS)
+    assert (a["label"], a["body_part"]) == (label, part)
+    assert a["confidence"] == pytest.approx(conf)
+
+
+class _FakeClient:
+    """照 anthropic SDK 的形状：client.messages.create(...) → 有 .content / .usage。"""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):
+                outer.calls.append(kw)
+                text = outer.answers.pop(0) if outer.answers else '{"label":"none"}'
+                if isinstance(text, Exception):
+                    raise text
+                blk = types.SimpleNamespace(type="text", text=text)
+                usage = types.SimpleNamespace(input_tokens=1000, output_tokens=20)
+                return types.SimpleNamespace(content=[blk], usage=usage)
+        self.messages = _Msgs()
+
+
+def test_ask_把帧和文字都送了_并返回用量():
+    c = _FakeClient(['{"label":"舔身体","body_part":"前肢爪","confidence":0.7,"note":"n"}'])
+    a = seek.ask([b"\xff\xd8a", b"\xff\xd8b"], LABELS, 6, client=c, model="m")
+    assert a["label"] == "舔身体" and a["usage"] == {"input": 1000, "output": 20}
+    kw = c.calls[0]
+    assert kw["model"] == "m"
+    content = kw["messages"][0]["content"]
+    assert [b["type"] for b in content] == ["image", "image", "text"]
+    assert content[0]["source"]["media_type"] == "image/jpeg"
+    assert "舔身体" in content[-1]["text"] and "舔身体" in kw["system"] or "none" in kw["system"]
+
+
+# ── 合并 ──────────────────────────────────────────────────────────────
+
+def _w(s, e):
+    return Window(start=s, end=e, motion=0.1, dog_frac=1.0)
+
+
+def test_合并_相邻同类合一段_置信取最大_部位取多数():
+    wins = [_w(0, 6), _w(3, 9), _w(6, 12), _w(30, 36), _w(33, 39)]
+    ans = [
+        {"label": "舔身体", "body_part": "前肢爪", "confidence": 0.6},
+        {"label": "舔身体", "body_part": "前肢爪", "confidence": 0.9},
+        {"label": "舔身体", "body_part": "后肢臀尾", "confidence": 0.7},
+        {"label": "蹭身体", "body_part": None, "confidence": 0.8},
+        {"label": None, "body_part": None, "confidence": 0.0},
+    ]
+    segs = seek.merge_segments(wins, ans, min_conf=0.5)
+    assert [(s["start_s"], s["end_s"], s["label"]) for s in segs] == [(0, 12, "舔身体"), (30, 36, "蹭身体")]
+    assert segs[0]["confidence"] == 0.9 and segs[0]["body_part"] == "前肢爪" and segs[0]["n_clips"] == 3
+    assert segs[1]["body_part"] is None
+    assert "_parts" not in segs[0]
+
+
+def test_合并_低置信和不同类不合():
+    wins = [_w(0, 6), _w(3, 9), _w(6, 12)]
+    ans = [{"label": "舔身体", "body_part": None, "confidence": 0.9},
+           {"label": "舔身体", "body_part": None, "confidence": 0.3},
+           {"label": "蹭身体", "body_part": None, "confidence": 0.9}]
+    segs = seek.merge_segments(wins, ans, min_conf=0.5)
+    assert [(s["start_s"], s["end_s"], s["label"]) for s in segs] == [(0, 6, "舔身体"), (6, 12, "蹭身体")]
+
+
+# ── 整条 ──────────────────────────────────────────────────────────────
+
+def test_dry_run_不调模型_但给出会送多少段(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(30)])
+    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
+    c = _FakeClient([])
+    r = seek.seek_video("x.mp4", LABELS, dry_run=True, client=c, motion_min=0.0)
+    assert r["dry_run"] and r["segments"] == [] and c.calls == []
+    assert r["stats"]["clips_candidate"] == len(r["windows"]) > 0
+    assert r["stats"]["clips_sent"] == 0 and r["stats"]["usage"]["est_usd"] == 0
+
+
+def test_整条_送去问_合成片段_并算花费(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(30)])
+    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
+    # 前三段说舔、其余 none；其中一段抛异常也不能让整条挂
+    answers = ['{"label":"舔身体","body_part":"前肢爪","confidence":0.8}'] * 3 + [RuntimeError("boom")]
+    c = _FakeClient(answers)
+    monkeypatch.setattr(seek.config, "SEEK_PRICE_PER_M", {"claude-opus-5": (5.0, 25.0)})
+    monkeypatch.setattr(seek.config, "SEEK_MODEL", "claude-opus-5")
+    r = seek.seek_video("x.mp4", LABELS, client=c, motion_min=0.0, concurrency=1, max_clips=50)
+    assert not r["dry_run"]
+    assert r["stats"]["clips_sent"] == len(c.calls) == len(r["windows"]) > 4
+    assert r["stats"]["errors"] == 1 and r["stats"]["hits"] == 3
+    assert r["segments"] and r["segments"][0]["label"] == "舔身体" and r["segments"][0]["body_part"] == "前肢爪"
+    n = r["stats"]["clips_sent"] - 1
+    assert r["stats"]["usage"] == {"input": 1000 * n, "output": 20 * n,
+                                   "est_usd": round(1000 * n / 1e6 * 5 + 20 * n / 1e6 * 25, 4)}
+    # 每段送的帧数不超过 n_frames，且都是 JPEG
+    for kw in c.calls:
+        imgs = [b for b in kw["messages"][0]["content"] if b["type"] == "image"]
+        assert 1 <= len(imgs) <= 6
+
+
+def test_没有窗时不问也不炸(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
+    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    c = _FakeClient([])
+    r = seek.seek_video("x.mp4", LABELS, client=c)
+    assert r["segments"] == [] and c.calls == [] and r["stats"]["with_dog"] == 0
+
+
+# ── 接口 ──────────────────────────────────────────────────────────────
+
+def test_status_没_key_如实说(monkeypatch):
+    monkeypatch.setattr(seek, "_client", None)
+    monkeypatch.setitem(sys.modules, "anthropic", types.ModuleType("anthropic"))   # 装作 SDK 在
+    monkeypatch.setattr(seek.config, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(dog, "status", lambda: {"available": True})
+    st = seek.status()
+    assert st["available"] is False and "ANTHROPIC_API_KEY" in (st["error"] or "")
+
+
+def test_接口_狗检测不可用给503_dry_run不需要key(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from vision_service import app as appmod
+
+    v = tmp_path / "a.mp4"
+    v.write_bytes(b"0")
+    monkeypatch.setattr(appmod.config, "VIDEO_ROOT", str(tmp_path))
+    body = {"path": "a.mp4", "labels": [{"name": "舔身体"}], "dry_run": True}
+    with TestClient(appmod.app) as tc:
+        monkeypatch.setattr(dog, "status", lambda: {"available": False, "error": "没装"})
+        assert tc.post("/api/v1/seek", json=body).status_code == 503
+
+        monkeypatch.setattr(dog, "status", lambda: {"available": True, "error": None})
+        monkeypatch.setattr(seek, "seek_video", lambda *a, **kw: {"segments": [], "windows": [], "stats": {}, "dry_run": kw["dry_run"]})
+        monkeypatch.setattr(seek, "status", lambda: {"available": False, "error": "没配 ANTHROPIC_API_KEY"})
+        r = tc.post("/api/v1/seek", json=body)
+        assert r.status_code == 200 and r.json()["dry_run"] is True           # dry_run 不要 key
+        r = tc.post("/api/v1/seek", json=body | {"dry_run": False})
+        assert r.status_code == 503 and "ANTHROPIC_API_KEY" in r.json()["detail"]
+        assert tc.post("/api/v1/seek", json=body | {"path": "../x.mp4"}).status_code == 422

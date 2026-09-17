@@ -177,6 +177,29 @@ def warmup() -> dict:
     return {"warm": True, "error": None}
 
 
+def detect(frame, conf: float = 0.35) -> list[dict]:
+    """一帧里的狗框，归一化 [x, y, w, h]。scan_video 和 seek（找片段）共用。
+
+    调用方保证模型已加载（先 _load()）。锁在这里拿：一张卡上并发只会买到
+    显存峰值翻倍。
+    """
+    with _lock:
+        res = _model.predict(frame, verbose=False, conf=conf,
+                             classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
+                             device=_device_used or "cpu")
+    h, w = frame.shape[:2]
+    boxes = []
+    for r in res:
+        for b in getattr(r, "boxes", []):
+            x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+            boxes.append({
+                "bbox": [round(x1 / w, 4), round(y1 / h, 4),
+                         round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
+                "conf": round(float(b.conf[0]), 3),
+            })
+    return boxes
+
+
 def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames: int = 1200) -> dict:
     """按时间采样跑狗检测。
 
@@ -215,20 +238,7 @@ def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames
             if not ok:
                 continue
             next_t = ms / 1000.0 + every_sec
-            with _lock:
-                res = _model.predict(frame, verbose=False, conf=conf,
-                                     classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
-                                     device=_device_used or "cpu")
-            h, w = frame.shape[:2]
-            boxes = []
-            for r in res:
-                for b in getattr(r, "boxes", []):
-                    x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
-                    boxes.append({
-                        "bbox": [round(x1 / w, 4), round(y1 / h, 4),
-                                 round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
-                        "conf": round(float(b.conf[0]), 3),
-                    })
+            boxes = detect(frame, conf)
             frames.append({"t": round(ms / 1000.0, 2), "n_dogs": len(boxes), "boxes": boxes})
     finally:
         cap.release()

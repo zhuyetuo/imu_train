@@ -10,6 +10,9 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   VIDEO_ROOT          采集视频的 NAS 挂载点（默认 /home/toky/ai_data），扫描路径相对它
   DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 yolo26x.pt，实测 nano 在夜里红外上漏 98%）
   VISION_LOG_DIR      日志目录（默认 vision_service/logs）
+  ANTHROPIC_API_KEY   「画面找片段」用的 Claude API key（不配 = 这一项关着，别的不受影响）
+  SEEK_MODEL          用哪个模型（默认 claude-opus-5）
+  SEEK_CONCURRENCY    同时问几段（默认 4）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
 /infer + 进程池排队，进程数按 CPU 核数配的。SAM 是长时 GPU 任务，混进去会让
@@ -72,3 +75,14 @@ VIDEO_ROOT     = _env("VIDEO_ROOT", "/home/toky/ai_data")
 # 本地没有就自己下。省显存想换小的话，**先拿夜里的素材重验一遍**再换。
 DOG_WEIGHTS    = _env("DOG_WEIGHTS", "yolo26x.pt")
 LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))
+
+# ── 画面找片段（视觉大模型走 API，不本地起） ────────────────────────────
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY", "")
+SEEK_MODEL        = _env("SEEK_MODEL", "claude-opus-5")
+SEEK_CONCURRENCY  = int(_env("SEEK_CONCURRENCY", "4"))
+# 估算花费用，$/百万 token（输入, 输出）。只是给人看个数量级，账以 Anthropic 后台为准
+SEEK_PRICE_PER_M  = {
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
