@@ -310,3 +310,15 @@ def test_下载进度_百分比和预计时间(monkeypatch):
     assert embed.download_progress()["finished"] is True and embed.download_progress()["eta_s"] == 0
     st = embed.status()
     assert st["progress"]["pct"] == 100.0
+
+
+def test_transformers_4和5的返回都能取到向量():
+    import types
+
+    class T:                       # 装作张量
+        def norm(self, **kw):
+            return 1
+    t = T()
+    assert embed._as_tensor(t) is t                                                     # 4.x：直接是张量
+    assert embed._as_tensor(types.SimpleNamespace(pooler_output=t, last_hidden_state=None)) is t   # 5.x
+    assert embed._as_tensor(types.SimpleNamespace(pooler_output=None, image_embeds=t)) is t
