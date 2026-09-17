@@ -181,8 +181,10 @@ def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
     """一批帧一起过模型（GPU 上一批 16~32 张比一张张送快好几倍）。返回每帧的框。"""
     if not frames:
         return []
+    # 半精度：5090 上 x 模型快近一倍，框的差别在小数点后。CPU 上 half 不支持，自动不用
+    half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
     with _lock:
-        res = _model.predict(list(frames), verbose=False, conf=conf,
+        res = _model.predict(list(frames), verbose=False, conf=conf, half=half,
                              classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
                              device=_device_used or "cpu")
     out = []

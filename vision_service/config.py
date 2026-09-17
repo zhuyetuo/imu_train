@@ -94,7 +94,7 @@ SEEK_PRICE_PER_M  = {
 # 下不动就先在能上网的机器上下好，EMBED_MODEL 指向本地目录
 EMBED_MODEL     = _env("EMBED_MODEL", "google/siglip-base-patch16-224")
 EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
-EMBED_BATCH     = int(_env("EMBED_BATCH", "32"))
+EMBED_BATCH     = int(_env("EMBED_BATCH", "128"))
 EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 
 # ── 解码 / 检测的速度开关 ─────────────────────────────────────────────
@@ -102,4 +102,9 @@ EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
 DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
 # 狗检测一批送几帧（GPU 上一批 16~32 比一张张送快好几倍；显存紧就调小）
-DETECT_BATCH    = int(_env("DETECT_BATCH", "16"))
+DETECT_BATCH    = int(_env("DETECT_BATCH", "32"))
+# 半精度推理（GPU 上快近一倍，框差别在小数点后）
+DETECT_HALF     = _env("DETECT_HALF", "1") not in ("0", "false", "False", "")
+# 画面没变（狗睡着 / 空房间）就不再送检测，直接沿用上一次的框：24 小时里大半时间是静止的。
+# 整帧缩到 64x36 灰度后的平均像素差（0~1），低于它算没变；0 = 关掉这个优化
+STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.008"))

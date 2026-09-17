@@ -20,6 +20,7 @@ SigLIP 图像编码器。SigLIP 同时有文本编码器，所以同一份索引
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -129,7 +130,9 @@ class Encoder:
             raise RuntimeError(_load_error or "编码器没加载")
         out = []
         bs = config.EMBED_BATCH
-        with _lock, torch.no_grad():
+        # 半精度：GPU 上快近一倍，向量差别在千分位以下。CPU 不用
+        ac = torch.autocast("cuda", dtype=torch.float16) if _device == "cuda" else contextlib.nullcontext()
+        with _lock, torch.no_grad(), ac:
             for i in range(0, len(jpegs), bs):
                 imgs = [Image.open(io.BytesIO(b)).convert("RGB") for b in jpegs[i:i + bs]]
                 inputs = _processor(images=imgs, return_tensors="pt").to(_device)
