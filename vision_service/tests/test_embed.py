@@ -71,6 +71,8 @@ def fake_video(monkeypatch):
     monkeypatch.setitem(sys.modules, "cv2", proxy)
     monkeypatch.setattr(dog, "_model", object())
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    # 静止跳检默认关掉：这些测试数"第几次检测"，跳检会让次数对不上；专门测跳检的用例自己打开
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.0)
     return holder
 
 

@@ -75,6 +75,8 @@ def fake_video(monkeypatch):
     monkeypatch.setitem(sys.modules, "cv2", proxy)
     monkeypatch.setattr(dog, "_model", object())
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    # 静止跳检默认关掉：这些测试数"第几次检测"，跳检会让次数对不上；专门测跳检的用例自己打开
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.0)
     return holder
 
 
@@ -401,6 +403,7 @@ def test_ffmpeg_抽帧_按时间编号_两种都不行退回cv2(monkeypatch, fak
 def test_sample_video_分批送检测(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
     monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.0)        # 只验分批
     sizes = []
 
     def detect_batch(frames, conf=0.35):
@@ -485,4 +488,5 @@ def test_静止跳检_狗那一小块动了也要送(fake_video, monkeypatch):
     monkeypatch.setattr(dog, "detect_batch", detect_batch)
     s = seek.sample_video("x.mp4", every_sec=1.0, batch=2)
     assert len(s) == 8
-    assert sum(sent) >= 6            # 0 秒那帧 + 3 秒起每帧都动 → 至少 6 帧送检；只有 1、2 秒可跳
+    # 0 秒送检；1、2 秒跟 0 秒一样 → 跳；3 秒起每秒都跟上一帧不同 → 每帧都送。至少 6 帧
+    assert sum(sent) >= 6

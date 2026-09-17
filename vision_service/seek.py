@@ -233,6 +233,10 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                 region = cv2.resize(g[y1:y2, x1:x2], (64, 64))
         return whole, region
 
+    def _pending_boxes_hint(boxes):
+        # 参照帧还没送检测时不知道它的框，用上一次检测的框当区域；没有就整帧比
+        return boxes
+
     def unchanged(key_now, key_last) -> bool:
         if motion_score(key_last[0], key_now[0]) >= skip_thr:
             return False
@@ -272,13 +276,22 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             finish(t, frame, boxes)
 
     pending: list[tuple[float, object]] = []
+    # 参照帧 = 最近一个"决定要送检测"的帧（可能还在 pending 里没送）。跟它比没变就沿用它的框；
+    # 它还没送的话先把这批送掉（批偶尔小一点，换来静止时段几乎不送检测）
+    ref_key = None
     for t, frame in iter_frames(path, every_sec, start_s, end_s):
-        if skip_thr > 0 and last_key is not None and not pending:
-            k = frame_key(frame, last_boxes)
-            if unchanged(k, last_key):
+        if skip_thr > 0 and ref_key is not None:
+            k = frame_key(frame, last_boxes if not pending else _pending_boxes_hint(last_boxes))
+            if unchanged(k, ref_key):
+                if pending:
+                    flush(pending)
+                    pending = []
                 stats["skipped"] += 1
                 finish(t, frame, list(last_boxes))      # 画面没变，框也没变
                 continue
+            ref_key = k
+        else:
+            ref_key = frame_key(frame, last_boxes)
         pending.append((t, frame))
         if len(pending) >= batch:
             flush(pending)
