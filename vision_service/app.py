@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, dog, llm as llmmod, sam, seek
+from . import config, dog, embed, llm as llmmod, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -233,6 +233,91 @@ def seek_run(body: SeekIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"找片段失败: {type(e).__name__}: {e}") from e
+
+
+# ── 画面向量索引 ──────────────────────────────────────────────────────
+
+class EmbedBuildIn(BaseModel):
+    path: str = Field(..., description="相对 VIDEO_ROOT 的视频路径")
+    every_sec: float = Field(1.0, ge=0.5, le=5.0)
+    force: bool = False
+    conf: float = Field(0.35, ge=0.05, le=0.95)
+
+
+class EmbedIndexedIn(BaseModel):
+    paths: list[str] = Field(..., max_length=5000)
+
+
+class EmbedRef(BaseModel):
+    path: str
+    t: float = Field(..., ge=0)
+
+
+class EmbedSearchIn(BaseModel):
+    """text 和 ref 二选一：一句英文，或"某视频第几秒那一帧"。"""
+    text: str | None = Field(None, max_length=300)
+    ref: EmbedRef | None = None
+    paths: list[str] = Field(..., min_length=1, max_length=5000, description="在哪些视频的索引里找")
+    top_k: int = Field(50, ge=1, le=2000)
+    min_score: float = Field(0.0, ge=-1, le=1)
+    gap_s: float = Field(3.0, ge=0, le=60)
+    exclude_self_s: float = Field(10.0, ge=0, le=600, description="以图搜图时把样例前后这么多秒排掉")
+
+
+def _embed_ready():
+    st = embed.status()
+    if not st["available"]:
+        raise HTTPException(503, st["error"] or "画面向量模型不可用")
+    if not dog.status()["available"]:
+        raise HTTPException(503, dog.status()["error"] or "画面狗检测不可用")
+
+
+@app.get("/api/v1/embed/status")
+def embed_status():
+    return embed.status()
+
+
+@app.post("/api/v1/embed/build")
+def embed_build(body: EmbedBuildIn):
+    """给一路视频建索引。一小时视频：狗检测每秒一帧一两分钟，编码几十秒。调用方当后台任务。"""
+    full = _resolve_under(config.VIDEO_ROOT, body.path)
+    _embed_ready()
+    try:
+        return embed.build(body.path, full, every_sec=body.every_sec, force=body.force, conf=body.conf)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"建索引失败: {type(e).__name__}: {e}") from e
+
+
+@app.post("/api/v1/embed/indexed")
+def embed_indexed(body: EmbedIndexedIn):
+    """这些视频哪些已经有索引。"""
+    return {p: embed.has_index(p) for p in body.paths}
+
+
+@app.post("/api/v1/embed/search")
+def embed_search(body: EmbedSearchIn):
+    if (body.text is None) == (body.ref is None):
+        raise HTTPException(422, "text 和 ref 要且只要给一个")
+    _embed_ready()
+    try:
+        if body.ref is not None:
+            full = _resolve_under(config.VIDEO_ROOT, body.ref.path)
+            q = embed.frame_query(full, body.ref.t)
+            exclude = (body.ref.path, body.ref.t - body.exclude_self_s, body.ref.t + body.exclude_self_s)
+            r = embed.search(q["vec"], body.paths, top_k=body.top_k, min_score=body.min_score,
+                             gap_s=body.gap_s, exclude=exclude)
+            r["query"] = {"kind": "frame", "has_dog": q["has_dog"], "t": q["t"]}
+        else:
+            r = embed.search(embed.text_query(body.text), body.paths, top_k=body.top_k,
+                             min_score=body.min_score, gap_s=body.gap_s)
+            r["query"] = {"kind": "text", "text": body.text}
+        return r
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"搜索失败: {type(e).__name__}: {e}") from e
 
 
 class LlmTestIn(BaseModel):

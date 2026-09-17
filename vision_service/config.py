@@ -13,6 +13,8 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   ANTHROPIC_API_KEY   「画面找片段」用的 Claude API key（不配 = 这一项关着，别的不受影响）
   SEEK_MODEL          用哪个模型（默认 claude-opus-5）
   SEEK_CONCURRENCY    同时问几段（默认 4）
+  EMBED_MODEL         画面向量索引用的模型（默认 google/siglip-base-patch16-224）
+  EMBED_INDEX_DIR     索引文件放哪（默认 vision_service/index，每个视频一个 npz）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
 /infer + 进程池排队，进程数按 CPU 核数配的。SAM 是长时 GPU 任务，混进去会让
@@ -86,3 +88,11 @@ SEEK_PRICE_PER_M  = {
     "claude-sonnet-5": (2.0, 10.0),
     "claude-haiku-4-5": (1.0, 5.0),
 }
+
+# ── 画面向量索引（以图搜图 / 一句话搜）──────────────────────────────────
+# SigLIP：图像和文本同一个向量空间，一份索引两种查法。权重约 400MB，HF 自动下；
+# 下不动就先在能上网的机器上下好，EMBED_MODEL 指向本地目录
+EMBED_MODEL     = _env("EMBED_MODEL", "google/siglip-base-patch16-224")
+EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
+EMBED_BATCH     = int(_env("EMBED_BATCH", "32"))
+EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))

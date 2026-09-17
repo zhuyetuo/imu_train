@@ -21,3 +21,6 @@ ultralytics>=8.3
 anthropic>=0.40
 # OpenAI / 豆包 / Gemini 走 REST，只要 httpx
 httpx>=0.25
+# 画面向量索引（以图搜图 / 一句话搜）：SigLIP，只在本地跑。torch 同上不钉版本
+transformers>=4.44
+pillow>=10
