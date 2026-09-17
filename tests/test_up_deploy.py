@@ -28,6 +28,7 @@ def test_两个服务都更新_顺序对_子模块跟着():
     assert c[:2] == ["git pull --ff-only", "git submodule update --init --recursive"]
     assert "bash label_service/up.sh -u" in c and "bash label_service/up.sh -d" in c
     assert "./vision_service/run.sh down" in c and "./vision_service/run.sh -d" in c
+    assert c.index("./vision_service/get_weights.sh") < c.index("./vision_service/run.sh down")   # 先下权重再起
     assert c.index("bash label_service/up.sh -d") < c.index("./vision_service/run.sh -d")
     assert "全部更新完成" in out
 

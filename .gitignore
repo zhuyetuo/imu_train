@@ -278,3 +278,5 @@ vision_service/.run.log
 vision_service/.env
 # 画面向量索引（每个视频几 MB，本机生成）
 vision_service/index/
+# 视觉模型权重（SigLIP 等，get_weights.sh 下的，几百 MB）
+models/vision/
