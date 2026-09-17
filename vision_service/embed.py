@@ -36,6 +36,7 @@ _processor = None
 _load_error: str | None = None
 _lock = threading.RLock()
 _device: str | None = None
+_loading = False
 
 # 已加载的索引：rel_path -> (mtime, dict)。查一次要读好几十个 npz，缓存住
 _cache: dict[str, tuple[float, dict]] = {}
@@ -44,28 +45,37 @@ _cache: dict[str, tuple[float, dict]] = {}
 # ── 编码器 ────────────────────────────────────────────────────────────
 
 def _load(force: bool = False) -> None:
-    global _model, _processor, _load_error, _device
+    global _model, _processor, _load_error, _device, _loading
     if _model is not None or (_load_error is not None and not force):
         return
     with _lock:
         if _model is not None:
             return
+        _loading = True
         try:
-            import torch
-            from transformers import AutoModel, AutoProcessor
-        except ImportError as e:
-            _load_error = f"没装 transformers/torch：{e}（pip install transformers）"
-            return
-        try:
-            _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
-            m = AutoModel.from_pretrained(config.EMBED_MODEL)
-            want = config.EMBED_DEVICE
-            _device = "cuda" if (want == "cuda" and torch.cuda.is_available()) else "cpu"
-            _model = m.to(_device).eval()
-            _load_error = None
-        except Exception as e:  # noqa: BLE001 权重下不动/版本不对，都要报出来
-            _load_error = (f"加载 {config.EMBED_MODEL} 失败：{type(e).__name__}: {e}"
-                           f"（这台机器下不动权重的话，先在能上网的机器上下好放到 HF 缓存目录，或设 EMBED_MODEL 指向本地路径）")
+            _do_load()
+        finally:
+            _loading = False
+
+
+def _do_load() -> None:
+    global _model, _processor, _load_error, _device
+    try:
+        import torch
+        from transformers import AutoModel, AutoProcessor
+    except ImportError as e:
+        _load_error = f"没装 transformers/torch：{e}（pip install transformers）"
+        return
+    try:
+        _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
+        m = AutoModel.from_pretrained(config.EMBED_MODEL)
+        want = config.EMBED_DEVICE
+        _device = "cuda" if (want == "cuda" and torch.cuda.is_available()) else "cpu"
+        _model = m.to(_device).eval()
+        _load_error = None
+    except Exception as e:  # noqa: BLE001 权重下不动/版本不对，都要报出来
+        _load_error = (f"加载 {config.EMBED_MODEL} 失败：{type(e).__name__}: {e}"
+                       f"（这台机器下不动权重的话，先在能上网的机器上下好放到 HF 缓存目录，或设 EMBED_MODEL 指向本地路径）")
 
 
 class Encoder:
@@ -108,15 +118,25 @@ class Encoder:
 _default_encoder = Encoder()
 
 
+def warmup() -> dict:
+    """启动时后台加载（跟 SAM/狗检测一样），别让第一个建索引的人替所有人等。"""
+    _load(force=True)
+    return {"warm": _model is not None, "error": _load_error}
+
+
 def status() -> dict:
-    _load()
+    """**不触发加载**：加载 SigLIP 要十几秒，status 是给探活用的，得秒回。
+    loading=True 表示后台还在加，过一会儿再看。"""
     n = 0
     try:
         n = sum(1 for f in os.listdir(config.EMBED_INDEX_DIR) if f.endswith(".npz"))
     except OSError:
         pass
-    return {"available": _model is not None, "error": _load_error, "model": config.EMBED_MODEL,
-            "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR}
+    err = _load_error
+    if _model is None and err is None and not _loading:
+        err = "模型还没加载（启动预热关了或还没轮到），建索引时会加载"
+    return {"available": _model is not None, "loading": _loading, "error": err if _model is None else None,
+            "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR}
 
 
 # ── 索引文件 ──────────────────────────────────────────────────────────

@@ -238,10 +238,14 @@ def test_文本查询走文本编码器(index_dir):
 
 # ── 状态 / 接口 ───────────────────────────────────────────────────────
 
-def test_status_没装_transformers_如实说(monkeypatch, index_dir):
+def test_status_不触发加载_预热后如实说没装(monkeypatch, index_dir):
     monkeypatch.setattr(embed, "_model", None)
     monkeypatch.setattr(embed, "_load_error", None)
     monkeypatch.setitem(sys.modules, "transformers", None)
+    st = embed.status()                       # 没预热：不加载，只说还没加载
+    assert st["available"] is False and st["loading"] is False and "还没加载" in st["error"]
+    w = embed.warmup()                        # 预热才真去加载
+    assert w["warm"] is False and "transformers" in w["error"]
     st = embed.status()
     assert st["available"] is False and "transformers" in st["error"] and st["indexed_videos"] == 0
 
