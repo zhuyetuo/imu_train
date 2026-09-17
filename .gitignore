@@ -276,3 +276,5 @@ vision_service/.run.log
 
 # vision_service 本机私有配置（API key）
 vision_service/.env
+# 画面向量索引（每个视频几 MB，本机生成）
+vision_service/index/

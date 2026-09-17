@@ -221,3 +221,30 @@ vllm serve Qwen/Qwen2.5-VL-7B-Instruct-AWQ --port 8000 --max-model-len 8192 --gp
 
 `--gpu-memory-utilization 0.6` 给 SAM/YOLO 留显存（它们在同一张卡上）。换模型就 Ctrl-C 重起一个，
 显存立刻释放；平台「大模型 API」页 local 那一行改成对应的模型名即可。
+
+## 画面向量索引：以图搜图 / 一句话搜（免费、瞬间）
+
+跟找片段互补：找片段每个窗都要问一次大模型，贵；索引建一次，之后任何新问题都是向量比对。
+**先框狗再算向量**（整帧算出来的是房间不是狗），每秒一帧过 SigLIP，每个视频一个 npz
+放 `vision_service/index/`（一小时约 5MB）。模型只在本地跑。
+
+```bash
+pip install transformers pillow          # run.sh 会自动装；torch 同上自己装
+curl -s localhost:8385/api/v1/embed/status   # available / model / indexed_videos
+```
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `EMBED_MODEL` | `google/siglip-base-patch16-224` | HF 自动下（约 400MB）；下不动就指向本地目录 |
+| `EMBED_INDEX_DIR` | `vision_service/index` | 索引文件放哪 |
+| `EMBED_DEVICE` | 跟 `SAM_DEVICE` | 没卡退回 cpu |
+
+```
+POST /api/v1/embed/build    {path, every_sec, force}     → {n, cached, seconds}
+POST /api/v1/embed/indexed  {paths}                      → {path: bool}
+POST /api/v1/embed/search   {text | ref:{path,t}, paths, top_k, min_score, gap_s, exclude_self_s}
+                            → {hits:[{path,t,score}], segments:[{path,start_s,end_s,score,n}], missing}
+```
+
+平台那边：项目页「建画面索引」→ 工作台「疑似片段」里「找相似」（当前帧或一句英文）→
+候选 reason=similar。
