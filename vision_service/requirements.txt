@@ -16,3 +16,6 @@ opencv-python-headless>=4.8
 # YOLO26 是 2026 年的那一代（ultralytics 仓库上确认过），太旧的 ultralytics
 # 解析不出 yolo26n.pt 这个名字——报错里会提示 pip install -U ultralytics。
 ultralytics>=8.3
+# 「画面找片段」：抽帧问 Claude（视觉大模型走 API，不本地起模型）。没装/没配 key 时
+# /api/v1/seek/status 如实说不可用，别的功能不受影响。
+anthropic>=0.40

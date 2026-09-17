@@ -273,3 +273,6 @@ vision_service/logs/
 # vision_service 后台模式的运行时文件
 vision_service/.run.pid
 vision_service/.run.log
+
+# vision_service 本机私有配置（API key）
+vision_service/.env

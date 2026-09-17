@@ -17,6 +17,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 本机私有配置（API key 之类）放 vision_service/.env，一行一个 KEY=VALUE，不进 git。
+# 「画面找片段」要 ANTHROPIC_API_KEY，写在这里就不用每次起服务都 export 一遍。
+if [ -f vision_service/.env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . vision_service/.env
+    set +a
+fi
+
 export VISION_SERVICE_PORT="${VISION_SERVICE_PORT:-8385}"
 export MATERIAL_ROOT="${MATERIAL_ROOT:-/home/toky/alg_material}"
 
@@ -45,7 +54,7 @@ ensure_deps() {
     local missing=()
     # 左边是 import 名，右边是给人看的说明。只列 requirements.txt 里有的——
     # torch/sam2 不在这儿，它们走下面那段只提示不安装
-    for pair in "fastapi:fastapi" "uvicorn:uvicorn" "numpy:numpy" "cv2:opencv-python-headless" "ultralytics:ultralytics"; do
+    for pair in "fastapi:fastapi" "uvicorn:uvicorn" "numpy:numpy" "cv2:opencv-python-headless" "ultralytics:ultralytics" "anthropic:anthropic"; do
         local mod="${pair%%:*}"
         "$PY_BIN" -c "import ${mod}" >/dev/null 2>&1 || missing+=("${pair##*:}")
     done

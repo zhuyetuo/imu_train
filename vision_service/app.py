@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, dog, sam
+from . import config, dog, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -157,6 +157,63 @@ def dog_scan(body: DogScanIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"扫描失败: {type(e).__name__}: {e}") from e
+
+
+class SeekLabelIn(BaseModel):
+    name: str = Field(..., max_length=50)
+    description: str = Field("", max_length=300)
+    parts: list[str] = Field(default_factory=list, max_length=12)
+
+
+class SeekIn(BaseModel):
+    path: str = Field(..., description="相对 VIDEO_ROOT 的视频路径")
+    labels: list[SeekLabelIn] = Field(..., min_length=1, max_length=12)
+    every_sec: float = Field(1.0, ge=0.5, le=5.0)
+    clip_s: float = Field(6.0, ge=2.0, le=20.0)
+    stride_s: float = Field(3.0, ge=1.0, le=20.0)
+    n_frames: int = Field(6, ge=2, le=12)
+    max_clips: int = Field(120, ge=1, le=2000, description="一个视频最多送多少段去问模型（控花费）")
+    min_dog_frac: float = Field(0.8, ge=0.0, le=1.0)
+    motion_min: float = Field(0.02, ge=0.0, le=1.0)
+    motion_max: float = Field(1.0, ge=0.0, le=1.0)
+    min_conf: float = Field(0.5, ge=0.0, le=1.0)
+    start_s: float = Field(0.0, ge=0.0)
+    end_s: float | None = Field(None, ge=0.0)
+    conf: float = Field(0.35, ge=0.05, le=0.95, description="狗检测阈值")
+    dry_run: bool = Field(False, description="只做本地筛选、不调 API，看会送多少段")
+
+
+@app.get("/api/v1/seek/status")
+def seek_status():
+    return seek.status()
+
+
+@app.post("/api/v1/seek")
+def seek_run(body: SeekIn):
+    """用画面找片段：本地筛出"有狗且在动"的几秒窗，抽帧问视觉大模型，返回像的片段。
+
+    一小时视频：本地筛选一两分钟（狗检测每秒一帧），然后按 max_clips 送去问，
+    每段一两秒、几段并行——调用方要当后台任务。dry_run 不花钱，先看送多少段。
+    """
+    full = _resolve_under(config.VIDEO_ROOT, body.path)
+    if not dog.status()["available"]:
+        raise HTTPException(503, dog.status()["error"] or "画面狗检测不可用")
+    if not body.dry_run:
+        st = seek.status()
+        if not st["available"]:
+            raise HTTPException(503, st["error"] or "视觉大模型不可用")
+    labels = [seek.Label(name=l.name, description=l.description, parts=l.parts) for l in body.labels]
+    try:
+        return seek.seek_video(
+            full, labels, every_sec=body.every_sec, clip_s=body.clip_s, stride_s=body.stride_s,
+            n_frames=body.n_frames, max_clips=body.max_clips, min_dog_frac=body.min_dog_frac,
+            motion_min=body.motion_min, motion_max=body.motion_max, min_conf=body.min_conf,
+            start_s=body.start_s, end_s=body.end_s, dry_run=body.dry_run, conf=body.conf,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"找片段失败: {type(e).__name__}: {e}") from e
 
 
 def main():

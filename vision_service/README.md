@@ -164,3 +164,46 @@ done
 
 判据：只要出现「小的说 no_dog/mostly_empty、大的说 has_dog」，就是小的不够。
 反过来不要紧（误报，人点进去看一眼就排掉）。
+
+
+## 画面找片段（视觉大模型走 API）
+
+每加一个新类别（舔、啃、蹭……）都得有人从 24 小时视频里翻片段。这里让模型来翻：
+一句话描述要的行为，把视频里像的那几秒挑出来，平台按视频时间写成候选，人只看这几段。
+
+```
+画面里有狗 + 狗在动（YOLO 框 + 帧差）      本地，不花钱，把空镜和睡觉筛掉
+  → 切成 6 秒一窗，裁出狗那一块             720p 俯拍狗只占 100x50 像素，不裁模型看不清
+  → 每窗抽 6 帧问 Claude（API）             按段计费，max_clips 封顶
+  → 相邻同类合并成片段，带类别/部位/置信度
+```
+
+**大模型不在本地起，走 API。** 配 key：
+
+```bash
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> vision_service/.env    # 不进 git
+./vision_service/run.sh down && ./vision_service/run.sh -d
+curl -s localhost:8385/api/v1/seek/status                     # available 要是 true
+```
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | 空 | 不配 = 这一项关着，别的不受影响 |
+| `SEEK_MODEL` | `claude-opus-5` | 想省钱可换 `claude-sonnet-5` |
+| `SEEK_CONCURRENCY` | `4` | 同时问几段 |
+
+```
+GET  /api/v1/seek/status
+POST /api/v1/seek   {path, labels:[{name, description, parts}], max_clips, dry_run, start_s, end_s, ...}
+                    → {segments:[{start_s, end_s, label, body_part, confidence, note}], windows, stats}
+```
+
+`dry_run=true` 只做本地筛选、不调 API，`stats.clips_candidate` 就是会送多少段。
+`stats.usage.est_usd` 是按 token 数估的花费，数量级用，账以 Anthropic 后台为准。
+
+平台那边：项目行「画面找片段」按钮，先「预览」看会送多少段，再真跑；结果进「疑似片段」
+（reason=vision），确认走跟疑似抓挠一样的通道。时间对齐靠"视频 0 秒 = IMU CSV 第一行"。
+
+一小时 720p 视频的量级：本地筛选一两分钟（狗检测每秒一帧）；狗在场且在动的窗
+一般一两百个，默认 `max_clips=120` 封顶；每段 6 张 512px 图约 3000 token，
+Opus 5 一段不到 2 美分，一个视频最多一两美元。
