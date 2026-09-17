@@ -73,6 +73,11 @@ ensure_deps() {
         fi
     fi
 
+    # ffmpeg：系统包，有它解码抽帧快好几倍（还能走 NVDEC）；没有退回 cv2，慢但能用
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        echo "ℹ 没装 ffmpeg，建索引/找片段的解码会退回 cv2（慢 3~5 倍）。装一下：sudo apt install ffmpeg"
+    fi
+
     # torch / sam2：只提示，不动手
     if ! "$PY_BIN" -c "import torch" >/dev/null 2>&1; then
         echo "ℹ 没装 torch。SAM 和画面狗检测都要它，但**这里不自动装**——"
