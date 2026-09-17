@@ -124,7 +124,11 @@ class WindowOut(BaseModel):
 
 
 class Candidate(Segment):
-    reason: str   # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判
+    reason: str   # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判 / grooming=姿态像舔啃
+    # 这条候选是哪个类别的。不给 = 抓挠（老调用方的约定）；疑似舔/啃候选给「舔身体」，
+    # 平台按它去找标签、按它显示，确认时人还能改成别的（比如「啃身体」或带部位的标签）
+    label: str | None = None
+    tilt_deg: float | None = None   # grooming 才有：头偏离平时姿态多少度
 
 
 class InferResponse(BaseModel):
@@ -199,6 +203,7 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
     envelope = result.pop("envelope", None)
+    grooming_cands = result.pop("grooming", None) or []
     result["candidates"] = []
     # 掉数据的时间段（六轴全 0 / MISSING）。这些窗口模型照样会给一个类别，但那
     # 是凭空来的：既不该算进有效佩戴，也不该进训练集，更不能变成一段"睡觉"。
@@ -232,6 +237,18 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
             for lab in config.STABLE_EVENT_LABELS:
                 postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)
             postprocess.refine_boundaries(result["candidates"], envelope, params)
+        # 疑似舔/啃：加在边界微调**之后**——那一步是拿陀螺仪能量把抓挠边界对齐的，
+        # 对姿态类候选没意义。跟抓挠（正式片段 + 疑似抓挠）重叠的去掉：抓挠时
+        # 头也会歪过去，姿态判据会把它当成理毛，而那段已经有人在看了
+        if grooming_cands:
+            from label_service import grooming as _grooming
+            taken = list(result["segments"].get(config.STABLE_EVENT_LABELS[0]) or []) + list(result["candidates"])
+            gc = _grooming.drop_overlapping(grooming_cands, taken)
+            if len(gc) > config.GROOM_MAX:
+                log.info("疑似舔/啃候选 %d 条，只保留分最高的 %d 条（%s）",
+                         len(gc), config.GROOM_MAX, os.path.basename(full_path))
+                gc = gc[: config.GROOM_MAX]
+            result["candidates"] = result["candidates"] + gc
     if holes:
         result["segments"] = {k: postprocess.drop_missing(v, holes) for k, v in result["segments"].items()}
         result["candidates"] = postprocess.drop_missing(result["candidates"], holes)

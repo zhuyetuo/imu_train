@@ -10,6 +10,7 @@ worker 里跑的 _infer_one 跟单进程版一模一样：让 infer_file 在临�
 """
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -21,6 +22,9 @@ from label_service import config
 
 _bundle: dict = {}
 
+
+
+log = logging.getLogger(__name__)
 
 def _memoize_load_csv() -> None:
     """
@@ -200,7 +204,26 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
             segments[label] = data["scratch_segments"]
             windows, n_windows = data["windows"], data["n_windows"]  # 各类别文件里这两项相同
     envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"], device_hz) if windows else None
-    return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope}
+    # 疑似舔/啃候选：只看加速度姿态，跟模型无关，但要读同一份 CSV（load_csv 在 worker
+    # 里 memoize 过，不会再读一次盘）。挖不出来就空，绝不能让它把推理整个拖垮
+    grooming: list[dict] = []
+    if config.GROOM_ENABLED and windows:
+        try:
+            from label_service import grooming as _grooming
+            grooming = _grooming.mine_file(full_path, float(device_hz or config.DEVICE_HZ), _groom_params())
+        except Exception:  # noqa: BLE001 候选是锦上添花，出错只记日志
+            log.exception("疑似舔/啃候选挖掘失败 %s", full_path)
+    return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope,
+            "grooming": grooming}
+
+
+def _groom_params():
+    from label_service import grooming as _grooming
+    return _grooming.GroomParams(
+        tilt_min_deg=config.GROOM_TILT_MIN_DEG, motion_min=config.GROOM_MOTION_MIN,
+        motion_max=config.GROOM_MOTION_MAX, min_s=config.GROOM_MIN_S, gap_s=config.GROOM_GAP_S,
+        label=config.GROOM_LABEL,
+    )
 
 
 def create_pool(model_path: str) -> ProcessPoolExecutor:
