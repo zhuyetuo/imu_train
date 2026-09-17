@@ -27,6 +27,10 @@ if [ -f vision_service/.env ]; then
 fi
 
 export VISION_SERVICE_PORT="${VISION_SERVICE_PORT:-8385}"
+# 权重从 HuggingFace 下。国内直连 huggingface.co 经常卡住不动（不报错、也没速度），
+# 默认走 hf-mirror.com 镜像；能直连的机器在 vision_service/.env 里写 HF_ENDPOINT=https://huggingface.co
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 export MATERIAL_ROOT="${MATERIAL_ROOT:-/home/toky/alg_material}"
 
 PID_FILE="vision_service/.run.pid"
