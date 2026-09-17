@@ -88,26 +88,76 @@ def motion_score(prev_gray, cur_gray) -> float:
     return float(d.mean() / 255.0)
 
 
-def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
-                 start_s: float = 0.0, end_s: float | None = None,
-                 max_side: int = 512, jpeg_quality: int = 80, max_samples: int = 20000) -> list[dict]:
-    """顺序过一遍视频，每 every_sec 取一帧：跑狗检测，有狗就裁出来存成 JPEG。
-
-    返回 [{t, boxes, jpeg(bytes|None), motion(float|None)}]。motion 是跟上一个
-    有狗采样点比的帧差（狗那块区域，缩到 64x64 再比，跟裁框位置无关）。
-    """
+def _video_size(path: str) -> tuple[int, int]:
     import cv2
+
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"打不开这个视频：{path}")
+        return int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+
+
+def ffmpeg_available() -> bool:
+    import shutil
+
+    return config.DECODE_FFMPEG and shutil.which("ffmpeg") is not None
+
+
+def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None,
+                       hwaccel: bool = True):
+    """用 ffmpeg 解码、按时间抽帧，yield (t, BGR ndarray)。
+
+    比 cv2 逐帧 grab 快好几倍：ffmpeg 多线程解码，有卡时还能走 NVDEC。fps 滤镜是按 PTS
+    重采样的，VFR 也对得上（每一帧就是离 t=k·every_sec 最近的那一帧，误差 ≤ 半个间隔）。
+    """
+    import subprocess
+
     import numpy as np
+
+    w, h = _video_size(path)
+    if not w or not h:
+        raise ValueError(f"读不到分辨率：{path}")
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+    if hwaccel:
+        cmd += ["-hwaccel", "cuda"]
+    if start_s > 0:
+        cmd += ["-ss", f"{start_s:.3f}"]
+    cmd += ["-i", path]
+    if end_s is not None:
+        cmd += ["-t", f"{max(0.0, end_s - start_s):.3f}"]
+    cmd += ["-vf", f"fps=1/{every_sec}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
+    n = 0
+    try:
+        while True:
+            buf = proc.stdout.read(w * h * 3)
+            if len(buf) < w * h * 3:
+                break
+            frame = np.frombuffer(buf, dtype="uint8").reshape(h, w, 3)
+            yield start_s + n * every_sec, frame
+            n += 1
+    finally:
+        proc.stdout.close()
+        err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
+        rc = proc.wait()
+    if rc != 0 and n == 0:
+        raise RuntimeError(f"ffmpeg 退出码 {rc}：{err[-300:]}")
+
+
+def iter_frames_cv2(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None):
+    """老路：cv2 顺序 grab，只在跨过采样点时 retrieve。时间读 PTS。"""
+    import cv2
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"打不开这个视频：{path}")
-    out: list[dict] = []
-    prev_small = None
     try:
         next_t = start_s
         n_grabbed = 0
-        while len(out) < max_samples:
+        while True:
             if not cap.grab():
                 break
             n_grabbed += 1
@@ -123,7 +173,49 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             if not ok:
                 continue
             next_t = t + every_sec
-            boxes = dog.detect(frame, conf)
+            yield t, frame
+    finally:
+        cap.release()
+
+
+def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None):
+    """有 ffmpeg 走 ffmpeg（先试 NVDEC，不行退软解），没有走 cv2。"""
+    if ffmpeg_available():
+        for hw in ((True, False) if config.DECODE_HWACCEL else (False,)):
+            try:
+                yielded = False
+                for item in iter_frames_ffmpeg(path, every_sec, start_s, end_s, hwaccel=hw):
+                    yielded = True
+                    yield item
+                return
+            except RuntimeError as e:
+                if yielded:
+                    raise
+                _logger.warning("ffmpeg 解码（hwaccel=%s）失败，换一种：%s", hw, e)
+        _logger.warning("ffmpeg 两种都不行，退回 cv2 解码：%s", path)
+    yield from iter_frames_cv2(path, every_sec, start_s, end_s)
+
+
+def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
+                 start_s: float = 0.0, end_s: float | None = None,
+                 max_side: int = 512, jpeg_quality: int = 80, max_samples: int = 20000,
+                 batch: int | None = None) -> list[dict]:
+    """过一遍视频，每 every_sec 取一帧：跑狗检测（一批批送 GPU），有狗就裁出来存成 JPEG。
+
+    返回 [{t, boxes, jpeg(bytes|None), motion(float|None)}]。motion 是跟上一个
+    有狗采样点比的帧差（狗那块区域，缩到 64x64 再比，跟裁框位置无关）。
+    """
+    import cv2
+    import numpy as np
+
+    batch = batch or config.DETECT_BATCH
+    out: list[dict] = []
+    prev_small = None
+
+    def flush(pending: list[tuple[float, object]]) -> None:
+        nonlocal prev_small
+        boxes_all = dog.detect_batch([f for _t, f in pending], conf)
+        for (t, frame), boxes in zip(pending, boxes_all):
             rec = {"t": round(t, 2), "boxes": boxes, "jpeg": None, "motion": None}
             if boxes:
                 h, w = frame.shape[:2]
@@ -143,8 +235,17 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             else:
                 prev_small = None
             out.append(rec)
-    finally:
-        cap.release()
+
+    pending: list[tuple[float, object]] = []
+    for t, frame in iter_frames(path, every_sec, start_s, end_s):
+        pending.append((t, frame))
+        if len(pending) >= batch:
+            flush(pending)
+            pending = []
+        if len(out) + len(pending) >= max_samples:
+            break
+    if pending:
+        flush(pending)
     return out
 
 

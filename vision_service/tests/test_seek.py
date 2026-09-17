@@ -83,7 +83,13 @@ def _dog_at(monkeypatch, has_dog):
     def detect(frame, conf=0.35):
         # 框就是那块亮方块所在的大概位置（归一化）
         return [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] if has_dog(_dog_at.t) else []
-    monkeypatch.setattr(dog, "detect", detect)
+    _stub_detect(monkeypatch, detect)
+
+
+def _stub_detect(monkeypatch, fn):
+    """狗检测桩：同时替换单帧和批量两个入口（sample_video 走批量）。"""
+    monkeypatch.setattr(dog, "detect", fn)
+    monkeypatch.setattr(dog, "detect_batch", lambda frames, conf=0.35: [fn(f, conf) for f in frames])
 
 
 # ── crop_rect ─────────────────────────────────────────────────────────
@@ -110,7 +116,7 @@ def test_采样按_pts_每秒一张_有狗才裁图(fake_video, monkeypatch):
     def detect(frame, conf=0.35):
         seen.append(len(seen))
         return [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] if len(seen) != 3 else []
-    monkeypatch.setattr(dog, "detect", detect)
+    _stub_detect(monkeypatch, detect)
 
     s = seek.sample_video("x.mp4", every_sec=1.0)
     # 跨过采样点才取（1.1 之后下一个点是 ≥2.1，2.05 不取；3.2 之后 ≥4.2，4.01 不取），时间是 PTS
@@ -127,7 +133,7 @@ def test_采样按_pts_每秒一张_有狗才裁图(fake_video, monkeypatch):
 
 def test_采样_start_end_只取区间(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(20)])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
     s = seek.sample_video("x.mp4", every_sec=1.0, start_s=5, end_s=8)
     assert [r["t"] for r in s] == [5.0, 6.0, 7.0, 8.0]
 
@@ -264,7 +270,7 @@ def test_合并_低置信和不同类不合():
 
 def test_dry_run_不调模型_但给出会送多少段(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(30)])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
     c = _FakeClient([])
     r = seek.seek_video("x.mp4", LABELS, dry_run=True, llm=CLAUDE, client=c, motion_min=0.0)
     assert r["dry_run"] and r["segments"] == [] and c.calls == []
@@ -274,7 +280,7 @@ def test_dry_run_不调模型_但给出会送多少段(fake_video, monkeypatch):
 
 def test_整条_送去问_合成片段_并算花费(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(30)])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}])
     # 前三段说舔、其余 none；其中一段抛异常也不能让整条挂
     answers = ['{"label":"舔身体","body_part":"前肢爪","confidence":0.8}'] * 3 + [RuntimeError("boom")]
     c = _FakeClient(answers)
@@ -295,7 +301,7 @@ def test_整条_送去问_合成片段_并算花费(fake_video, monkeypatch):
 
 def test_没有窗时不问也不炸(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
     c = _FakeClient([])
     r = seek.seek_video("x.mp4", LABELS, llm=CLAUDE, client=c)
     assert r["segments"] == [] and c.calls == [] and r["stats"]["with_dog"] == 0
@@ -303,7 +309,7 @@ def test_没有窗时不问也不炸(fake_video, monkeypatch):
 
 def test_没带_llm_也没环境变量_真跑要报错_dry_run不用(fake_video, monkeypatch):
     fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
     monkeypatch.setattr(seek.config, "ANTHROPIC_API_KEY", "")
     with pytest.raises(RuntimeError, match="llm"):
         seek.seek_video("x.mp4", LABELS)
@@ -351,3 +357,81 @@ def test_接口_狗检测不可用给503_dry_run不需要key(monkeypatch, tmp_pa
         r = tc.post("/api/v1/seek", json=body | {"llm": llm | {"provider": "baidu"}})
         assert r.status_code == 422
         assert tc.post("/api/v1/seek", json=body | {"path": "../x.mp4"}).status_code == 422
+
+
+# ── 解码快路 / 批量检测 ────────────────────────────────────────────────
+
+def test_ffmpeg_抽帧_按时间编号_两种都不行退回cv2(monkeypatch, fake_video):
+    import subprocess
+
+    w, h = 64, 32
+    frames = [bytes([i]) * (w * h * 3) for i in range(3)]
+
+    class FakeProc:
+        def __init__(self, ok):
+            self.stdout = __import__("io").BytesIO(b"".join(frames) if ok else b"")
+            self.stderr = __import__("io").BytesIO(b"" if ok else b"cuda not available")
+            self._ok = ok
+        def wait(self):
+            return 0 if self._ok else 1
+
+    calls = []
+
+    def popen(cmd, **kw):
+        calls.append(cmd)
+        return FakeProc(ok="-hwaccel" not in cmd)          # NVDEC 那次失败，软解成功
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+
+    got = list(seek.iter_frames("x.mp4", every_sec=2.0, start_s=10.0))
+    assert [t for t, _ in got] == [10.0, 12.0, 14.0]
+    assert got[1][1].shape == (h, w, 3) and int(got[1][1][0, 0, 0]) == 1
+    assert len(calls) == 2 and "-hwaccel" in calls[0] and "-hwaccel" not in calls[1]
+    assert "fps=1/2.0" in calls[1] and calls[1][calls[1].index("-ss") + 1] == "10.000"
+
+    # 两种都不行 → cv2
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: FakeProc(ok=False))
+    fake_video["cap"] = _Cap([0, 1000, 2000])
+    got = list(seek.iter_frames("x.mp4", every_sec=1.0))
+    assert [t for t, _ in got] == [0.0, 1.0, 2.0]
+
+
+def test_sample_video_分批送检测(fake_video, monkeypatch):
+    fake_video["cap"] = _Cap([i * 1000 for i in range(10)])
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    sizes = []
+
+    def detect_batch(frames, conf=0.35):
+        sizes.append(len(frames))
+        return [[{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] for _ in frames]
+    monkeypatch.setattr(dog, "detect_batch", detect_batch)
+    s = seek.sample_video("x.mp4", every_sec=1.0, batch=4)
+    assert len(s) == 10 and sizes == [4, 4, 2]                     # 10 帧分三批
+    assert s[1]["motion"] is not None and all(r["jpeg"] for r in s)
+
+
+def test_detect_batch_形状跟单帧一致(monkeypatch):
+    import numpy as np
+
+    class _T(list):
+        def tolist(self):
+            return list(self)
+
+    class Box:
+        xyxy = [_T([10.0, 20.0, 30.0, 60.0])]
+        conf = _T([0.8])
+
+    class Res:
+        boxes = [Box()]
+
+    class M:
+        def predict(self, imgs, **kw):
+            assert isinstance(imgs, list) and len(imgs) == 2
+            return [Res(), Res()]
+    monkeypatch.setattr(dog, "_model", M())
+    f = np.zeros((100, 200, 3), dtype="uint8")
+    out = dog.detect_batch([f, f])
+    assert out == [[{"bbox": [0.05, 0.2, 0.1, 0.4], "conf": 0.8}]] * 2
+    assert dog.detect_batch([]) == []

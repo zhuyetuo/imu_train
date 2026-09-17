@@ -177,6 +177,29 @@ def warmup() -> dict:
     return {"warm": True, "error": None}
 
 
+def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
+    """一批帧一起过模型（GPU 上一批 16~32 张比一张张送快好几倍）。返回每帧的框。"""
+    if not frames:
+        return []
+    with _lock:
+        res = _model.predict(list(frames), verbose=False, conf=conf,
+                             classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
+                             device=_device_used or "cpu")
+    out = []
+    for frame, r in zip(frames, res):
+        h, w = frame.shape[:2]
+        boxes = []
+        for b in getattr(r, "boxes", []):
+            x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+            boxes.append({
+                "bbox": [round(x1 / w, 4), round(y1 / h, 4),
+                         round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
+                "conf": round(float(b.conf[0]), 3),
+            })
+        out.append(boxes)
+    return out
+
+
 def detect(frame, conf: float = 0.35) -> list[dict]:
     """一帧里的狗框，归一化 [x, y, w, h]。scan_video 和 seek（找片段）共用。
 

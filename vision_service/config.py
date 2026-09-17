@@ -96,3 +96,10 @@ EMBED_MODEL     = _env("EMBED_MODEL", "google/siglip-base-patch16-224")
 EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
 EMBED_BATCH     = int(_env("EMBED_BATCH", "32"))
 EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
+
+# ── 解码 / 检测的速度开关 ─────────────────────────────────────────────
+# 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2
+DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
+DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
+# 狗检测一批送几帧（GPU 上一批 16~32 比一张张送快好几倍；显存紧就调小）
+DETECT_BATCH    = int(_env("DETECT_BATCH", "16"))

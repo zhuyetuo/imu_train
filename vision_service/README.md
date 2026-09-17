@@ -249,3 +249,13 @@ POST /api/v1/embed/search   {text | ref:{path,t}, paths, top_k, min_score, gap_s
 
 平台那边：项目页「建画面索引」→ 工作台「疑似片段」里「找相似」（当前帧或一句英文）→
 候选 reason=similar。
+
+### 建索引 / 找片段的速度
+
+一小时 720p 视频原来 45 秒左右，瓶颈是 cv2 逐帧 grab（CPU）和狗检测一张张送 GPU。现在：
+
+- 有 ffmpeg 就用它解码抽帧（多线程，有卡走 NVDEC），`DECODE_FFMPEG=0` 退回 cv2，`DECODE_HWACCEL=0` 不用 NVDEC
+- 狗检测一批 `DETECT_BATCH`（默认 16）帧一起送 GPU
+- 平台那边建索引默认 3 路并行送（`VISION_INDEX_CONCURRENCY`），GPU 有锁，解码各自并行
+
+`sudo apt install ffmpeg` 装上就生效，不用改配置。

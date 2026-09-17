@@ -74,6 +74,12 @@ def fake_video(monkeypatch):
     return holder
 
 
+def _stub_detect(monkeypatch, fn):
+    """狗检测桩：同时替换单帧和批量两个入口（sample_video 走批量）。"""
+    monkeypatch.setattr(dog, "detect", fn)
+    monkeypatch.setattr(dog, "detect_batch", lambda frames, conf=0.35: [fn(f, conf) for f in frames])
+
+
 BOX = [{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}]
 
 
@@ -83,7 +89,7 @@ def _dog_when(monkeypatch, pred):
     def detect(frame, conf=0.35):
         calls["n"] += 1
         return BOX if pred(calls["n"]) else []
-    monkeypatch.setattr(dog, "detect", detect)
+    _stub_detect(monkeypatch, detect)
 
 
 # ── 建索引 ────────────────────────────────────────────────────────────
@@ -222,7 +228,7 @@ def test_frame_query_没狗就整帧(fake_video, monkeypatch):
             return self.retrieve()
 
     fake_video["cap"] = _CapSeek([0])
-    monkeypatch.setattr(dog, "detect", lambda f, conf=0.35: [])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
     enc = FakeEncoder()
     q = embed.frame_query("x.mp4", 0.0, encoder=enc)
     assert q["has_dog"] is False and q["vec"].shape == (8,) and enc.calls == [("img", 1)]
