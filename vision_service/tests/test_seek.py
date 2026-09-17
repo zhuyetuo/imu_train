@@ -435,3 +435,54 @@ def test_detect_batch_形状跟单帧一致(monkeypatch):
     out = dog.detect_batch([f, f])
     assert out == [[{"bbox": [0.05, 0.2, 0.1, 0.4], "conf": 0.8}]] * 2
     assert dog.detect_batch([]) == []
+
+
+def test_静止跳检_画面没变沿用上次的框_动了照送(fake_video, monkeypatch):
+    # 0~4 秒方块不动，5~9 秒动
+    fake_video["cap"] = _Cap([i * 1000 for i in range(10)], moving=lambda t: t >= 5)
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.008)
+    sent = []
+
+    def detect_batch(frames, conf=0.35):
+        sent.append(len(frames))
+        return [[{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] for _ in frames]
+    monkeypatch.setattr(dog, "detect_batch", detect_batch)
+    s = seek.sample_video("x.mp4", every_sec=1.0, batch=4)
+    assert len(s) == 10 and all(r["boxes"] for r in s)               # 跳过的也带着框
+    assert sum(sent) < 10                                             # 静止那几秒没送
+    assert s[1]["motion"] == 0.0 and s[6]["motion"] > 0               # 静止时 motion 0，动了有值
+    # 关掉优化：全送
+    sent.clear()
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.0)
+    seek.sample_video("x.mp4", every_sec=1.0, batch=4)
+    fake_video["cap"] = _Cap([i * 1000 for i in range(10)], moving=lambda t: t >= 5)
+    sent.clear()
+    seek.sample_video("x.mp4", every_sec=1.0, batch=4)
+    assert sum(sent) == 10
+
+
+def test_静止跳检_狗那一小块动了也要送(fake_video, monkeypatch):
+    """狗只占画面 0.5%：整帧平均差远低于阈值，但狗那块在动 → 必须送检测。"""
+    import numpy as np
+
+    class _TinyDog(_Cap):
+        def retrieve(self):
+            t = self.pts[self.i] / 1000.0
+            img = np.zeros((self.h, self.w, 3), dtype="uint8")
+            dx = int(t * 3) % 6 if t >= 3 else 0            # 3 秒后一块 20x20 的小方块在挪
+            img[100:120, 100 + dx:120 + dx] = 200
+            return True, img
+
+    fake_video["cap"] = _TinyDog([i * 1000 for i in range(8)])
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.008)
+    sent = []
+
+    def detect_batch(frames, conf=0.35):
+        sent.append(len(frames))
+        return [[{"bbox": [0.07, 0.13, 0.03, 0.04], "conf": 0.9}] for _ in frames]
+    monkeypatch.setattr(dog, "detect_batch", detect_batch)
+    s = seek.sample_video("x.mp4", every_sec=1.0, batch=2)
+    assert len(s) == 8
+    assert sum(sent) >= 6            # 0 秒那帧 + 3 秒起每帧都动 → 至少 6 帧送检；只有 1、2 秒可跳

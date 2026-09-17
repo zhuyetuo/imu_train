@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections import Counter
@@ -211,33 +212,73 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     batch = batch or config.DETECT_BATCH
     out: list[dict] = []
     prev_small = None
+    # 静止跳检：整帧缩小后跟上一次真送检测的那帧比，没变就沿用它的框。
+    # 狗睡着、空房间时省掉大半检测；一动就照常送
+    last_key = None           # 上一次真送检测的小图
+    last_boxes: list[dict] = []
+    skip_thr = config.STATIC_SKIP_THR
+    stats = {"detected": 0, "skipped": 0}
+
+    def frame_key(frame, boxes):
+        """(整帧小图, 上次狗框那块的小图)。只看整帧不够：狗只占画面 0.5%，它舔爪子时
+        整帧平均差远低于阈值，会被当成"没变"跳掉——所以狗那块单独比。"""
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        whole = cv2.resize(g, (64, 36))
+        region = None
+        if boxes:
+            h, w = g.shape[:2]
+            # 不撑到 224：撑大了狗只占一角，它的动作被稀释；就按框本身（留一点边）
+            x1, y1, x2, y2 = crop_rect(boxes, w, h, margin=0.25, min_side=16)
+            if y2 > y1 and x2 > x1:
+                region = cv2.resize(g[y1:y2, x1:x2], (64, 64))
+        return whole, region
+
+    def unchanged(key_now, key_last) -> bool:
+        if motion_score(key_last[0], key_now[0]) >= skip_thr:
+            return False
+        if key_last[1] is not None and key_now[1] is not None:
+            # 狗那块用更严的门槛（区域小，变化会被稀释；乘 2 是经验值）
+            return motion_score(key_last[1], key_now[1]) < skip_thr * 2
+        return key_last[1] is None and key_now[1] is None
+
+    def finish(t: float, frame, boxes: list[dict]) -> None:
+        nonlocal prev_small
+        rec = {"t": round(t, 2), "boxes": boxes, "jpeg": None, "motion": None}
+        if boxes:
+            h, w = frame.shape[:2]
+            x1, y1, x2, y2 = crop_rect(boxes, w, h)
+            crop = frame[y1:y2, x1:x2]
+            if crop.size:
+                small = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (64, 64))
+                if prev_small is not None:
+                    rec["motion"] = motion_score(prev_small, small)
+                prev_small = small
+                scale = max_side / max(crop.shape[:2])
+                if scale < 1:
+                    crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
+                ok2, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+                if ok2:
+                    rec["jpeg"] = bytes(np.asarray(buf).tobytes())
+        else:
+            prev_small = None
+        out.append(rec)
 
     def flush(pending: list[tuple[float, object]]) -> None:
-        nonlocal prev_small
+        nonlocal last_key, last_boxes
         boxes_all = dog.detect_batch([f for _t, f in pending], conf)
+        stats["detected"] += len(pending)
         for (t, frame), boxes in zip(pending, boxes_all):
-            rec = {"t": round(t, 2), "boxes": boxes, "jpeg": None, "motion": None}
-            if boxes:
-                h, w = frame.shape[:2]
-                x1, y1, x2, y2 = crop_rect(boxes, w, h)
-                crop = frame[y1:y2, x1:x2]
-                if crop.size:
-                    small = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (64, 64))
-                    if prev_small is not None:
-                        rec["motion"] = motion_score(prev_small, small)
-                    prev_small = small
-                    scale = max_side / max(crop.shape[:2])
-                    if scale < 1:
-                        crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
-                    ok2, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
-                    if ok2:
-                        rec["jpeg"] = bytes(np.asarray(buf).tobytes())
-            else:
-                prev_small = None
-            out.append(rec)
+            last_key, last_boxes = frame_key(frame, boxes), boxes
+            finish(t, frame, boxes)
 
     pending: list[tuple[float, object]] = []
     for t, frame in iter_frames(path, every_sec, start_s, end_s):
+        if skip_thr > 0 and last_key is not None and not pending:
+            k = frame_key(frame, last_boxes)
+            if unchanged(k, last_key):
+                stats["skipped"] += 1
+                finish(t, frame, list(last_boxes))      # 画面没变，框也没变
+                continue
         pending.append((t, frame))
         if len(pending) >= batch:
             flush(pending)
@@ -246,6 +287,7 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             break
     if pending:
         flush(pending)
+    _logger.info("采样 %s：%d 帧，送检 %d，静止跳过 %d", os.path.basename(path), len(out), stats["detected"], stats["skipped"])
     return out
 
 
