@@ -6,7 +6,7 @@ IMU 规则只能挑姿态特殊的（舔/啃），而且每个类别都要重新
 
     画面里有狗 + 狗在动（YOLO 框 + 帧差）    ← 本地，便宜，把 90% 的空镜和睡觉筛掉
       → 剩下的切成几秒一段，裁出狗那一块      ← 720p 俯拍狗只占 100x50 像素，不裁模型看不清
-      → 每段抽几帧问视觉大模型（Claude API）  ← 贵，只看筛剩下的
+      → 每段抽几帧问视觉大模型（API：Claude / GPT / 豆包 / Gemini，见 llm.py）← 贵，只看筛剩下的
       → 相邻同类合并成片段，带类别/部位/置信度 ← 平台按视频时间写成候选，IMU 段随之落下
 
 **大模型走 API，不在本地起**（用户拍板）。所以这一步的成本是按送出去的段数算的，
@@ -19,17 +19,15 @@ dry_run=True 只做本地筛选、不调 API，先看会送多少段再决定。
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
-import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from . import config, dog
+from . import config, dog, llm as llmmod
 
 _logger = logging.getLogger("vision_service.seek")
 
@@ -188,37 +186,22 @@ def pick_windows(samples: list[dict], clip_s: float = 6.0, stride_s: float = 3.0
 
 # ── 问模型 ────────────────────────────────────────────────────────────
 
-_client = None
-_client_lock = threading.Lock()
-_client_error: str | None = None
-
-
-def _get_client():
-    global _client, _client_error
-    if _client is not None:
-        return _client
-    with _client_lock:
-        if _client is not None:
-            return _client
-        try:
-            import anthropic
-        except ImportError:
-            _client_error = "没装 anthropic SDK：pip install anthropic"
-            return None
-        if not config.ANTHROPIC_API_KEY:
-            _client_error = "没配 ANTHROPIC_API_KEY"
-            return None
-        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=3, timeout=120.0)
-        _client_error = None
-        return _client
-
-
 def status() -> dict:
-    c = _get_client()
+    """没带 llm 时退回环境变量那把 key（老部署方式）。"""
+    env = llmmod.from_env()
+    err = None
+    if env is None:
+        err = "没配 ANTHROPIC_API_KEY（也可以在平台「大模型 API」页配好，请求时带过来）"
+    else:
+        try:
+            import anthropic  # noqa: F401
+        except ImportError:
+            err = "没装 anthropic SDK：pip install anthropic"
     return {
-        "available": c is not None,
-        "error": _client_error,
+        "available": err is None,
+        "error": err,
         "model": config.SEEK_MODEL,
+        "providers": list(llmmod.PROVIDERS),
         "dog": dog.status().get("available"),
     }
 
@@ -273,29 +256,13 @@ def parse_answer(text: str, labels: list[Label]) -> dict:
     return {"label": label, "body_part": part, "confidence": conf, "note": str(d.get("note") or "")[:40]}
 
 
-def ask(frames: list[bytes], labels: list[Label], clip_s: float, client=None, model: str | None = None) -> dict:
+def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM,
+        client=None, http=None) -> dict:
     """把一段的几帧送去问。返回 parse_answer 的结果 + usage。"""
-    client = client or _get_client()
-    if client is None:
-        raise RuntimeError(_client_error or "模型客户端不可用")
     system, user = build_prompt(labels, clip_s, len(frames))
-    content: list[dict] = []
-    for b in frames:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                    "data": base64.standard_b64encode(b).decode("ascii")}})
-    content.append({"type": "text", "text": user})
-    resp = client.messages.create(
-        model=model or config.SEEK_MODEL,
-        max_tokens=300,
-        system=system,
-        output_config={"effort": "low"},
-        messages=[{"role": "user", "content": content}],
-    )
-    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+    text, usage = llmmod.chat_vision(llm, system, user, frames, max_tokens=300, client=client, http=http)
     out = parse_answer(text, labels)
-    u = getattr(resp, "usage", None)
-    out["usage"] = {"input": int(getattr(u, "input_tokens", 0) or 0),
-                    "output": int(getattr(u, "output_tokens", 0) or 0)}
+    out["usage"] = usage
     return out
 
 
@@ -325,18 +292,16 @@ def merge_segments(wins: list[Window], answers: list[dict], min_conf: float = 0.
 
 # ── 整条流水线 ────────────────────────────────────────────────────────
 
-def estimate_usd(input_tokens: int, output_tokens: int, model: str | None = None) -> float:
-    pin, pout = config.SEEK_PRICE_PER_M.get(model or config.SEEK_MODEL, (0.0, 0.0))
-    return round(input_tokens / 1e6 * pin + output_tokens / 1e6 * pout, 4)
-
-
 def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s: float = 6.0,
                stride_s: float = 3.0, n_frames: int = 6, max_clips: int = 120,
                min_dog_frac: float = 0.8, motion_min: float = 0.02, motion_max: float = 1.0,
                min_conf: float = 0.5, start_s: float = 0.0, end_s: float | None = None,
                dry_run: bool = False, conf: float = 0.35, concurrency: int | None = None,
-               client=None) -> dict:
+               llm: llmmod.LLM | None = None, client=None, http=None) -> dict:
     t0 = time.monotonic()
+    llm = llm or llmmod.from_env()
+    if llm is None and not dry_run:
+        raise RuntimeError("没有可用的大模型：请求里没带 llm，环境变量也没配 ANTHROPIC_API_KEY")
     samples = sample_video(path, every_sec=every_sec, conf=conf, start_s=start_s, end_s=end_s)
     wins = pick_windows(samples, clip_s=clip_s, stride_s=stride_s, min_dog_frac=min_dog_frac,
                         motion_min=motion_min, motion_max=motion_max, max_clips=max_clips)
@@ -346,7 +311,7 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
         "clips_candidate": len(wins),
         "clips_sent": 0,
         "usage": {"input": 0, "output": 0, "est_usd": 0.0},
-        "model": config.SEEK_MODEL,
+        "llm": llmmod.describe(llm),
         "seconds": 0.0,
     }
     if dry_run or not wins:
@@ -362,7 +327,7 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
 
     def one(w: Window) -> dict:
         try:
-            return ask(frames_of(w), labels, clip_s, client=client)
+            return ask(frames_of(w), labels, clip_s, llm, client=client, http=http)
         except Exception as e:  # noqa: BLE001 一段问失败不该让整个视频白跑
             _logger.warning("问模型失败 %.1f-%.1f：%s", w.start, w.end, e)
             return {"label": None, "body_part": None, "confidence": 0.0, "note": f"失败:{type(e).__name__}",
@@ -375,7 +340,7 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
     stats["errors"] = sum(1 for a in answers if a.get("error"))
     stats["usage"]["input"] = sum(a["usage"]["input"] for a in answers)
     stats["usage"]["output"] = sum(a["usage"]["output"] for a in answers)
-    stats["usage"]["est_usd"] = estimate_usd(stats["usage"]["input"], stats["usage"]["output"])
+    stats["usage"]["est_usd"] = llmmod.estimate_usd(llm, stats["usage"]["input"], stats["usage"]["output"])
     stats["hits"] = sum(1 for a in answers if a.get("label"))
     stats["seconds"] = round(time.monotonic() - t0, 1)
     segs = merge_segments(wins, answers, min_conf=min_conf)

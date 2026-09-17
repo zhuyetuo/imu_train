@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, dog, sam, seek
+from . import config, dog, llm as llmmod, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -165,8 +165,19 @@ class SeekLabelIn(BaseModel):
     parts: list[str] = Field(default_factory=list, max_length=12)
 
 
+class LlmIn(BaseModel):
+    """用哪家、哪个模型、key。平台「大模型 API」页存的，请求时带过来；不带就退回环境变量。"""
+    provider: str = Field(..., pattern="^(anthropic|openai|doubao|gemini|local)$")
+    model: str = Field(..., max_length=100)
+    api_key: str = Field("", max_length=500)
+    base_url: str | None = Field(None, max_length=300)
+    price_in: float = Field(0.0, ge=0)
+    price_out: float = Field(0.0, ge=0)
+
+
 class SeekIn(BaseModel):
     path: str = Field(..., description="相对 VIDEO_ROOT 的视频路径")
+    llm: LlmIn | None = Field(None, description="不带 = 用环境变量里的 Claude key")
     labels: list[SeekLabelIn] = Field(..., min_length=1, max_length=12)
     every_sec: float = Field(1.0, ge=0.5, le=5.0)
     clip_s: float = Field(6.0, ge=2.0, le=20.0)
@@ -198,7 +209,15 @@ def seek_run(body: SeekIn):
     full = _resolve_under(config.VIDEO_ROOT, body.path)
     if not dog.status()["available"]:
         raise HTTPException(503, dog.status()["error"] or "画面狗检测不可用")
-    if not body.dry_run:
+    llm = None
+    if body.llm is not None:
+        try:
+            llm = llmmod.from_dict(body.llm.model_dump())
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        if not body.dry_run and not llm.api_key and llm.provider != "local":
+            raise HTTPException(422, f"{llm.provider} 没配 API key")
+    elif not body.dry_run:
         st = seek.status()
         if not st["available"]:
             raise HTTPException(503, st["error"] or "视觉大模型不可用")
@@ -208,12 +227,26 @@ def seek_run(body: SeekIn):
             full, labels, every_sec=body.every_sec, clip_s=body.clip_s, stride_s=body.stride_s,
             n_frames=body.n_frames, max_clips=body.max_clips, min_dog_frac=body.min_dog_frac,
             motion_min=body.motion_min, motion_max=body.motion_max, min_conf=body.min_conf,
-            start_s=body.start_s, end_s=body.end_s, dry_run=body.dry_run, conf=body.conf,
+            start_s=body.start_s, end_s=body.end_s, dry_run=body.dry_run, conf=body.conf, llm=llm,
         )
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"找片段失败: {type(e).__name__}: {e}") from e
+
+
+class LlmTestIn(BaseModel):
+    llm: LlmIn
+
+
+@app.post("/api/v1/llm/test")
+def llm_test(body: LlmTestIn):
+    """key 对不对、模型名对不对：发一句最短的话看回不回。不带图，几乎不花钱。"""
+    try:
+        llm = llmmod.from_dict(body.llm.model_dump())
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return llmmod.ping(llm)
 
 
 def main():
