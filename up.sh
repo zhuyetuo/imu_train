@@ -5,8 +5,10 @@
 #   ./up.sh -g           GPU 模式（透传给 label_service）
 #   ./up.sh -d           只重启，不重建镜像（改了 .py 用这个，最快）
 #   ./up.sh -p           先 git pull 再起
-#   ./up.sh deploy       **更新到最新的一条命令**：git pull + 子模块 → label_service 依赖变了才重建
-#                        镜像、否则重建容器+重启 → vision_service 停了再起 → 逐个探健康检查
+#   ./up.sh deploy       **算法服务更新到最新的一条命令**：git pull + 子模块 → label_service 依赖变了
+#                        才重建镜像、否则重建容器+重启 → vision_service 停了再起 → 逐个探健康检查。
+#                        只管这个仓库（IMU 推理、SAM、狗检测、找片段、向量索引、本地大模型）；
+#                        web 平台是 label_infra 自己的 deploy_all.sh，两边各发各的
 #   ./up.sh status       两个分别在不在跑
 #   ./up.sh down         两个都停
 #
@@ -70,7 +72,7 @@ want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 line() { echo; echo "────────── $* ──────────"; }
 
 # ── deploy：更新到最新，一条命令 ────────────────────────────────────────
-# 跟平台那边的 deploy_all.sh 是同一套逻辑（那边发现这台机器上有 imu_train 就直接调这里）。
+# web 平台（label_infra）那边有自己的 deploy_all.sh，不会来调这里；两边解耦。
 # DRY_RUN=1 只打印命令不执行。
 deploy_run() { echo "  \$ $*"; [ "${DRY_RUN:-0}" = "1" ] && return 0; "$@"; }
 deploy_probe() {   # $1 名字 $2 url $3 秒数
