@@ -129,13 +129,23 @@ if [ "$SUB" = "deploy" ]; then
             if [ "${DRY_RUN:-0}" != "1" ]; then
                 echo "    狗检测   available=$(deploy_field "$VB/api/v1/dog/status" available)"
                 echo "    找片段   available=$(deploy_field "$VB/api/v1/seek/status" available)   （false = 环境变量没 key；用平台「大模型 API」页的 key 不看这个）"
-                # 向量模型是启动后后台加载的（十几秒到一分钟），刚起来时 loading=True 正常，多等一会儿
-                for _ in $(seq 24); do
+                # 向量模型是启动后后台加载的；第一次要从 HF 下约 400MB 权重。
+                # 边下边画进度和预计时间，最多等 30 分钟（下载失败会立刻报错退出循环）
+                for _ in $(seq 360); do
                     [ "$(deploy_field "$VB/api/v1/embed/status" loading)" = "True" ] || break
+                    prog="$(curl -fsS --max-time 3 "$VB/api/v1/embed/status" 2>/dev/null | python3 -c '
+import sys, json
+p = (json.load(sys.stdin).get("progress") or {})
+if not p: print("加载中…"); sys.exit()
+bar = int(p["pct"] // 5)
+eta = p.get("eta_s")
+eta_s = "剩 %d 分 %02d 秒" % (eta // 60, eta % 60) if eta is not None else "估算中"
+print("下载权重 [%s%s] %5.1f%%  %.0f/%.0f MB  %.1f MB/s  %s" % ("#" * bar, "." * (20 - bar), p["pct"], p["done_mb"], p["total_mb"], p["speed_mbps"], eta_s))
+' 2>/dev/null || echo "加载中…")"
+                    printf "\r    向量索引 %s          " "$prog"
                     sleep 5
                 done
-                [ "$(deploy_field "$VB/api/v1/embed/status" loading)" = "True" ] && \
-                    echo "    向量索引 还在下载/加载权重（第一次约 400MB），不用等它，过几分钟看：curl -s localhost:$VB_PORT/api/v1/embed/status"
+                printf "\r%80s\r" ""
                 echo "    向量索引 available=$(deploy_field "$VB/api/v1/embed/status" available)   indexed=$(deploy_field "$VB/api/v1/embed/status" indexed_videos)   $( [ "$(deploy_field "$VB/api/v1/embed/status" available)" = "True" ] || echo "← $(deploy_field "$VB/api/v1/embed/status" error)" )"
                 echo "    SAM      available=$(deploy_field "$VB/api/v1/sam/status" available)"
             fi

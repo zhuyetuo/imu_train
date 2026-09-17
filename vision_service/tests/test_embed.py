@@ -287,3 +287,20 @@ def test_接口_模型不可用503_可用时走到底(monkeypatch, tmp_path, ind
         assert [h["t"] for h in r.json()["hits"]] == []
         assert tc.post("/api/v1/embed/search", json={"paths": ["a.mp4"]}).status_code == 422
         assert tc.post("/api/v1/embed/search", json={"text": "x", "ref": {"path": "a.mp4", "t": 1}, "paths": ["a.mp4"]}).status_code == 422
+
+
+def test_下载进度_百分比和预计时间(monkeypatch):
+    monkeypatch.setattr(embed, "_progress", {"done": 0, "total": 0, "started": None, "file": None})
+    assert embed.download_progress() is None
+    now = {"t": 100.0}
+    monkeypatch.setattr(embed.time, "monotonic", lambda: now["t"])
+    embed._progress.update({"total": 400_000_000, "started": 100.0, "file": "model.safetensors"})
+    now["t"] = 110.0
+    embed._progress["done"] = 100_000_000          # 10 秒下了 100MB → 10MB/s，剩 300MB → 30 秒
+    p = embed.download_progress()
+    assert p["pct"] == 25.0 and p["done_mb"] == 100.0 and p["total_mb"] == 400.0
+    assert p["speed_mbps"] == 10.0 and p["eta_s"] == 30 and p["finished"] is False
+    embed._progress["done"] = 400_000_000
+    assert embed.download_progress()["finished"] is True and embed.download_progress()["eta_s"] == 0
+    st = embed.status()
+    assert st["progress"]["pct"] == 100.0
