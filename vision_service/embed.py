@@ -37,6 +37,8 @@ _load_error: str | None = None
 _lock = threading.RLock()
 _device: str | None = None
 _loading = False
+# 下载进度（第一次要从 HF 拉约 400MB）：status 里报出来，deploy 脚本据此画进度条/估时间
+_progress: dict = {"done": 0, "total": 0, "started": None, "file": None}
 
 # 已加载的索引：rel_path -> (mtime, dict)。查一次要读好几十个 npz，缓存住
 _cache: dict[str, tuple[float, dict]] = {}
@@ -56,6 +58,39 @@ def _load(force: bool = False) -> None:
             _do_load()
         finally:
             _loading = False
+# 下载进度（第一次要从 HF 拉约 400MB）：status 里报出来，deploy 脚本据此画进度条/估时间
+_progress: dict = {"done": 0, "total": 0, "started": None, "file": None}
+
+
+def _predownload() -> None:
+    """先把权重整个拉到 HF 缓存，边拉边记进度；之后 from_pretrained 直接命中缓存。
+
+    不这么做的话进度只在 .run.log 里的 tqdm 条上，人在 deploy 那头看到的是几分钟的
+    "available=False"，分不清是在下还是挂了。EMBED_MODEL 是本地目录就跳过。
+    """
+    if os.path.isdir(config.EMBED_MODEL):
+        return
+    try:
+        from huggingface_hub import snapshot_download
+        from tqdm.auto import tqdm as _base_tqdm
+    except ImportError:
+        return
+
+    class _Tqdm(_base_tqdm):
+        def __init__(self, *a, **kw):
+            kw.setdefault("disable", False)
+            super().__init__(*a, **kw)
+            # 多个文件各一条：总量累加，进度按累加算
+            _progress["total"] += int(self.total or 0)
+            _progress["file"] = str(kw.get("desc") or "")
+            if _progress["started"] is None:
+                _progress["started"] = time.monotonic()
+
+        def update(self, n=1):
+            _progress["done"] += int(n or 0)
+            return super().update(n)
+
+    snapshot_download(config.EMBED_MODEL, tqdm_class=_Tqdm)
 
 
 def _do_load() -> None:
@@ -67,6 +102,7 @@ def _do_load() -> None:
         _load_error = f"没装 transformers/torch：{e}（pip install transformers）"
         return
     try:
+        _predownload()
         _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
         m = AutoModel.from_pretrained(config.EMBED_MODEL)
         want = config.EMBED_DEVICE
@@ -137,7 +173,22 @@ def status() -> dict:
         err = ("正在后台加载（第一次要下载权重约 400MB，按你的网速几分钟），过会儿再看" if _loading
                else "模型还没加载（启动预热关了或还没轮到），建索引时会加载")
     return {"available": _model is not None, "loading": _loading, "error": err if _model is None else None,
+            "progress": download_progress(),
             "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR}
+
+
+def download_progress() -> dict | None:
+    """{pct, done_mb, total_mb, speed_mbps, eta_s, file}；没在下载返回 None。"""
+    total, done, started = _progress["total"], _progress["done"], _progress["started"]
+    if not total or started is None:
+        return None
+    elapsed = max(1e-3, time.monotonic() - started)
+    speed = done / elapsed                      # bytes/s
+    remaining = max(0, total - done)
+    eta = int(remaining / speed) if speed > 0 else None
+    return {"pct": round(min(100.0, done / total * 100), 1), "done_mb": round(done / 1e6, 1),
+            "total_mb": round(total / 1e6, 1), "speed_mbps": round(speed / 1e6, 2), "eta_s": eta,
+            "file": _progress["file"], "finished": done >= total}
 
 
 # ── 索引文件 ──────────────────────────────────────────────────────────
