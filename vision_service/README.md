@@ -236,6 +236,7 @@ curl -s localhost:8385/api/v1/embed/status   # available / model / indexed_video
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `EMBED_MODEL` | `google/siglip-base-patch16-224` | HF 自动下（约 400MB）；下不动就指向本地目录 |
+| `HF_ENDPOINT` | `https://hf-mirror.com` | 国内直连 huggingface.co 常卡死，默认走镜像；能直连就在 .env 里改回官方 |
 | `EMBED_INDEX_DIR` | `vision_service/index` | 索引文件放哪 |
 | `EMBED_DEVICE` | 跟 `SAM_DEVICE` | 没卡退回 cpu |
 
