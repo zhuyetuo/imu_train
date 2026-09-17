@@ -115,6 +115,20 @@ def _do_load() -> None:
                        f"（这台机器下不动权重的话，先在能上网的机器上下好放到 HF 缓存目录，或设 EMBED_MODEL 指向本地路径）")
 
 
+def _as_tensor(out):
+    """transformers 4.x 的 get_image_features/get_text_features 直接返回张量，
+    5.x 返回 BaseModelOutputWithPooling（向量在 pooler_output）。两种都收。"""
+    if hasattr(out, "pooler_output") and out.pooler_output is not None:
+        return out.pooler_output
+    if hasattr(out, "image_embeds") and out.image_embeds is not None:
+        return out.image_embeds
+    if hasattr(out, "text_embeds") and out.text_embeds is not None:
+        return out.text_embeds
+    if hasattr(out, "last_hidden_state") and not hasattr(out, "norm"):
+        return out.last_hidden_state[:, 0]
+    return out
+
+
 class Encoder:
     """默认编码器：SigLIP。测试里换成别的对象，只要有这两个方法。"""
 
@@ -136,7 +150,7 @@ class Encoder:
             for i in range(0, len(jpegs), bs):
                 imgs = [Image.open(io.BytesIO(b)).convert("RGB") for b in jpegs[i:i + bs]]
                 inputs = _processor(images=imgs, return_tensors="pt").to(_device)
-                feats = _model.get_image_features(**inputs)
+                feats = _as_tensor(_model.get_image_features(**inputs))
                 feats = feats / feats.norm(dim=-1, keepdim=True)
                 out.append(feats.float().cpu().numpy())
         return np.concatenate(out, axis=0) if out else np.zeros((0, 1), dtype="float32")
@@ -149,7 +163,7 @@ class Encoder:
             raise RuntimeError(_load_error or "编码器没加载")
         with _lock, torch.no_grad():
             inputs = _processor(text=texts, padding="max_length", return_tensors="pt").to(_device)
-            feats = _model.get_text_features(**inputs)
+            feats = _as_tensor(_model.get_text_features(**inputs))
             feats = feats / feats.norm(dim=-1, keepdim=True)
             return feats.float().cpu().numpy()
 
