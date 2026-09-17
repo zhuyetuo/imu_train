@@ -92,6 +92,39 @@ running_pid() {
     return 1
 }
 
+# 端口上是谁：pid 文件丢了/不对的时候（比如上次是手动起的、或者 kill -9 之后
+# CUDA 进程还没把端口吐出来）靠这个兜底。只认命令行里带 vision_service 的进程，
+# 别的东西占着端口不是我们能杀的
+port_pid() {
+    local pid
+    pid="$(ss -ltnp 2>/dev/null | awk -v p=":$VISION_SERVICE_PORT" '$4 ~ p"$" {print $NF}' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)"
+    [ -z "$pid" ] && command -v fuser >/dev/null 2>&1 && pid="$(fuser -n tcp "$VISION_SERVICE_PORT" 2>/dev/null | awk '{print $1}')"
+    [ -n "$pid" ] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q vision_service && { echo "$pid"; return 0; }
+    return 1
+}
+
+port_free() { ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$VISION_SERVICE_PORT\$"; }
+
+stop_service() {
+    local pid
+    pid="$(running_pid)" || pid="$(port_pid)" || { echo "没在跑"; return 0; }
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 20); do
+        sleep 0.25
+        kill -0 "$pid" 2>/dev/null || break
+    done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    # kill -9 之后进程没了，端口不一定立刻空出来（CUDA 进程收尾要一会儿）。
+    # 不等的话紧接着的 -d 会撞上 "address already in use"，看着像起不来
+    for _ in $(seq 60); do
+        port_free && break
+        sleep 0.25
+    done
+    port_free || echo "⚠ 端口 $VISION_SERVICE_PORT 还被占着（pid $(port_pid || echo ?)），起新的可能会失败"
+    echo "已停（原 pid $pid）"
+}
+
 # --no-install 可以出现在任何位置，先摘出去再看子命令
 ARGS=()
 for a in "$@"; do
@@ -107,6 +140,18 @@ case "${1:-}" in
         if pid="$(running_pid)"; then
             echo "已经在跑了（pid $pid，端口 $VISION_SERVICE_PORT）。要重起先 ./vision_service/run.sh down"
             exit 0
+        fi
+        # pid 文件没了但端口还被我们自己的旧进程占着（上次是手动起的 / 没停干净）：
+        # 直接起会 "address already in use"。是我们的就先收掉，不是我们的就明说
+        if ! port_free; then
+            if pid="$(port_pid)"; then
+                echo "端口 $VISION_SERVICE_PORT 上还有一个旧的 vision_service（pid $pid），先停掉它"
+                echo "$pid" > "$PID_FILE"
+                stop_service
+            else
+                echo "端口 $VISION_SERVICE_PORT 被别的进程占着，起不了：ss -ltnp | grep $VISION_SERVICE_PORT 看看是谁"
+                exit 1
+            fi
         fi
         ensure_deps
         : > "$LOG_FILE"
@@ -128,18 +173,7 @@ case "${1:-}" in
         fi
         ;;
     down|stop)
-        if pid="$(running_pid)"; then
-            kill "$pid" 2>/dev/null || true
-            for _ in $(seq 20); do
-                sleep 0.25
-                running_pid >/dev/null || break
-            done
-            running_pid >/dev/null && kill -9 "$pid" 2>/dev/null || true
-            rm -f "$PID_FILE"
-            echo "已停（原 pid $pid）"
-        else
-            echo "没在跑"
-        fi
+        stop_service
         ;;
     status)
         if pid="$(running_pid)"; then

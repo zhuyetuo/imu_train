@@ -63,6 +63,11 @@ def _warmup_on_startup():
             _logger.info("画面狗检测预热完成")
         else:
             _logger.warning("画面狗检测预热没成：%s（不影响启动和 SAM）", d.get("error"))
+        e = embed.warmup()
+        if e.get("warm"):
+            _logger.info("画面向量模型预热完成")
+        else:
+            _logger.warning("画面向量模型预热没成：%s（不影响别的功能）", e.get("error"))
 
     threading.Thread(target=run, name="vision-warmup", daemon=True).start()
 

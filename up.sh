@@ -116,7 +116,12 @@ if [ "$SUB" = "deploy" ]; then
             if [ "${DRY_RUN:-0}" != "1" ]; then
                 echo "    狗检测   available=$(deploy_field "$VB/api/v1/dog/status" available)"
                 echo "    找片段   available=$(deploy_field "$VB/api/v1/seek/status" available)   （false = 环境变量没 key；用平台「大模型 API」页的 key 不看这个）"
-                echo "    向量索引 available=$(deploy_field "$VB/api/v1/embed/status" available)   indexed=$(deploy_field "$VB/api/v1/embed/status" indexed_videos)"
+                # 向量模型是启动后后台加载的（十几秒到一分钟），刚起来时 loading=True 正常，多等一会儿
+                for _ in $(seq 24); do
+                    [ "$(deploy_field "$VB/api/v1/embed/status" loading)" = "True" ] || break
+                    sleep 5
+                done
+                echo "    向量索引 available=$(deploy_field "$VB/api/v1/embed/status" available)   indexed=$(deploy_field "$VB/api/v1/embed/status" indexed_videos)   $( [ "$(deploy_field "$VB/api/v1/embed/status" available)" = "True" ] || echo "← $(deploy_field "$VB/api/v1/embed/status" error)" )"
                 echo "    SAM      available=$(deploy_field "$VB/api/v1/sam/status" available)"
             fi
         else
