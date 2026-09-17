@@ -8,8 +8,8 @@
 #
 # 为什么要有它：机器直连 huggingface.co 卡死不报错，走 hf-mirror 有时也不通；
 # 一个个源手敲很烦。这里按顺序试：
-#   1. hf-mirror.com（HF 的国内镜像）
-#   2. ModelScope（阿里）
+#   1. ModelScope（阿里）——实测最稳，10MB/s 级
+#   2. hf-mirror.com（HF 的国内镜像；2026-09 实测它对这个模型只是 308 跳回 huggingface.co，等于没镜像）
 #   3. huggingface.co 官方
 # 哪个通用哪个，边下边打进度。全不通就明说，告诉人怎么从别的电脑拷过来。
 set -uo pipefail
@@ -98,7 +98,8 @@ import sys
 from modelscope import snapshot_download
 model, dest = sys.argv[1], sys.argv[2]
 try:
-    snapshot_download(model, local_dir=dest)
+    # 只要 safetensors 那一份：仓库里 .bin 和 .safetensors 各 800MB，内容一样，下一份就够
+    snapshot_download(model, local_dir=dest, ignore_file_pattern=[r".*\.bin$", r".*\.h5$", r".*\.msgpack$"])
 except Exception as e:
     print("  ✗ %s: %s" % (type(e).__name__, str(e)[:200]))
     sys.exit(1)
@@ -107,7 +108,7 @@ EOF
 
 "$PY_BIN" -c "import huggingface_hub, tqdm" 2>/dev/null || "$PY_BIN" -m pip install -q huggingface_hub tqdm >/dev/null 2>&1
 
-for attempt in "hf-mirror.com|https://hf-mirror.com" "modelscope" "huggingface.co|https://huggingface.co"; do
+for attempt in "modelscope" "hf-mirror.com|https://hf-mirror.com" "huggingface.co|https://huggingface.co"; do
     if [ "$attempt" = "modelscope" ]; then
         try_modelscope && have_weights && break
     else
