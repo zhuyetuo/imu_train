@@ -40,6 +40,16 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# deploy 会 git pull 到这个文件自己——bash 是边读边执行的，文件在跑到一半时被换掉
+# 会执行到错位的行（第一次就这样：拉下来的新 up.sh 没生效，还得再跑一遍）。
+# 所以 deploy 先把自己拷到临时文件再跑那一份
+if [ "${1:-}" = "deploy" ] && [ -z "${UP_SH_REEXEC:-}" ]; then
+    _TMP="$(mktemp /tmp/imu_up.XXXXXX.sh)"
+    cp "${BASH_SOURCE[0]}" "$_TMP"
+    UP_SH_REEXEC=1 UP_SH_HOME="$(pwd)" exec bash "$_TMP" "$@"
+fi
+[ -n "${UP_SH_HOME:-}" ] && cd "$UP_SH_HOME"
+
 ONLY=""
 PASS=()          # 透传给 label_service/up.sh 的开关
 RESTART_ONLY=0
