@@ -123,7 +123,8 @@ if [ "$SUB" = "deploy" ]; then
         deploy_probe "label_service " "http://127.0.0.1:${LABEL_SERVICE_PORT:-8383}/health" 30 || FAILED+=("label_service 不通")
     fi
     if want vision; then
-        VB="http://127.0.0.1:${VISION_SERVICE_PORT:-8385}"
+        VB_PORT="${VISION_SERVICE_PORT:-8385}"
+        VB="http://127.0.0.1:$VB_PORT"
         if deploy_probe "vision_service" "$VB/health" 60; then
             if [ "${DRY_RUN:-0}" != "1" ]; then
                 echo "    狗检测   available=$(deploy_field "$VB/api/v1/dog/status" available)"
@@ -133,6 +134,8 @@ if [ "$SUB" = "deploy" ]; then
                     [ "$(deploy_field "$VB/api/v1/embed/status" loading)" = "True" ] || break
                     sleep 5
                 done
+                [ "$(deploy_field "$VB/api/v1/embed/status" loading)" = "True" ] && \
+                    echo "    向量索引 还在下载/加载权重（第一次约 400MB），不用等它，过几分钟看：curl -s localhost:$VB_PORT/api/v1/embed/status"
                 echo "    向量索引 available=$(deploy_field "$VB/api/v1/embed/status" available)   indexed=$(deploy_field "$VB/api/v1/embed/status" indexed_videos)   $( [ "$(deploy_field "$VB/api/v1/embed/status" available)" = "True" ] || echo "← $(deploy_field "$VB/api/v1/embed/status" error)" )"
                 echo "    SAM      available=$(deploy_field "$VB/api/v1/sam/status" available)"
             fi
