@@ -133,8 +133,9 @@ def status() -> dict:
     except OSError:
         pass
     err = _load_error
-    if _model is None and err is None and not _loading:
-        err = "模型还没加载（启动预热关了或还没轮到），建索引时会加载"
+    if _model is None and err is None:
+        err = ("正在后台加载（第一次要下载权重约 400MB，按你的网速几分钟），过会儿再看" if _loading
+               else "模型还没加载（启动预热关了或还没轮到），建索引时会加载")
     return {"available": _model is not None, "loading": _loading, "error": err if _model is None else None,
             "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR}
 
