@@ -68,6 +68,13 @@ def _warmup_on_startup():
         else:
             _logger.warning("画面狗检测预热没成：%s（不影响启动和 SAM）", d.get("error"))
         e = embed.warmup()
+        # 姿态关键点也一起预热（有权重才会加载；没有就记一句）
+        from . import pose
+
+        if pose.available():
+            _logger.info("姿态模型已加载（%s）", pose.status().get("device"))
+        else:
+            _logger.info("姿态模型没加载：%s", pose.status().get("error"))
         if e.get("warm"):
             _logger.info("画面向量模型预热完成")
         else:
