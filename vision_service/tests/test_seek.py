@@ -295,6 +295,13 @@ def test_整条_送去问_合成片段_并算花费(fake_video, monkeypatch):
     n = r["stats"]["clips_sent"] - 1
     assert r["stats"]["usage"] == {"input": 1000 * n, "output": 20 * n,
                                    "est_usd": round(1000 * n / 1e6 * 5 + 20 * n / 1e6 * 25, 4)}
+    # 每次调用单独一条（平台落表做统计）：token / 耗时 / 成败 / 对应哪一段
+    calls = r["stats"]["calls"]
+    assert len(calls) == r["stats"]["clips_sent"]
+    assert sum(1 for c in calls if not c["ok"]) == 1 and all("latency_ms" in c and c["latency_ms"] >= 0 for c in calls)
+    good = [c for c in calls if c["ok"]]
+    assert all(c["input"] == 1000 and c["output"] == 20 and c["est_usd"] == round(1000 / 1e6 * 5 + 20 / 1e6 * 25, 4) for c in good)
+    assert all(c["end_s"] > c["start_s"] for c in calls)
     # 每段送的帧数不超过 n_frames，且都是 JPEG
     for kw in c.calls:
         imgs = [b for b in kw["messages"][0]["content"] if b["type"] == "image"]

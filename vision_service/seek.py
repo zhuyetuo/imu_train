@@ -416,9 +416,11 @@ def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM
         client=None, http=None) -> dict:
     """把一段的几帧送去问。返回 parse_answer 的结果 + usage。"""
     system, user = build_prompt(labels, clip_s, len(frames))
+    t0 = time.monotonic()
     text, usage = llmmod.chat_vision(llm, system, user, frames, max_tokens=300, client=client, http=http)
     out = parse_answer(text, labels)
     out["usage"] = usage
+    out["latency_ms"] = int((time.monotonic() - t0) * 1000)
     return out
 
 
@@ -559,12 +561,14 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
         return [samples[i]["jpeg"] for i in idx]
 
     def one(w: Window) -> dict:
+        t1 = time.monotonic()
         try:
             return ask(frames_of(w), labels, clip_s, llm, client=client, http=http)
         except Exception as e:  # noqa: BLE001 一段问失败不该让整个视频白跑
             _logger.warning("问模型失败 %.1f-%.1f：%s", w.start, w.end, e)
             return {"label": None, "body_part": None, "confidence": 0.0, "note": f"失败:{type(e).__name__}",
-                    "usage": {"input": 0, "output": 0}, "error": str(e)[:200]}
+                    "usage": {"input": 0, "output": 0}, "error": str(e)[:200],
+                    "latency_ms": int((time.monotonic() - t1) * 1000)}
 
     with ThreadPoolExecutor(max_workers=concurrency or config.SEEK_CONCURRENCY) as ex:
         answers = list(ex.map(one, wins))
@@ -576,6 +580,13 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
     stats["usage"]["est_usd"] = llmmod.estimate_usd(llm, stats["usage"]["input"], stats["usage"]["output"])
     stats["hits"] = sum(1 for a in answers if a.get("label"))
     stats["seconds"] = round(time.monotonic() - t0, 1)
+    # 每一次调用单独记一条：平台那边存表做统计（次数 / token / 耗时）
+    stats["calls"] = [{"latency_ms": int(a.get("latency_ms") or 0), "input": int(a["usage"].get("input") or 0),
+                       "output": int(a["usage"].get("output") or 0),
+                       "est_usd": llmmod.estimate_usd(llm, int(a["usage"].get("input") or 0), int(a["usage"].get("output") or 0)),
+                       "ok": not a.get("error"), "error": a.get("error"),
+                       "start_s": w.start, "end_s": w.end}
+                      for w, a in zip(wins, answers)]
     segs = merge_segments(wins, answers, min_conf=min_conf)
     return {"segments": segs, "windows": [w.__dict__ | {"idx": None, "answer": {k: v for k, v in a.items() if k != "usage"}}
                                           for w, a in zip(wins, answers)],
