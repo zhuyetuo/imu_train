@@ -6,7 +6,7 @@ vLLM 是独立进程（自己吃显存，能开 OpenAI 兼容口），这里只�
   status() 装没装 / 权重在不在 / 进程活没活 / 端口通不通 / 日志末尾
 
 权重放 models/vision/llm/<模型名> 下，跟别的模型一起管。日志在 vision_service/.vllm.log。
-vllm 这个包不自动装（几 GB，版本要跟 torch/CUDA 对上，跟 torch/sam2 一个规矩），没装 status 里说清楚。
+vllm 这个包由 run.sh 在有显卡的机器上自动装（VLLM_INSTALL=0 跳过），没装 status 里说清楚。
 """
 
 from __future__ import annotations
@@ -178,8 +178,7 @@ def start() -> dict:
             _last_error = f"端口 {config.VLLM_PORT} 已被别的进程占着（可能是手动起的 vllm）；不归这里管，先停掉它"
             return {"ok": False, "error": _last_error, "status": status()}
         if not installed():
-            _last_error = ("没装 vllm。在算法机的 python 环境里：pip install vllm（几 GB，版本要跟 torch/CUDA 对上，"
-                           "所以不自动装）；装完再点启动")
+            _last_error = "没装 vllm。重跑 ./up.sh deploy -g 会自动装（几 GB）；装完再点启动"
             return {"ok": False, "error": _last_error, "status": status()}
         if not weights_ready():
             if not _downloading:

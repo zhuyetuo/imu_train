@@ -94,6 +94,18 @@ ensure_deps() {
         fi
     fi
 
+    # vllm（本地大模型，「模型服务」页一键起停）：几 GB，自带钉死版本的 torch——装它可能把
+    # 现有 torch 换成它要的那个版本（一般更新，狗检测 / SigLIP 照常能跑）。有显卡才装；
+    # 不想它动环境：VLLM_INSTALL=0 ./up.sh deploy
+    if [ "${VLLM_INSTALL:-1}" != "0" ] && command -v nvidia-smi >/dev/null 2>&1 && ! "$PY_BIN" -c "import vllm" >/dev/null 2>&1; then
+        echo "缺 vllm（本地大模型），装一下：几 GB，会连带装它要的 torch 版本，看下面 pip 的进度..."
+        if "$PY_BIN" -m pip install --progress-bar on vllm; then
+            echo "  vllm 装好了。「模型服务」页点「启动」拉起来（第一次要下模型权重）"
+        else
+            echo "  ⚠ vllm 装不上。本地大模型那一行会显示没装，别的功能不受影响；手动：$PY_BIN -m pip install vllm"
+        fi
+    fi
+
     # ffmpeg：系统包，有它解码抽帧快好几倍（还能走 NVDEC）；没有退回 cv2，慢但能用。
     # 是 apt 装的，要 sudo：能免密就直接装，不能就问一次密码（不想装就 --no-install）
     if ! command -v ffmpeg >/dev/null 2>&1; then

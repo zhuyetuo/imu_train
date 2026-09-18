@@ -156,7 +156,7 @@ def _vllm_status() -> dict:
         err = "正在下权重：" + "；".join(st["download_log"][-2:])
     else:
         err = st["error"] or st["download_error"] or (
-            "没装 vllm（pip install vllm）" if not st["installed"] else
+            "没装 vllm（重跑 ./up.sh deploy -g 会自动装）" if not st["installed"] else
             "权重还没下（点启动会先下）" if not st["weights_ready"] else "没启动")
     return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
             "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
