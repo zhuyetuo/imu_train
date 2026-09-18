@@ -99,3 +99,25 @@ def test_模型服务页的映射(monkeypatch, tmp_path):
                         lambda llm, **kw: {"ok": True, "reply": "OK", "error": None})
     r = models.act("vllm", "test")
     assert r["ok"] is True and "OK" in r["detail"]
+
+
+def test_下载进度_按目录体积和总大小算(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path, weights=False)
+    d = tmp_path / f"r{_n[0]}" / "M-AWQ"
+    d.mkdir()
+    monkeypatch.setattr(vm, "_downloading", True)
+    vm._dl.update({"total": 10_000_000, "started": vm.time.monotonic() - 5, "samples": []})
+    (d / "a.safetensors").write_bytes(b"0" * 2_000_000)
+    p1 = vm.download_progress()
+    assert p1["pct"] == 20.0 and p1["done_mb"] == 2.0 and p1["total_mb"] == 10.0
+    vm._dl["samples"] = [(vm.time.monotonic() - 2, 0)]
+    p2 = vm.download_progress()
+    assert p2["speed_mbps"] > 0 and p2["eta_s"] is not None
+    row = next(m for m in models.list_models() if m["key"] == "vllm")
+    assert row["loading"] is True and "%" in row["error"] and row["progress"]["pct"] == 20.0
+    # 总大小拿不到：只报已下多少
+    vm._dl["total"] = 0
+    p3 = vm.download_progress()
+    assert p3["pct"] is None and p3["done_mb"] == 2.0
+    monkeypatch.setattr(vm, "_downloading", False)
+    assert vm.download_progress() is None

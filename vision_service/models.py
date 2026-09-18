@@ -153,13 +153,20 @@ def _vllm_status() -> dict:
     elif st["running"]:
         err = "进程在跑，模型还在加载（7B 要一两分钟）；看日志末尾"
     elif st["downloading"]:
-        err = "正在下权重：" + "；".join(st["download_log"][-2:])
+        pr = st.get("download_progress") or {}
+        if pr.get("total_mb"):
+            eta = f"，预计还要 {pr['eta_s'] // 60} 分 {pr['eta_s'] % 60} 秒" if pr.get("eta_s") is not None else ""
+            err = (f"正在下权重：{pr['pct']}%（{pr['done_mb'] / 1000:.2f} / {pr['total_mb'] / 1000:.2f} GB，"
+                   f"{pr['speed_mbps']} MB/s{eta}）")
+        else:
+            err = f"正在下权重：已下 {pr.get('done_mb', 0) / 1000:.2f} GB，{pr.get('speed_mbps', 0)} MB/s；" + "；".join(st["download_log"][-1:])
     else:
         err = st["error"] or st["download_error"] or (
             "没装 vllm（重跑 ./up.sh deploy -g 会自动装）" if not st["installed"] else
             "权重还没下（点启动会先下）" if not st["weights_ready"] else "没启动")
     return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
             "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
+            "progress": st.get("download_progress"),
             "vllm": {k: st[k] for k in ("installed", "model", "weights_ready", "downloading", "running", "pid", "port",
                                         "port_open", "ready", "uptime_s", "log_tail", "download_log", "download_error")}}
 

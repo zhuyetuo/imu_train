@@ -30,6 +30,8 @@ _last_error: str | None = None
 _downloading = False
 _download_error: str | None = None
 _download_log: list[str] = []
+# 下载进度：总大小从仓库文件列表算（拿不到就 None），已下的按本地目录体积量
+_dl = {"total": 0, "started": None, "samples": []}   # samples: [(t, bytes)] 最近几个点算速度
 
 LOG_PATH = os.path.join(config.HERE, ".vllm.log")
 
@@ -67,12 +69,67 @@ def weights_ready() -> bool:
     return any(f.endswith((".safetensors", ".bin")) for f in os.listdir(d))
 
 
+def _dir_bytes(d: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(d):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _repo_total_bytes() -> int:
+    """仓库里权重文件加起来多大：先问 ModelScope，再问 hf-mirror；都拿不到返回 0（只显示已下多少）。"""
+    try:
+        from modelscope.hub.api import HubApi
+
+        files = HubApi().get_model_files(config.VLLM_MODEL, recursive=True)
+        n = sum(int(f.get("Size") or 0) for f in files if f.get("Type") != "tree")
+        if n > 0:
+            return n
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi(endpoint=os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")).model_info(config.VLLM_MODEL, files_metadata=True)
+        return sum(int(getattr(s, "size", 0) or 0) for s in info.siblings)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def download_progress() -> dict | None:
+    """{pct, done_mb, total_mb, speed_mbps, eta_s}；没在下返回 None。"""
+    if not _downloading:
+        return None
+    done = _dir_bytes(local_dir()) if os.path.isdir(local_dir()) else 0
+    now = time.monotonic()
+    _dl["samples"].append((now, done))
+    _dl["samples"] = [x for x in _dl["samples"] if now - x[0] <= 30][-10:]
+    speed = 0.0
+    if len(_dl["samples"]) >= 2:
+        (t0, b0), (t1, b1) = _dl["samples"][0], _dl["samples"][-1]
+        if t1 > t0:
+            speed = max(0.0, (b1 - b0) / (t1 - t0))
+    total = _dl["total"]
+    eta = int((total - done) / speed) if total and speed > 0 and total > done else None
+    return {"pct": round(min(100.0, done / total * 100), 1) if total else None,
+            "done_mb": round(done / 1e6, 1), "total_mb": round(total / 1e6, 1) if total else None,
+            "speed_mbps": round(speed / 1e6, 2), "eta_s": eta,
+            "elapsed_s": int(now - _dl["started"]) if _dl["started"] else 0}
+
+
 def _download() -> None:
     """ModelScope 先试（国内快），不行走 hf-mirror。进度写进 _download_log 给 status 看。"""
     global _downloading, _download_error
     _downloading = True
     _download_error = None
     _download_log.clear()
+    _dl["started"] = time.monotonic()
+    _dl["samples"] = []
+    _dl["total"] = _repo_total_bytes()
     try:
         os.makedirs(config.VLLM_LOCAL_ROOT, exist_ok=True)
         errors = []
@@ -153,6 +210,7 @@ def status() -> dict:
         "downloading": _downloading,
         "download_error": _download_error,
         "download_log": _download_log[-5:],
+        "download_progress": download_progress(),
         "running": alive,
         "pid": _proc.pid if alive else None,
         "port": config.VLLM_PORT,
