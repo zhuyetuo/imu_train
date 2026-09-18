@@ -324,3 +324,45 @@ def test_transformers_4和5的返回都能取到向量():
     assert embed._as_tensor(t) is t                                                     # 4.x：直接是张量
     assert embed._as_tensor(types.SimpleNamespace(pooler_output=t, last_hidden_state=None)) is t   # 5.x
     assert embed._as_tensor(types.SimpleNamespace(pooler_output=None, image_embeds=t)) is t
+
+
+def test_frame_preview_给人看的框和裁剪区_没狗就整帧(fake_video, monkeypatch):
+    import base64
+
+    class _CapSeek(_Cap):
+        def set(self, prop, val):
+            return True
+
+        def read(self):
+            self.i = 0
+            return self.retrieve()
+
+    fake_video["cap"] = _CapSeek([0])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [{"bbox": [0.4, 0.4, 0.2, 0.2], "conf": 0.9}])
+    p = embed.frame_preview("x.mp4", 2.0)
+    assert p["has_dog"] is True and p["t"] == 2.0 and p["boxes"][0]["bbox"] == [0.4, 0.4, 0.2, 0.2]
+    x1, y1, x2, y2 = p["crop"]
+    assert 0 <= x1 < 0.4 and 0.6 < x2 <= 1 and 0 <= y1 < 0.4 and 0.6 < y2 <= 1     # 裁剪区包住框、带边距
+    assert base64.b64decode(p["jpeg"])[:2] == b"\xff\xd8" and p["w"] > 0 and p["h"] > 0
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
+    p = embed.frame_preview("x.mp4", 0.0)
+    assert p["has_dog"] is False and p["boxes"] == [] and p["crop"] == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_接口_preview_只要狗检测模型(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from vision_service import app as appmod
+
+    (tmp_path / "a.mp4").write_bytes(b"0")
+    monkeypatch.setattr(appmod.config, "VIDEO_ROOT", str(tmp_path))
+    with TestClient(appmod.app) as tc:
+        monkeypatch.setattr(dog, "status", lambda: {"available": False, "error": "没装"})
+        assert tc.post("/api/v1/embed/preview", json={"path": "a.mp4", "t": 3}).status_code == 503
+        monkeypatch.setattr(dog, "status", lambda: {"available": True, "error": None})
+        monkeypatch.setattr(embed, "frame_preview", lambda full, t, **kw: {"t": t, "has_dog": True, "boxes": [], "crop": [0, 0, 1, 1], "jpeg": "", "w": 1, "h": 1})
+        r = tc.post("/api/v1/embed/preview", json={"path": "a.mp4", "t": 3})
+        assert r.status_code == 200 and r.json()["t"] == 3.0
+        assert tc.post("/api/v1/embed/preview", json={"path": "../a.mp4", "t": 3}).status_code == 422
+        monkeypatch.setattr(embed, "frame_preview", lambda full, t, **kw: (_ for _ in ()).throw(ValueError("读不到")))
+        assert tc.post("/api/v1/embed/preview", json={"path": "a.mp4", "t": 3}).status_code == 422

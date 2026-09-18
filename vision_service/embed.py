@@ -272,16 +272,11 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
 
 # ── 查询向量 ──────────────────────────────────────────────────────────
 
-def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder | None = None) -> dict:
-    """视频某一秒的那一帧 → 框狗、裁、算向量。返回 {vec, has_dog, t}。
-
-    单帧允许 seek（CAP_PROP_POS_MSEC）：只取一帧，VFR 的近似误差是零点几秒，
-    对"这一帧长什么样"没影响。
-    """
+def _read_frame(full_path: str, t_s: float):
+    """视频某一秒的那一帧（BGR）。单帧允许 seek（CAP_PROP_POS_MSEC）：只取一帧，
+    VFR 的近似误差是零点几秒，对"这一帧长什么样"没影响。"""
     import cv2
-    import numpy as np
 
-    enc = encoder or _default_encoder
     cap = cv2.VideoCapture(full_path)
     if not cap.isOpened():
         raise ValueError(f"打不开这个视频：{full_path}")
@@ -292,6 +287,16 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
         cap.release()
     if not ok:
         raise ValueError(f"读不到 {t_s:.1f} 秒那一帧")
+    return frame
+
+
+def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder | None = None) -> dict:
+    """视频某一秒的那一帧 → 框狗、裁、算向量。返回 {vec, has_dog, t}。"""
+    import cv2
+    import numpy as np
+
+    enc = encoder or _default_encoder
+    frame = _read_frame(full_path, t_s)
     boxes = dog.detect(frame, conf)
     h, w = frame.shape[:2]
     if boxes:
@@ -305,6 +310,32 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
     ok2, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     vec = enc.encode_images([bytes(np.asarray(buf).tobytes())])[0]
     return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s)}
+
+
+def frame_preview(full_path: str, t_s: float, conf: float = 0.35, max_side: int = 640) -> dict:
+    """给人看的：这一帧框到了哪几只狗、拿哪一块去搜。不算向量，不碰索引。
+
+    返回 {t, has_dog, w, h, boxes: [{bbox:[x,y,w,h] 归一化, conf}], crop: [x1,y1,x2,y2] 归一化,
+          jpeg: base64 的缩小整帧}。框和裁剪区都是归一化坐标，前端按显示尺寸画。
+    """
+    import base64
+
+    import cv2
+    import numpy as np
+
+    frame = _read_frame(full_path, t_s)
+    boxes = dog.detect(frame, conf)
+    h, w = frame.shape[:2]
+    if boxes:
+        x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
+        crop = [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)]
+    else:
+        crop = [0.0, 0.0, 1.0, 1.0]
+    scale = max_side / max(h, w)
+    small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1 else frame
+    _ok, buf = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return {"t": float(t_s), "has_dog": bool(boxes), "w": int(w), "h": int(h), "boxes": boxes, "crop": crop,
+            "jpeg": base64.b64encode(np.asarray(buf).tobytes()).decode("ascii")}
 
 
 def text_query(text: str, encoder: Encoder | None = None):
