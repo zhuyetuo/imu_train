@@ -57,6 +57,8 @@ def test_加载卸载测试_走各模块(monkeypatch):
     r = models.act("dog", "test")
     assert r["ok"] is True and "框到 1 个" in r["detail"] and r["latency_ms"] >= 0
     assert meter.get("dog")["calls"] == 0                 # 页面上的测试不算业务调用
+    lt = next(m for m in models.list_models() if m["key"] == "dog")["last_test"]
+    assert lt["ok"] is True and lt["at"] > 0 and "框到 1 个" in lt["detail"]   # 记住最近一次测试
     # 卸载：模型清掉、状态变不可用
     r = models.act("dog", "unload")
     assert r["ok"] is True and dog._model is None and r["status"]["available"] is False
