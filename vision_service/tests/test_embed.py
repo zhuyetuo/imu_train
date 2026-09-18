@@ -366,3 +366,69 @@ def test_接口_preview_只要狗检测模型(monkeypatch, tmp_path):
         assert tc.post("/api/v1/embed/preview", json={"path": "../a.mp4", "t": 3}).status_code == 422
         monkeypatch.setattr(embed, "frame_preview", lambda full, t, **kw: (_ for _ in ()).throw(ValueError("读不到")))
         assert tc.post("/api/v1/embed/preview", json={"path": "a.mp4", "t": 3}).status_code == 422
+
+
+def test_去背景_减均值后共同成分不再主导(index_dir):
+    """所有帧都带一大坨相同的背景向量 bg，动作差别只在一个很小的分量上：
+    原始余弦全部 0.99+ 分不开；减掉均值后，跟样例同动作的排前面、分数拉开。"""
+    rng = np.random.default_rng(0)
+    bg = np.array([10, 0, 0, 0], dtype="float32")
+    lick = np.array([0, 1, 0, 0], dtype="float32")
+    sleep = np.array([0, 0, 1, 0], dtype="float32")
+    ts, embs = [], []
+    for i in range(30):
+        act = lick if i % 3 == 0 else sleep
+        v = bg + act + rng.normal(0, 0.05, 4).astype("float32")
+        ts.append(float(i))
+        embs.append(v / np.linalg.norm(v))
+    _save("V.mp4", ts, embs)
+    q = bg + lick
+    raw = embed.search(q, ["V.mp4"], top_k=30, center=False)
+    assert raw["centered"] is False and min(h["score"] for h in raw["hits"]) > 0.98   # 分不开
+    cen = embed.search(q, ["V.mp4"], top_k=30, center=True)
+    assert cen["centered"] is True
+    # 舔的 10 帧全在前面且分数接近 1；睡觉的残差方向相反、分数为负，被 min_score=0 截掉
+    assert {h["t"] for h in cen["hits"]} == {float(i) for i in range(30) if i % 3 == 0}
+    assert min(h["score"] for h in cen["hits"]) > 0.9
+    cen_all = embed.search(q, ["V.mp4"], top_k=30, min_score=-1.0, center=True)
+    assert len(cen_all["hits"]) == 30 and cen_all["hits"][0]["score"] - cen_all["hits"][-1]["score"] > 1.0
+    # 帧太少（<20）不做去背景，免得均值本身就是噪声
+    _save("W.mp4", [0.0, 1.0], [embs[0], embs[1]])
+    assert embed.search(q, ["W.mp4"], center=True)["centered"] is False
+
+
+def test_缩略图_狗框那一块或整帧带框(fake_video, monkeypatch):
+    class _CapSeek(_Cap):
+        def set(self, prop, val):
+            return True
+
+        def read(self):
+            self.i = 0
+            return self.retrieve()
+
+    fake_video["cap"] = _CapSeek([0])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [{"bbox": [0.4, 0.4, 0.2, 0.2], "conf": 0.9}])
+    import cv2
+
+    crop = cv2.imdecode(np.frombuffer(embed.frame_thumb("x.mp4", 1.0, crop=True), dtype="uint8"), cv2.IMREAD_COLOR)
+    full = cv2.imdecode(np.frombuffer(embed.frame_thumb("x.mp4", 1.0, crop=False), dtype="uint8"), cv2.IMREAD_COLOR)
+    # 假视频帧很小，裁剪区被最小边长撑到整帧；只验两种都能出图、都不超过 320
+    assert max(full.shape[:2]) <= 320 and max(crop.shape[:2]) <= 320
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [])
+    none = cv2.imdecode(np.frombuffer(embed.frame_thumb("x.mp4", 1.0, crop=True), dtype="uint8"), cv2.IMREAD_COLOR)
+    assert none.shape[:2] == full.shape[:2]                                  # 没狗就整帧
+
+
+def test_接口_thumb(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from vision_service import app as appmod
+
+    (tmp_path / "a.mp4").write_bytes(b"0")
+    monkeypatch.setattr(appmod.config, "VIDEO_ROOT", str(tmp_path))
+    with TestClient(appmod.app) as tc:
+        monkeypatch.setattr(dog, "status", lambda: {"available": True, "error": None})
+        monkeypatch.setattr(embed, "frame_thumb", lambda full, t, **kw: b"\xff\xd8jpeg" + str(kw.get("crop")).encode())
+        r = tc.get("/api/v1/embed/thumb", params={"path": "a.mp4", "t": 3, "crop": "false"})
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content.endswith(b"False")
+        assert tc.get("/api/v1/embed/thumb", params={"path": "../a.mp4", "t": 3}).status_code == 422

@@ -268,6 +268,7 @@ class EmbedSearchIn(BaseModel):
     min_score: float = Field(0.0, ge=-1, le=1)
     gap_s: float = Field(3.0, ge=0, le=60)
     exclude_self_s: float = Field(10.0, ge=0, le=600, description="以图搜图时把样例前后这么多秒排掉")
+    center: bool = Field(True, description="减掉所有帧的平均向量再比（去掉同狗同房同地板的共同背景）")
 
 
 def _embed_ready():
@@ -323,6 +324,24 @@ def embed_preview(body: EmbedPreviewIn):
         raise HTTPException(500, f"取帧失败: {type(e).__name__}: {e}") from e
 
 
+@app.get("/api/v1/embed/thumb")
+def embed_thumb(path: str, t: float, crop: bool = True):
+    """某视频某一秒的缩略图（狗框那一块 / 整帧带框）。给平台"先看命中"那一排图用。"""
+    from fastapi.responses import Response
+
+    full = _resolve_under(config.VIDEO_ROOT, path)
+    st = dog.status()
+    if not st.get("available"):
+        raise HTTPException(503, st.get("error") or "狗检测模型不可用")
+    try:
+        data = embed.frame_thumb(full, max(0.0, t), crop=crop)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"取帧失败: {type(e).__name__}: {e}") from e
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+
 @app.post("/api/v1/embed/search")
 def embed_search(body: EmbedSearchIn):
     if (body.text is None) == (body.ref is None):
@@ -334,11 +353,11 @@ def embed_search(body: EmbedSearchIn):
             q = embed.frame_query(full, body.ref.t)
             exclude = (body.ref.path, body.ref.t - body.exclude_self_s, body.ref.t + body.exclude_self_s)
             r = embed.search(q["vec"], body.paths, top_k=body.top_k, min_score=body.min_score,
-                             gap_s=body.gap_s, exclude=exclude)
+                             gap_s=body.gap_s, exclude=exclude, center=body.center)
             r["query"] = {"kind": "frame", "has_dog": q["has_dog"], "t": q["t"]}
         else:
             r = embed.search(embed.text_query(body.text), body.paths, top_k=body.top_k,
-                             min_score=body.min_score, gap_s=body.gap_s)
+                             min_score=body.min_score, gap_s=body.gap_s, center=body.center)
             r["query"] = {"kind": "text", "text": body.text}
         return r
     except ValueError as e:
