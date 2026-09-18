@@ -14,6 +14,8 @@ from . import config, dog, embed, pose, sam, vllm_manager
 from . import meter as _meter
 
 _started = time.time()
+# 每个模型最近一次「测试」的结果：{at, ok, latency_ms, detail, error}（进程内存）
+_last_test: dict[str, dict] = {}
 
 
 def meter(key: str) -> dict:
@@ -201,7 +203,8 @@ def list_models() -> list[dict]:
     out = []
     for key, spec in REGISTRY.items():
         st = spec["status"]()
-        out.append({"key": key, "name": spec["name"], "purpose": spec["purpose"], **st, "meter": meter(key)})
+        out.append({"key": key, "name": spec["name"], "purpose": spec["purpose"], **st, "meter": meter(key),
+                    "last_test": _last_test.get(key)})
     return out
 
 
@@ -223,11 +226,13 @@ def act(key: str, action: str) -> dict:
         try:
             with _meter.paused():      # 调试测试不进统计
                 r = spec["test"]()
-            return {"ok": True, "error": None, "latency_ms": r.get("latency_ms", int((time.monotonic() - t0) * 1000)),
-                    "detail": r.get("detail"), "status": spec["status"]()}
+            out = {"ok": True, "error": None, "latency_ms": r.get("latency_ms", int((time.monotonic() - t0) * 1000)),
+                   "detail": r.get("detail")}
         except Exception as e:  # noqa: BLE001 测试就是要把错误原样带回给人看
-            return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}", "latency_ms": int((time.monotonic() - t0) * 1000),
-                    "detail": None, "status": spec["status"]()}
+            out = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}", "latency_ms": int((time.monotonic() - t0) * 1000),
+                   "detail": None}
+        _last_test[key] = {"at": time.time(), **out}
+        return {**out, "status": spec["status"]()}
     raise ValueError(action)
 
 
