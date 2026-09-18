@@ -28,7 +28,7 @@ import os
 import threading
 import time
 
-from . import config, dog, seek
+from . import config, dog, pose, seek
 
 _logger = logging.getLogger("vision_service.embed")
 
@@ -191,7 +191,8 @@ def status() -> dict:
                else "模型还没加载（启动预热关了或还没轮到），建索引时会加载")
     return {"available": _model is not None, "loading": _loading, "error": err if _model is None else None,
             "progress": download_progress(),
-            "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR}
+            "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR,
+            "pose": pose.status()}
 
 
 def download_progress() -> dict | None:
@@ -234,6 +235,8 @@ def load(rel_path: str) -> dict | None:
     with np.load(p, allow_pickle=False) as z:
         d = {"t": z["t"].astype("float32"), "emb": z["emb"].astype("float32"), "box": z["box"],
              "meta": json.loads(str(z["meta"]))}
+        # 姿态向量是后加的：老索引没有这一列，搜索时只用画面
+        d["pose"] = z["pose"].astype("float32") if "pose" in z.files else None
     _cache[rel_path] = (mtime, d)
     return d
 
@@ -249,7 +252,13 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         old = load(rel_path)
         if old is not None and old["meta"].get("model") == config.EMBED_MODEL:
             return {"n": int(len(old["t"])), "cached": True, "seconds": 0.0, "model": config.EMBED_MODEL}
-    samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf)
+    # 姿态可用就顺路算：每个有狗的帧一条姿态向量（整帧只在采样那一刻拿得到）
+    use_pose = pose.available()
+
+    def on_frame(rec: dict, frame) -> None:
+        rec["pose"] = pose.frame_descriptor(frame, rec["boxes"]) if use_pose else None
+
+    samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame)
     with_dog = [s for s in samples if s["jpeg"] is not None]
     if with_dog:
         emb = enc.encode_images([s["jpeg"] for s in with_dog])
@@ -258,16 +267,23 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     t = np.array([s["t"] for s in with_dog], dtype="float32")
     box = np.array([seek.crop_rect(s["boxes"], 1, 1, margin=0.0, min_side=0) for s in with_dog], dtype="float32") \
         if with_dog else np.zeros((0, 4), dtype="float32")
+    # 没测到点的帧记全 0（搜索时当"没姿态"，只用画面）
+    pose_rows = np.array([s.get("pose") or [0.0] * pose.DIM for s in with_dog], dtype="float32") \
+        if with_dog else np.zeros((0, pose.DIM), dtype="float32")
+    n_pose = int(sum(1 for s in with_dog if s.get("pose")))
     meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
-            "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path}
+            "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
+            "pose": use_pose, "with_pose": n_pose}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
-    np.savez(tmp, t=t, emb=emb.astype("float16"), box=box, meta=np.array(json.dumps(meta, ensure_ascii=False)))
+    np.savez(tmp, t=t, emb=emb.astype("float16"), box=box, pose=pose_rows.astype("float16"),
+             meta=np.array(json.dumps(meta, ensure_ascii=False)))
     os.replace(tmp, p)
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
-            "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog)}
+            "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
+            "with_pose": n_pose}
 
 
 # ── 查询向量 ──────────────────────────────────────────────────────────
@@ -309,7 +325,9 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
         crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
     ok2, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     vec = enc.encode_images([bytes(np.asarray(buf).tobytes())])[0]
-    return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s)}
+    # 姿态那一路：有狗且模型可用才有
+    pvec = pose.frame_descriptor(frame, boxes) if boxes else None
+    return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s), "pose": pvec}
 
 
 def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = True, max_side: int = 320) -> bytes:
@@ -370,7 +388,8 @@ def text_query(text: str, encoder: Encoder | None = None):
 # ── 搜索 ──────────────────────────────────────────────────────────────
 
 def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, gap_s: float = 3.0,
-           exclude: tuple[str, float, float] | None = None, center: bool = True) -> dict:
+           exclude: tuple[str, float, float] | None = None, center: bool = True,
+           pose_vec=None, pose_w: float | None = None) -> dict:
     """在这些视频的索引里找最像的，按视频把相邻命中合成段。
 
     返回 {hits:[{path,t,score}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
@@ -402,6 +421,13 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             mu = sum(d["emb"].astype("float32").sum(axis=0) for _rp, d in loaded if len(d["t"])) / tot
             q = q - mu
     q = q / (np.linalg.norm(q) + 1e-9)
+    # 姿态那一路：样例有姿态、索引里也存了姿态的帧才混；两边缺一个就只看画面
+    pw = config.POSE_W if pose_w is None else float(pose_w)
+    pq = None
+    if pose_vec is not None and pw > 0:
+        pq = np.asarray(pose_vec, dtype="float32")
+        pq = pq / (np.linalg.norm(pq) + 1e-9)
+    used_pose = False
     hits: list[dict] = []
     for rp, d in loaded:
         if not len(d["t"]):
@@ -411,6 +437,16 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             emb = emb - mu
             emb = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
         scores = emb @ q
+        pscores = None
+        if pq is not None and d.get("pose") is not None and len(d["pose"]) == len(d["t"]):
+            P = d["pose"].astype("float32")
+            has = np.linalg.norm(P, axis=1) > 0
+            if has.any():
+                pscores = P @ pq                         # 索引里的姿态向量本来就是单位向量
+                # 没姿态的帧：姿态分记成画面分，等于这帧只看画面
+                pscores = np.where(has, pscores, scores)
+                scores = (1 - pw) * scores + pw * pscores
+                used_pose = True
         for i in np.argsort(-scores):
             s = float(scores[i])
             if s < min_score:
@@ -418,11 +454,14 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             t = float(d["t"][i])
             if exclude and exclude[0] == rp and exclude[1] <= t <= exclude[2]:
                 continue
-            hits.append({"path": rp, "t": round(t, 2), "score": round(s, 4)})
+            h = {"path": rp, "t": round(t, 2), "score": round(s, 4)}
+            if pscores is not None:
+                h["pose_score"] = round(float(pscores[i]), 4)
+            hits.append(h)
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
     return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
-            "centered": mu is not None}
+            "centered": mu is not None, "pose_used": used_pose, "pose_w": pw if used_pose else 0.0}
 
 
 def group_hits(hits: list[dict], gap_s: float = 3.0, pad_s: float = 1.0) -> list[dict]:

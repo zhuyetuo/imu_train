@@ -27,3 +27,8 @@ pillow>=10
 # SigLIP 的分词器要它（文本搜索那一半），没装的话整个模型加载失败
 sentencepiece>=0.1.99
 protobuf>=3.20
+# 姿态关键点（以图搜图的第二路信号）：RTMPose AP-10K 的 ONNX，rtmlib + onnxruntime 跑。
+# 先装 CPU 版 onnxruntime（rtmpose-m 256 一帧 30ms 左右，建索引 1 fps 够用）；
+# 想走 GPU 换成 onnxruntime-gpu（版本得跟 CUDA 对上，跟 torch 一样不在这里钉）
+rtmlib>=0.0.13
+onnxruntime>=1.16

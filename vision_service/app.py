@@ -269,6 +269,7 @@ class EmbedSearchIn(BaseModel):
     gap_s: float = Field(3.0, ge=0, le=60)
     exclude_self_s: float = Field(10.0, ge=0, le=600, description="以图搜图时把样例前后这么多秒排掉")
     center: bool = Field(True, description="减掉所有帧的平均向量再比（去掉同狗同房同地板的共同背景）")
+    pose_w: float | None = Field(None, ge=0, le=1, description="姿态相似占多少（0 只看画面，1 只看姿态）；不传用 POSE_W")
 
 
 def _embed_ready():
@@ -353,8 +354,9 @@ def embed_search(body: EmbedSearchIn):
             q = embed.frame_query(full, body.ref.t)
             exclude = (body.ref.path, body.ref.t - body.exclude_self_s, body.ref.t + body.exclude_self_s)
             r = embed.search(q["vec"], body.paths, top_k=body.top_k, min_score=body.min_score,
-                             gap_s=body.gap_s, exclude=exclude, center=body.center)
-            r["query"] = {"kind": "frame", "has_dog": q["has_dog"], "t": q["t"]}
+                             gap_s=body.gap_s, exclude=exclude, center=body.center,
+                             pose_vec=q.get("pose"), pose_w=body.pose_w)
+            r["query"] = {"kind": "frame", "has_dog": q["has_dog"], "t": q["t"], "has_pose": q.get("pose") is not None}
         else:
             r = embed.search(embed.text_query(body.text), body.paths, top_k=body.top_k,
                              min_score=body.min_score, gap_s=body.gap_s, center=body.center)

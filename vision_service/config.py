@@ -97,6 +97,15 @@ EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
 EMBED_BATCH     = int(_env("EMBED_BATCH", "128"))
 EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 
+# ── 姿态关键点（以图搜图的第二路信号）────────────────────────────────
+# RTMPose-m AP-10K 的 ONNX 一个文件，rtmlib + onnxruntime 跑。没权重 / 没装就自动关，
+# 索引里不存姿态、搜索只用画面。get_weights.sh 会下并写进 .env
+POSE_ONNX  = _env("POSE_ONNX", os.path.join(HERE, "..", "models", "vision", "pose", "rtmpose_ap10k.onnx"))
+POSE_INPUT = int(_env("POSE_INPUT", "256"))
+POSE_DEVICE = _env("POSE_DEVICE", SAM_DEVICE)
+# 搜索时姿态相似占多少（0 = 只看画面，1 = 只看姿态）。前端可调
+POSE_W = float(_env("POSE_W", "0.5"))
+
 # ── 解码 / 检测的速度开关 ─────────────────────────────────────────────
 # 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2
 DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
