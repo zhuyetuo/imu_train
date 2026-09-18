@@ -108,7 +108,7 @@ POSE_DEVICE = _env("POSE_DEVICE", SAM_DEVICE)
 POSE_W = float(_env("POSE_W", "0.5"))
 
 # ── 本地大模型（vLLM）────────────────────────────────────────────────
-# 「模型服务」页一键起停。权重放 models/vision/llm/<模型名>；vllm 这个包不自动装
+# 「模型服务」页一键起停。权重放 models/vision/llm/<模型名>，docker 跑时挂进容器
 VLLM_MODEL      = _env("VLLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct-AWQ")
 VLLM_PORT       = int(_env("VLLM_PORT", "8386"))
 VLLM_LOCAL_ROOT = _env("VLLM_LOCAL_ROOT", os.path.join(HERE, "..", "models", "vision", "llm"))
@@ -117,6 +117,10 @@ VLLM_MAX_LEN    = int(_env("VLLM_MAX_LEN", "8192"))
 VLLM_GPU_UTIL   = float(_env("VLLM_GPU_UTIL", "0.5"))
 # 额外参数，原样拼到命令行后面（比如 --quantization awq --dtype half）
 VLLM_ARGS       = _env("VLLM_ARGS", "")
+# 怎么跑：docker（默认，官方镜像自带 CUDA 工具链，不动主机 python）/ process（pip 装的 vllm 直接起进程）
+VLLM_BACKEND    = _env("VLLM_BACKEND", "docker")
+VLLM_IMAGE      = _env("VLLM_IMAGE", "vllm/vllm-openai:latest")
+VLLM_CONTAINER  = _env("VLLM_CONTAINER", "imu_vllm")
 
 # ── 解码 / 检测的速度开关 ─────────────────────────────────────────────
 # 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2

@@ -163,12 +163,19 @@ def _vllm_status() -> dict:
                    f"{pr['speed_mbps']} MB/s{eta}）")
         else:
             err = f"正在下权重：已下 {pr.get('done_mb', 0) / 1000:.2f} GB，{pr.get('speed_mbps', 0)} MB/s；" + "；".join(st["download_log"][-1:])
+    elif st.get("pulling"):
+        err = f"正在拉镜像 {st.get('image')}（十几 GB）：" + "；".join(st.get("pull_log") or [])
     elif st.get("exited"):
         errs = st.get("log_errors") or []
-        err = f"vllm 进程退出了（code {st.get('exit_code')}）：" + (errs[0] if errs else "看日志") + "。点「日志」看全部"
+        err = f"vllm {'容器' if st.get('backend') == 'docker' else '进程'}退出了（code {st.get('exit_code')}）：" + (errs[0] if errs else "看日志") + "。点「日志」看全部"
     else:
+        if st.get("backend") == "docker":
+            not_installed = ("docker 不可用（没装或 daemon 没起）" if not st.get("docker_available") else
+                             (st.get("pull_error") or f"镜像 {st.get('image')} 还没拉（点启动会拉；或 ./up.sh deploy 时拉）"))
+        else:
+            not_installed = "没装 vllm（VLLM_BACKEND=process 时重跑 ./up.sh deploy -g 会自动装）"
         err = st["error"] or st["download_error"] or (
-            "没装 vllm（重跑 ./up.sh deploy -g 会自动装）" if not st["installed"] else
+            not_installed if not st["installed"] else
             f"权重还没齐（缺 {', '.join(st.get('missing_files') or [])}；点启动会接着下）" if not st["weights_ready"] else "没启动")
     return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
             "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
@@ -176,7 +183,7 @@ def _vllm_status() -> dict:
             "startup": st.get("startup_progress"),
             "vllm": {k: st[k] for k in ("installed", "model", "weights_ready", "downloading", "running", "pid", "port",
                                         "port_open", "ready", "uptime_s", "log_tail", "download_log", "download_error",
-                                        "exited", "exit_code", "log_errors")}}
+                                        "exited", "exit_code", "log_errors", "backend", "image", "pulling", "pull_log")}}
 
 
 def _vllm_load() -> dict:
@@ -200,7 +207,7 @@ REGISTRY: dict[str, dict] = {
     "pose": {"name": "姿态关键点（RTMPose AP-10K）", "purpose": "以图搜图的第二路信号：鼻子够到了哪只爪",
              "status": _pose_status, "load": lambda: {"warm": pose.available(), "error": pose.status()["error"]},
              "unload": _pose_unload, "test": _pose_test},
-    "vllm": {"name": "本地大模型（vLLM）", "purpose": "「画面找片段」的本地视觉大模型，OpenAI 兼容口；「大模型 API」页里「本地服务」那一行连的就是它",
+    "vllm": {"name": "本地大模型（vLLM）", "purpose": "「画面找片段」的本地视觉大模型，OpenAI 兼容口，docker 跑；「大模型 API」页里「本地服务」那一行连的就是它",
              "status": _vllm_status, "load": _vllm_load, "unload": _vllm_unload, "test": vllm_manager.test},
 }
 

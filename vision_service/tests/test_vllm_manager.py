@@ -13,6 +13,7 @@ def _reset(monkeypatch, tmp_path, installed=True, weights=True, port_open=False)
     _n[0] += 1
     tmp_path = tmp_path / f"r{_n[0]}"
     tmp_path.mkdir()
+    monkeypatch.setattr(vm.config, "VLLM_BACKEND", "process")     # 这些用例验的是直接起进程那条路
     monkeypatch.setattr(vm, "_proc", None)
     monkeypatch.setattr(vm, "_started_at", None)
     monkeypatch.setattr(vm, "_last_error", None)
@@ -203,3 +204,85 @@ def test_没有系统CUDA时用pip装的nvcc(monkeypatch, tmp_path):
     (real / "bin" / "nvcc").write_text("")
     monkeypatch.setenv("CUDA_HOME", str(real))
     assert vm._cuda_home() == str(real)
+
+
+_REAL_INSTALLED = vm.installed
+
+
+class _R:
+    def __init__(self, code=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = code, out, err
+
+
+def _docker(monkeypatch, tmp_path, *, image=True, container=None, daemon=True):
+    """桩掉 docker 命令：inspect / run / rm / logs。container=None 不存在，否则 (running, exit_code)。"""
+    _reset(monkeypatch, tmp_path)
+    monkeypatch.setattr(vm.config, "VLLM_BACKEND", "docker")
+    monkeypatch.setattr(vm.config, "VLLM_IMAGE", "vllm/vllm-openai:test")
+    monkeypatch.setattr(vm, "installed", _REAL_INSTALLED)      # _reset 桩掉了它，docker 这条路要真算
+    monkeypatch.setattr(vm, "_docker_cache", None)
+    monkeypatch.setattr(vm.shutil, "which", lambda name: "/usr/bin/docker")
+    calls = []
+    state = {"container": container}
+
+    def run(cmd, timeout=30):
+        calls.append(cmd)
+        sub = cmd[1:3]
+        if sub[0] == "info":
+            return _R(0 if daemon else 1)
+        if sub == ["image", "inspect"]:
+            return _R(0 if image else 1)
+        if sub[0] == "inspect":
+            c = state["container"]
+            return _R(0, f"{'true' if c[0] else 'false'} {c[1]} 2026-09-18T00:00:00Z") if c else _R(1, "", "No such object")
+        if sub[0] == "run":
+            state["container"] = (True, 0)
+            return _R(0, "abc123")
+        if sub[0] == "rm":
+            state["container"] = None
+            return _R(0)
+        if sub[0] == "logs":
+            return _R(0, "INFO Loading safetensors checkpoint shards:  50% Completed | 1/2\nERROR x\n")
+        return _R(1, "", "unknown")
+
+    monkeypatch.setattr(vm, "_run", run)
+    return calls, state
+
+
+def test_docker后端_起停_日志_状态(monkeypatch, tmp_path):
+    calls, state = _docker(monkeypatch, tmp_path)
+    assert vm.use_docker() and vm.installed() is True
+    r = vm.start()
+    assert r["ok"] is True, r
+    run_cmd = next(c for c in calls if c[1] == "run")
+    assert "--gpus" in run_cmd and f"{vm.config.VLLM_PORT}:8000" in run_cmd and "/models/M-AWQ" in run_cmd
+    assert "--served-model-name" in run_cmd and "Org/M-AWQ" in run_cmd and "vllm/vllm-openai:test" in run_cmd
+    st = vm.status()
+    assert st["backend"] == "docker" and st["running"] is True and st["pid"] is None and st["exited"] is False
+    assert "50% Completed" in "\n".join(st["log_tail"])
+    assert vm.startup_progress()["pct"] >= 20
+    assert vm.start()["note"] == "已经在跑"
+    r = vm.stop()
+    assert r["ok"] is True and state["container"] is None and vm.status()["running"] is False
+    # 容器退出了：状态说明 + 退出码
+    state["container"] = (False, 1)
+    st = vm.status()
+    assert st["exited"] is True and st["exit_code"] == 1
+    row = next(m for m in models.list_models() if m["key"] == "vllm")
+    assert "容器退出了" in row["error"]
+    # 视觉服务退出不停容器
+    monkeypatch.setattr(vm, "_docker_stop", lambda: (_ for _ in ()).throw(AssertionError("不该停")))
+    vm.shutdown_on_exit()
+
+
+def test_docker后端_没镜像先拉_没daemon报人话(monkeypatch, tmp_path):
+    calls, state = _docker(monkeypatch, tmp_path, image=False)
+    started = []
+    monkeypatch.setattr(vm.threading, "Thread", lambda **kw: type("T", (), {"start": lambda self: started.append(kw["target"])})())
+    r = vm.start()
+    assert r["ok"] is False and r.get("pulling") is True and started
+    row = next(m for m in models.list_models() if m["key"] == "vllm")
+    assert "镜像" in row["error"]
+    calls, state = _docker(monkeypatch, tmp_path, daemon=False)
+    r = vm.start()
+    assert r["ok"] is False and "docker 不可用" in r["error"]
