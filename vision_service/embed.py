@@ -312,6 +312,30 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
     return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s)}
 
 
+def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = True, max_side: int = 320) -> bytes:
+    """某一秒那一帧的缩略图 JPEG：crop=True 拿狗框那一块（跟建索引 / 查询裁的同一块），
+    没狗就整帧；crop=False 整帧带框。给"先看命中"那一排缩略图用。"""
+    import cv2
+    import numpy as np
+
+    frame = _read_frame(full_path, t_s)
+    boxes = dog.detect(frame, conf)
+    h, w = frame.shape[:2]
+    if crop and boxes:
+        x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
+        img = frame[y1:y2, x1:x2]
+    else:
+        img = frame.copy()
+        for b in boxes:
+            bx, by, bw, bh = b["bbox"]
+            cv2.rectangle(img, (int(bx * w), int(by * h)), (int((bx + bw) * w), int((by + bh) * h)), (26, 196, 82), 3)
+    scale = max_side / max(img.shape[:2])
+    if scale < 1:
+        img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+    _ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return bytes(np.asarray(buf).tobytes())
+
+
 def frame_preview(full_path: str, t_s: float, conf: float = 0.35, max_side: int = 640) -> dict:
     """给人看的：这一帧框到了哪几只狗、拿哪一块去搜。不算向量，不碰索引。
 
@@ -346,28 +370,47 @@ def text_query(text: str, encoder: Encoder | None = None):
 # ── 搜索 ──────────────────────────────────────────────────────────────
 
 def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, gap_s: float = 3.0,
-           exclude: tuple[str, float, float] | None = None) -> dict:
+           exclude: tuple[str, float, float] | None = None, center: bool = True) -> dict:
     """在这些视频的索引里找最像的，按视频把相邻命中合成段。
 
     返回 {hits:[{path,t,score}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
     exclude=(path, t0, t1)：把样例自己那一段排掉，不然第一名永远是它自己。
+
+    center：先把所有帧的平均向量减掉再比。同一只狗、同一间房、同一块花砖地，每一帧的向量
+    里都带着这一大坨"共同背景"，原始余弦全在 0.95 以上，动作的差别被淹没——减掉均值后
+    剩下的才是"这一帧跟别的帧不一样的地方"（姿态、部位）。分数会明显变低、拉开。
     """
     import numpy as np
 
+    # 先归一化再减均值：索引里存的都是单位向量，查询向量得先到同一尺度，减掉的均值才对得上
     q = np.asarray(vec, dtype="float32")
     q = q / (np.linalg.norm(q) + 1e-9)
-    hits: list[dict] = []
+    loaded: list[tuple[str, dict]] = []
     missing: list[str] = []
-    searched = 0
     for rp in rel_paths:
         d = load(rp)
         if d is None:
             missing.append(rp)
             continue
-        searched += 1
+        loaded.append((rp, d))
+    searched = len(loaded)
+    mu = None
+    if center:
+        tot = sum(len(d["t"]) for _rp, d in loaded)
+        if tot >= 20:
+            # 索引存的是 float16，求和前转 float32，不然几百帧加起来精度全丢
+            mu = sum(d["emb"].astype("float32").sum(axis=0) for _rp, d in loaded if len(d["t"])) / tot
+            q = q - mu
+    q = q / (np.linalg.norm(q) + 1e-9)
+    hits: list[dict] = []
+    for rp, d in loaded:
         if not len(d["t"]):
             continue
-        scores = d["emb"] @ q
+        emb = d["emb"].astype("float32")
+        if mu is not None:
+            emb = emb - mu
+            emb = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
+        scores = emb @ q
         for i in np.argsort(-scores):
             s = float(scores[i])
             if s < min_score:
@@ -378,7 +421,8 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             hits.append({"path": rp, "t": round(t, 2), "score": round(s, 4)})
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
-    return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing}
+    return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
+            "centered": mu is not None}
 
 
 def group_hits(hits: list[dict], gap_s: float = 3.0, pad_s: float = 1.0) -> list[dict]:
