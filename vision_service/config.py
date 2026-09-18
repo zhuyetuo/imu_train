@@ -108,3 +108,7 @@ DETECT_HALF     = _env("DETECT_HALF", "1") not in ("0", "false", "False", "")
 # 画面没变（狗睡着 / 空房间）就不再送检测，直接沿用上一次的框：24 小时里大半时间是静止的。
 # 整帧缩到 64x36 灰度后的平均像素差（0~1），低于它算没变；0 = 关掉这个优化
 STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.01"))
+
+# 找片段走画面索引时的动作量门槛（相邻两秒向量距离，0~1；跟像素帧差不是一个刻度）
+SEEK_INDEX_MOTION_MIN = float(_env("SEEK_INDEX_MOTION_MIN", "0.06"))
+SEEK_INDEX_MOTION_MAX = float(_env("SEEK_INDEX_MOTION_MAX", "1.0"))

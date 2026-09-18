@@ -490,3 +490,89 @@ def test_静止跳检_狗那一小块动了也要送(fake_video, monkeypatch):
     assert len(s) == 8
     # 0 秒送检；1、2 秒跟 0 秒一样 → 跳；3 秒起每秒都跟上一帧不同 → 每帧都送。至少 6 帧
     assert sum(sent) >= 6
+
+
+# ── 走画面索引：不解码不检测，预览秒出 ───────────────────────────────
+
+def _save_index(rel, t, emb, boxes=None):
+    import json
+    import os
+
+    import numpy as np
+
+    from vision_service import embed
+
+    os.makedirs(embed.config.EMBED_INDEX_DIR, exist_ok=True)
+    box = np.array(boxes if boxes is not None else [[0.07, 0.13, 0.22, 0.28]] * len(t), dtype="float32")
+    np.savez(embed.index_path(rel), t=np.array(t, dtype="float32"), emb=np.array(emb, dtype="float16"),
+             box=box, meta=np.array(json.dumps({"model": "fake/siglip", "path": rel})))
+
+
+def test_从索引取样本_动作量是向量距离(tmp_path, monkeypatch):
+    import numpy as np
+
+    from vision_service import embed
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    embed._cache.clear()
+    a = np.array([1, 0, 0, 0], dtype="float32")
+    b = np.array([0, 1, 0, 0], dtype="float32")
+    # 0~4 秒不动（向量一样），5 秒突然变，10 秒（隔了 5 秒，中间没狗）不比
+    _save_index("v.mp4", [0, 1, 2, 3, 4, 5, 10], [a, a, a, a, a, b, b])
+    s = seek.samples_from_index("v.mp4")
+    assert [r["t"] for r in s] == [0, 1, 2, 3, 4, 5, 10]
+    assert s[0]["motion"] is None and s[1]["motion"] == 0.0
+    assert abs(s[5]["motion"] - np.sqrt(2) / 2) < 1e-3          # ‖a−b‖/2
+    assert s[6]["motion"] is None                                # 隔太久不比
+    assert s[1]["boxes"][0]["bbox"] == [0.07, 0.13, 0.15, 0.15] and s[1]["jpeg"] == b""
+    assert seek.samples_from_index("nope.mp4") is None
+    assert [r["t"] for r in seek.samples_from_index("v.mp4", start_s=2, end_s=5)] == [2, 3, 4, 5]
+
+
+def test_seek_有索引就不解码_dry_run_秒出(tmp_path, monkeypatch):
+    import numpy as np
+
+    from vision_service import embed
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    embed._cache.clear()
+    rng = np.random.default_rng(0)
+    # 30 秒，每秒向量都随机 → 相邻距离大 → 都算"在动"
+    vecs = [v / np.linalg.norm(v) for v in rng.normal(size=(30, 8))]      # 真索引是归一化过的
+    _save_index("v.mp4", list(range(30)), vecs)
+    monkeypatch.setattr(seek, "sample_video", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该解码")))
+    monkeypatch.setattr(seek.config, "SEEK_INDEX_MOTION_MIN", 0.06)
+    c = _FakeClient([])
+    r = seek.seek_video("/abs/v.mp4", LABELS, dry_run=True, llm=CLAUDE, client=c, rel_path="v.mp4")
+    assert r["stats"]["from_index"] is True and r["stats"]["clips_candidate"] > 0 and c.calls == []
+
+
+def test_seek_走索引_真跑时只抽选中窗的帧(tmp_path, monkeypatch, fake_video):
+    import numpy as np
+
+    from vision_service import embed
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    embed._cache.clear()
+    rng = np.random.default_rng(1)
+    vecs = [v / np.linalg.norm(v) for v in rng.normal(size=(12, 8))]
+    _save_index("v.mp4", list(range(12)), vecs)
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    # 抽帧走 cv2 假视频；检测不该被调用（框来自索引）
+    _stub_detect(monkeypatch, lambda f, conf=0.35: (_ for _ in ()).throw(AssertionError("不该检测")))
+    made = []
+    orig = seek.iter_frames
+
+    def spy(path, every, start_s=0.0, end_s=None):
+        made.append((start_s, end_s))
+        fake_video["cap"] = _Cap([int((start_s + k) * 1000) for k in range(int((end_s or 12) - start_s) + 1)])
+        return orig(path, every, start_s, end_s)
+    monkeypatch.setattr(seek, "iter_frames", spy)
+    c = _FakeClient(['{"label":"舔身体","body_part":"前肢爪","confidence":0.9}'] * 20)
+    r = seek.seek_video("/abs/v.mp4", LABELS, llm=CLAUDE, client=c, rel_path="v.mp4", concurrency=1, clip_s=6, stride_s=3)
+    assert r["stats"]["from_index"] is True and r["stats"]["clips_sent"] == len(r["windows"]) > 0
+    assert len(made) == len(r["windows"])                              # 每个窗只抽自己那几秒
+    for kw in c.calls:
+        imgs = [b for b in kw["messages"][0]["content"] if b["type"] == "image"]
+        assert 1 <= len(imgs) <= 6
+    assert r["segments"] and r["segments"][0]["label"] == "舔身体"

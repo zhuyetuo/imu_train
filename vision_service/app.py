@@ -233,6 +233,7 @@ def seek_run(body: SeekIn):
             n_frames=body.n_frames, max_clips=body.max_clips, min_dog_frac=body.min_dog_frac,
             motion_min=body.motion_min, motion_max=body.motion_max, min_conf=body.min_conf,
             start_s=body.start_s, end_s=body.end_s, dry_run=body.dry_run, conf=body.conf, llm=llm,
+            rel_path=body.path,
         )
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
