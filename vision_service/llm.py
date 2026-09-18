@@ -6,6 +6,7 @@
   openai      GPT             REST（chat/completions）
   doubao      火山引擎 豆包    REST，跟 OpenAI 同一套协议，只是 base_url 不同
   gemini      Google Gemini   REST（generateContent）
+  zhipu       智谱 GLM         REST，OpenAI 同一套协议（open.bigmodel.cn）
   local       本地起的服务     REST，OpenAI 兼容口（vLLM / SGLang / Ollama），key 可不填
 
 **key 不在这里存。** 平台那边有个「大模型 API」页面，key 存在平台数据库里，
@@ -28,12 +29,13 @@ from . import config
 
 _logger = logging.getLogger("vision_service.llm")
 
-PROVIDERS = ("anthropic", "openai", "doubao", "gemini", "local")
+PROVIDERS = ("anthropic", "openai", "doubao", "gemini", "zhipu", "local")
 
 DEFAULT_BASE_URL = {
     "openai": "https://api.openai.com/v1",
     "doubao": "https://ark.cn-beijing.volces.com/api/v3",
     "gemini": "https://generativelanguage.googleapis.com/v1beta",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
     # 本地起的服务（vLLM / SGLang / Ollama 都能开 OpenAI 兼容口），key 可以不填
     "local": "http://127.0.0.1:8386/v1",   # 8000 太常用，多半被占着；挨着 vision_service 的 8385
 }
@@ -106,7 +108,7 @@ def _anthropic(llm: LLM, system: str, user: str, jpegs: list[bytes], max_tokens:
 
 
 def _openai_compatible(llm: LLM, system: str, user: str, jpegs: list[bytes], max_tokens: int, http=None) -> tuple[str, dict]:
-    """OpenAI 和豆包（火山引擎 Ark）都是这套：/chat/completions + image_url(data:)。"""
+    """OpenAI、豆包（火山引擎 Ark）、智谱都是这套：/chat/completions + image_url(data:)。"""
     import httpx
 
     base = llm.base_url or DEFAULT_BASE_URL[llm.provider]
@@ -164,7 +166,7 @@ def chat_vision(llm: LLM, system: str, user: str, jpegs: list[bytes], max_tokens
         raise RuntimeError(f"{llm.provider} 没配 API key")
     if llm.provider == "anthropic":
         return _anthropic(llm, system, user, jpegs, max_tokens, client=client)
-    if llm.provider in ("openai", "doubao", "local"):
+    if llm.provider in ("openai", "doubao", "zhipu", "local"):
         return _openai_compatible(llm, system, user, jpegs, max_tokens, http=http)
     if llm.provider == "gemini":
         return _gemini(llm, system, user, jpegs, max_tokens, http=http)
