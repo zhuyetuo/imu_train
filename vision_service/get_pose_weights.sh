@@ -45,7 +45,8 @@ URLS=(
 for url in "${URLS[@]}"; do
     echo "▶ 试 $url"
     rm -f "$TMP"
-    if curl -L --fail --connect-timeout 15 --max-time 900 --progress-bar -o "$TMP" "$url"; then
+    code="$(curl -L --connect-timeout 15 --max-time 900 --progress-bar -o "$TMP" -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+    if [ "$code" = "200" ] && [ -s "$TMP" ]; then
         case "$url" in
           *.zip)
             rm -rf "$DEST_DIR/.unzip" && mkdir -p "$DEST_DIR/.unzip"
@@ -67,11 +68,14 @@ PY
             exit 0
         fi
     fi
-    echo "  ✗ 这个源不通或包里没有 .onnx"
+    echo "  ✗ 没下到（HTTP $code${code:+ }$( [ "$code" = "000" ] && echo '连不上' ))；或者包里没有 .onnx"
 done
 
 echo
 echo "✗ 姿态模型没下到。姿态那一路会自动关（以图搜图只用画面），别的都不受影响。"
-echo "  要用的话在能上网的电脑上拿到 RTMPose AP-10K 的 ONNX（mmpose 仓库 projects/rtmpose 里的 ap10k 模型，"
-echo "  用 mmdeploy 导成 onnx，输入 256x256），拷到 $(pwd)/$DEST，再跑一次这个脚本。"
+echo "  拿到 ONNX 的两条路（在能上网的电脑上）："
+echo "   1. 直接找现成的：搜 rtmpose ap10k onnx（OpenMMLab 的 download.openmmlab.com 或 HuggingFace 上的转好的）"
+echo "   2. 自己导：pip install mmpose mmdeploy，用 mmpose 仓库 projects/rtmpose 的 ap10k 配置 + .pth，"
+echo "      mmdeploy 按 configs/mmpose/pose-detection_simcc_onnxruntime_dynamic.py 导出，输入 256x256"
+echo "  拷到 $(pwd)/$DEST（也可以放别处，POSE_ONNX 指过去），再跑一次这个脚本或 ./up.sh deploy。"
 exit 0
