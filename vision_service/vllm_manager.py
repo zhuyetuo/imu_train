@@ -181,6 +181,42 @@ def _download() -> None:
         _downloading = False
 
 
+def _cuda_home() -> str | None:
+    """vllm 要 nvcc 现场编内核（FlashInfer / torch.compile）。机器上没装 CUDA toolkit 时，
+    pip 装 vllm 连带装的 nvidia-cuda-nvcc 包里就有 nvcc：把 CUDA_HOME 指到那个包。"""
+    env_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if env_home and os.path.isfile(os.path.join(env_home, "bin", "nvcc")):
+        return env_home
+    if os.path.isfile("/usr/local/cuda/bin/nvcc"):
+        return "/usr/local/cuda"
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+        cands = list(spec.submodule_search_locations or []) if spec else []
+    except Exception:  # noqa: BLE001
+        cands = []
+    import site
+
+    for base in site.getsitepackages() + [site.getusersitepackages()]:
+        cands.append(os.path.join(base, "nvidia", "cuda_nvcc"))
+    for c in cands:
+        if os.path.isfile(os.path.join(c, "bin", "nvcc")):
+            return c
+    return None
+
+
+def launch_env() -> dict:
+    env = dict(os.environ)
+    home = _cuda_home()
+    if home:
+        env["CUDA_HOME"] = home
+        env["PATH"] = os.path.join(home, "bin") + os.pathsep + env.get("PATH", "")
+    # FlashInfer 的采样器要 JIT 编内核，没 nvcc 就起不来；用 torch 自己的采样，慢一点点但稳
+    env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    return env
+
+
 def _alive() -> bool:
     return _proc is not None and _proc.poll() is None
 
@@ -339,6 +375,7 @@ def status() -> dict:
         "exit_code": (_proc.poll() if _proc is not None else None),
         "log_errors": log_errors(),
         "args": config.VLLM_ARGS,
+        "cuda_home": _cuda_home(),
     }
 
 
@@ -374,8 +411,10 @@ def start() -> dict:
         try:
             log = open(LOG_PATH, "ab")
             log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动：{' '.join(cmd)}\n".encode())
+            env = launch_env()
+            log.write(f"CUDA_HOME={env.get('CUDA_HOME', '(没找到 nvcc)')} VLLM_USE_FLASHINFER_SAMPLER={env.get('VLLM_USE_FLASHINFER_SAMPLER')}\n".encode())
             _proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=config.HERE,
-                                     start_new_session=True)
+                                     start_new_session=True, env=env)
             _started_at = time.time()
             _logger.info("vLLM 已拉起 pid=%s：%s", _proc.pid, " ".join(cmd))
         except Exception as e:  # noqa: BLE001
