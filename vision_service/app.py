@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, dog, embed, llm as llmmod, sam, seek
+from . import config, dog, embed, llm as llmmod, models, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -366,6 +366,31 @@ def embed_search(body: EmbedSearchIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"搜索失败: {type(e).__name__}: {e}") from e
+
+
+@app.get("/api/v1/models")
+def models_list():
+    """本地模型一张表：在不在、跑在哪、权重、错误、调用计数。不触发加载。"""
+    return models.overview()
+
+
+class ModelActionIn(BaseModel):
+    action: str = Field(..., pattern="^(load|unload|test)$")
+
+
+@app.post("/api/v1/models/{key}")
+def models_act(key: str, body: ModelActionIn):
+    """加载（含预热）/ 卸载（释放显存）/ 测试（跑一次最小推理，回耗时和结果）。"""
+    try:
+        return models.act(key, body.action)
+    except KeyError:
+        raise HTTPException(404, f"没有这个模型：{key}") from None
+
+
+@app.post("/api/v1/models/meter/reset")
+def models_meter_reset():
+    models.reset_meter()
+    return {"ok": True}
 
 
 class LlmTestIn(BaseModel):

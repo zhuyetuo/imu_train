@@ -147,12 +147,15 @@ class Encoder:
         # 半精度：GPU 上快近一倍，向量差别在千分位以下。CPU 不用
         ac = torch.autocast("cuda", dtype=torch.float16) if _device == "cuda" else contextlib.nullcontext()
         with _lock, torch.no_grad(), ac:
+            from . import meter
+
             for i in range(0, len(jpegs), bs):
                 imgs = [Image.open(io.BytesIO(b)).convert("RGB") for b in jpegs[i:i + bs]]
-                inputs = _processor(images=imgs, return_tensors="pt").to(_device)
-                feats = _as_tensor(_model.get_image_features(**inputs))
-                feats = feats / feats.norm(dim=-1, keepdim=True)
-                out.append(feats.float().cpu().numpy())
+                with meter.timed("embed", frames=len(imgs)):
+                    inputs = _processor(images=imgs, return_tensors="pt").to(_device)
+                    feats = _as_tensor(_model.get_image_features(**inputs))
+                    feats = feats / feats.norm(dim=-1, keepdim=True)
+                    out.append(feats.float().cpu().numpy())
         return np.concatenate(out, axis=0) if out else np.zeros((0, 1), dtype="float32")
 
     def encode_text(self, texts: list[str]):
@@ -161,7 +164,9 @@ class Encoder:
         _load()
         if _model is None:
             raise RuntimeError(_load_error or "编码器没加载")
-        with _lock, torch.no_grad():
+        from . import meter
+
+        with _lock, torch.no_grad(), meter.timed("embed", frames=len(texts)):
             inputs = _processor(text=texts, padding="max_length", return_tensors="pt").to(_device)
             feats = _as_tensor(_model.get_text_features(**inputs))
             feats = feats / feats.norm(dim=-1, keepdim=True)

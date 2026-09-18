@@ -222,6 +222,15 @@ def segment(image_path: str, points: list[dict], box: list[float] | None = None,
 
     import cv2
 
+    from . import meter
+
+    with meter.timed("sam"):
+        return _segment(image_path, points, box, prefer)
+
+
+def _segment(image_path: str, points: list[dict], box: list[float] | None, prefer: str) -> dict:
+    import cv2
+
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"读不出这张图：{image_path}")
