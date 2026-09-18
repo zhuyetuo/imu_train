@@ -27,6 +27,10 @@ _logger = logging.getLogger("vision_service")
 async def _lifespan(_app: FastAPI):
     _warmup_on_startup()
     yield
+    # 视觉服务退出时把自己拉起来的 vLLM 一起停掉，别留孤儿占显存
+    from . import vllm_manager
+
+    vllm_manager.shutdown_on_exit()
 
 
 app = FastAPI(title="vision_service", version="0.1.0", lifespan=_lifespan)

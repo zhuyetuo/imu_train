@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, dog, embed, pose, sam
+from . import config, dog, embed, pose, sam, vllm_manager
 from . import meter as _meter
 
 _started = time.time()
@@ -146,6 +146,35 @@ def _pose_test() -> dict:
     return {"latency_ms": int((time.monotonic() - t0) * 1000), "detail": f"随机图跑一次，{n}/17 个点过阈值（随机图接近 0 正常）"}
 
 
+def _vllm_status() -> dict:
+    st = vllm_manager.status()
+    if st["ready"]:
+        err = None
+    elif st["running"]:
+        err = "进程在跑，模型还在加载（7B 要一两分钟）；看日志末尾"
+    elif st["downloading"]:
+        err = "正在下权重：" + "；".join(st["download_log"][-2:])
+    else:
+        err = st["error"] or st["download_error"] or (
+            "没装 vllm（pip install vllm）" if not st["installed"] else
+            "权重还没下（点启动会先下）" if not st["weights_ready"] else "没启动")
+    return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
+            "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
+            "vllm": {k: st[k] for k in ("installed", "model", "weights_ready", "downloading", "running", "pid", "port",
+                                        "port_open", "ready", "uptime_s", "log_tail", "download_log", "download_error")}}
+
+
+def _vllm_load() -> dict:
+    r = vllm_manager.start()
+    return {"warm": r.get("ok"), "error": r.get("error")}
+
+
+def _vllm_unload() -> None:
+    r = vllm_manager.stop()
+    if not r.get("ok"):
+        raise RuntimeError(r.get("error") or "停不掉")
+
+
 REGISTRY: dict[str, dict] = {
     "dog": {"name": "狗检测（YOLO）", "purpose": "画面里有没有狗、狗在哪；建索引 / 找片段 / 找相似都先用它框狗",
             "status": _dog_status, "load": lambda: dog.warmup(), "unload": _dog_unload, "test": _dog_test},
@@ -156,6 +185,8 @@ REGISTRY: dict[str, dict] = {
     "pose": {"name": "姿态关键点（RTMPose AP-10K）", "purpose": "以图搜图的第二路信号：鼻子够到了哪只爪",
              "status": _pose_status, "load": lambda: {"warm": pose.available(), "error": pose.status()["error"]},
              "unload": _pose_unload, "test": _pose_test},
+    "vllm": {"name": "本地大模型（vLLM）", "purpose": "「画面找片段」的本地视觉大模型，OpenAI 兼容口；「大模型 API」页里「本地服务」那一行连的就是它",
+             "status": _vllm_status, "load": _vllm_load, "unload": _vllm_unload, "test": vllm_manager.test},
 }
 
 
@@ -174,7 +205,9 @@ def act(key: str, action: str) -> dict:
     if action == "load":
         r = spec["load"]() or {}
         st = spec["status"]()
-        return {"ok": bool(st.get("available")), "error": st.get("error") or r.get("error"), "status": st}
+        # vLLM 是"拉起来了但还在加载"：进程起来就算 ok，ready 由状态刷新去反映
+        ok = bool(st.get("available")) or (key == "vllm" and bool(r.get("warm")))
+        return {"ok": ok, "error": (r.get("error") or st.get("error")) if not ok else None, "status": st}
     if action == "unload":
         spec["unload"]()
         return {"ok": True, "error": None, "status": spec["status"]()}
