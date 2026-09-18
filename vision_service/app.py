@@ -302,6 +302,27 @@ def embed_indexed(body: EmbedIndexedIn):
     return {p: embed.has_index(p) for p in body.paths}
 
 
+class EmbedPreviewIn(BaseModel):
+    path: str
+    t: float = Field(..., ge=0)
+    conf: float = Field(0.35, ge=0.05, le=0.95)
+
+
+@app.post("/api/v1/embed/preview")
+def embed_preview(body: EmbedPreviewIn):
+    """以图搜图之前给人看一眼：这一帧框到了哪几只狗、拿哪一块去搜。只要狗检测模型，不要索引。"""
+    full = _resolve_under(config.VIDEO_ROOT, body.path)
+    st = dog.status()
+    if not st.get("available"):
+        raise HTTPException(503, st.get("error") or "狗检测模型不可用")
+    try:
+        return embed.frame_preview(full, body.t, conf=body.conf)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"取帧失败: {type(e).__name__}: {e}") from e
+
+
 @app.post("/api/v1/embed/search")
 def embed_search(body: EmbedSearchIn):
     if (body.text is None) == (body.ref is None):
