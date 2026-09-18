@@ -77,6 +77,12 @@ def test_加载卸载测试_走各模块(monkeypatch):
     r = models.act("pose", "load")
     assert r["ok"] is False and "权重" in r["error"]
     assert models.act("pose", "unload")["ok"] is True
+    # 加载在 CPU 上、但想要 cuda：状态里提醒装 GPU 版
+    monkeypatch.setattr(pose, "_model", object())
+    monkeypatch.setattr(pose, "_device_used", "cpu")
+    monkeypatch.setattr(pose.config, "POSE_DEVICE", "cuda")
+    st = next(m for m in models.list_models() if m["key"] == "pose")
+    assert st["available"] is True and st["device"] == "cpu" and "onnxruntime-gpu" in st["error"]
 
 
 def test_接口(monkeypatch):

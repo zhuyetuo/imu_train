@@ -36,6 +36,16 @@ _lock = threading.Lock()
 _model = None
 _error: str | None = None
 _loaded = False
+_device_used: str | None = None
+
+
+def _has_cuda_provider() -> bool:
+    try:
+        import onnxruntime as ort
+
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def onnx_path() -> str | None:
@@ -61,9 +71,14 @@ def _load():
             _error = "没装 rtmlib（pip install rtmlib onnxruntime；重跑 ./up.sh deploy 会自动装）"
             return
         try:
-            dev = "cuda" if (config.POSE_DEVICE or "").startswith("cuda") else "cpu"
+            # 想要 cuda 且 onnxruntime 真有 CUDA provider 才用；没有就 CPU（GPU 版包 run.sh 会装）
+            want = (config.POSE_DEVICE or "").startswith("cuda")
+            dev = "cuda" if want and _has_cuda_provider() else "cpu"
             _model = RTMPose(onnx_model=p, model_input_size=(config.POSE_INPUT, config.POSE_INPUT),
                              backend="onnxruntime", device=dev)
+            globals()["_device_used"] = dev
+            if want and dev == "cpu":
+                _logger.warning("姿态模型想用 cuda，但 onnxruntime 没有 CUDA provider，退回 CPU（装 onnxruntime-gpu）")
             _logger.info("姿态模型已加载：%s（%s）", p, dev)
         except Exception as e:  # noqa: BLE001
             _error = f"姿态模型加载失败：{type(e).__name__}: {e}"
@@ -71,7 +86,8 @@ def _load():
 
 def status() -> dict:
     return {"available": _model is not None, "error": _error if _model is None else None,
-            "onnx": config.POSE_ONNX, "dim": DIM, "weight": config.POSE_W}
+            "onnx": config.POSE_ONNX, "dim": DIM, "weight": config.POSE_W,
+            "device": _device_used, "cuda_provider": _has_cuda_provider()}
 
 
 def available() -> bool:
