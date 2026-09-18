@@ -39,9 +39,9 @@ LOG_FILE="vision_service/.run.log"
 # down 停不停得掉"就只能真去装 SAM 和权重
 VISION_RUN_CMD="${VISION_RUN_CMD:-python -m vision_service.app}"
 PY_BIN="${PY_BIN:-python}"
-# pip 走国内镜像（清华源）：onnxruntime-gpu 这种两三百 MB 的包直连 PyPI 只有几百 KB/s。
-# 想换别的源或直连：PIP_INDEX_URL=https://pypi.org/simple ./up.sh deploy
-export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+# pip 源：几个国内镜像 + 官方测速选最快的（结果缓存一天）。手动指定就不测：
+#   PIP_INDEX_URL=https://pypi.org/simple ./up.sh deploy
+source "$(dirname "${BASH_SOURCE[0]}")/pick_pip_mirror.sh"
 
 # ── 起之前先把缺的依赖装上 ────────────────────────────────────────────
 #
