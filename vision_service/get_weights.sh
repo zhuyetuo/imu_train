@@ -20,7 +20,9 @@ MODEL_ID="${SIGLIP_MODEL_ID:-google/siglip-base-patch16-224}"
 DEST="${SIGLIP_LOCAL_DIR:-models/vision/$(basename "$MODEL_ID")}"
 ENV_FILE="vision_service/.env"
 PY_BIN="${PY_BIN:-python}"
-export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+# pip 源：几个国内镜像 + 官方测速选最快的（结果缓存一天）。手动指定就不测：
+#   PIP_INDEX_URL=https://pypi.org/simple ./up.sh deploy
+source "$(dirname "${BASH_SOURCE[0]}")/pick_pip_mirror.sh"
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
