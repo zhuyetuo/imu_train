@@ -106,14 +106,31 @@ ensure_deps() {
         fi
     fi
 
-    # torch / torchaudio 的 CUDA 版本对不上（装 vllm 换了 torch，torchaudio 还是老的）：transformers 一 import
-    # 就炸，SigLIP 整个不可用。我们不用 torchaudio——先试装跟 torch 同源的版本，不行就卸掉
-    if ! "$PY_BIN" -c "import torch, torchaudio" >/dev/null 2>&1 && "$PY_BIN" -c "import torch" >/dev/null 2>&1; then
-        if "$PY_BIN" -c "import torch, torchaudio" 2>&1 | grep -q "different CUDA versions"; then
+    # torch / torchaudio 的 CUDA 版本对不上（装 vllm 换了 torch，torchaudio 还是老的）：transformers 一路 import
+    # 到 SigLIP 类时才炸，单独 import torchaudio 不一定报。两条路探：按版本号比（torchaudio 带 +cuXXX、
+    # torch.version.cuda 不一样），或真走一遍 transformers 的 SigLIP import 看有没有那句错。
+    # 我们用不到 torchaudio：先试装跟 torch 同源的版本，不行就卸掉
+    _ta_mismatch() {
+        "$PY_BIN" - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch, importlib.metadata as m
+    ta = m.version("torchaudio")
+except Exception:
+    sys.exit(1)
+tc = (torch.version.cuda or "").replace(".", "")
+if "+cu" in ta:
+    ta_cu = ta.split("+cu", 1)[1]
+    sys.exit(0 if (tc and not tc.startswith(ta_cu[:2])) else 1)
+sys.exit(1)
+PY
+    }
+    if "$PY_BIN" -c "import torch" >/dev/null 2>&1 && "$PY_BIN" -c "import importlib.metadata as m; m.version('torchaudio')" >/dev/null 2>&1; then
+        if _ta_mismatch || "$PY_BIN" -c "from transformers import SiglipModel" 2>&1 | grep -q "different CUDA versions"; then
             echo "torch 和 torchaudio 的 CUDA 版本对不上（装 vllm 换了 torch），修一下..."
             ta_ver="$("$PY_BIN" -c "import importlib.metadata as m; print(m.version('torchaudio').split('+')[0])" 2>/dev/null)"
             if [ -n "$ta_ver" ] && "$PY_BIN" -m pip install --force-reinstall --no-deps "torchaudio==$ta_ver" >/dev/null 2>&1 \
-               && "$PY_BIN" -c "import torch, torchaudio" >/dev/null 2>&1; then
+               && ! _ta_mismatch && ! "$PY_BIN" -c "from transformers import SiglipModel" 2>&1 | grep -q "different CUDA versions"; then
                 echo "  重装了 torchaudio==$ta_ver，跟 torch 对上了"
             else
                 "$PY_BIN" -m pip uninstall -y -q torchaudio >/dev/null 2>&1 || true
