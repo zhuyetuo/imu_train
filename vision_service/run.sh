@@ -97,7 +97,16 @@ ensure_deps() {
     # vllm（本地大模型，「模型服务」页一键起停）：几 GB，自带钉死版本的 torch——装它可能把
     # 现有 torch 换成它要的那个版本（一般更新，狗检测 / SigLIP 照常能跑）。有显卡才装；
     # 不想它动环境：VLLM_INSTALL=0 ./up.sh deploy
-    if [ "${VLLM_INSTALL:-1}" != "0" ] && command -v nvidia-smi >/dev/null 2>&1 && ! "$PY_BIN" -c "import vllm" >/dev/null 2>&1; then
+    # 默认 VLLM_BACKEND=docker：vllm 跑在官方镜像里（自带 CUDA 工具链，不动主机 python），
+    # 这里只提前把镜像拉下来（十几 GB，看 docker pull 的进度）。VLLM_BACKEND=process 才 pip 装 vllm
+    if [ "${VLLM_BACKEND:-docker}" = "docker" ]; then
+        VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+        if command -v docker >/dev/null 2>&1 && command -v nvidia-smi >/dev/null 2>&1 && [ "${VLLM_INSTALL:-1}" != "0" ] \
+           && ! docker image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
+            echo "拉 vLLM 镜像 $VLLM_IMAGE（十几 GB；慢的话给 docker 配国内镜像源，或 VLLM_IMAGE 指到别的仓库）..."
+            docker pull "$VLLM_IMAGE" || echo "  ⚠ 镜像没拉下来，页面上点「启动」时会再试"
+        fi
+    elif [ "${VLLM_INSTALL:-1}" != "0" ] && command -v nvidia-smi >/dev/null 2>&1 && ! "$PY_BIN" -c "import vllm" >/dev/null 2>&1; then
         echo "缺 vllm（本地大模型），装一下：几 GB，会连带装它要的 torch 版本，看下面 pip 的进度..."
         if "$PY_BIN" -m pip install --progress-bar on vllm; then
             echo "  vllm 装好了。「模型服务」页点「启动」拉起来（第一次要下模型权重）"

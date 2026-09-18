@@ -48,8 +48,10 @@ _installed_cache: tuple[float, bool] | None = None
 
 
 def installed() -> bool:
-    """import vllm 要一两秒（它 import 一堆东西），结果缓存一分钟。"""
+    """docker 后端：docker 通且镜像在；process 后端：import vllm 成不成（要一两秒，结果缓存一分钟）。"""
     global _installed_cache
+    if use_docker():
+        return docker_available() and image_present()
     now = time.monotonic()
     if _installed_cache and now - _installed_cache[0] < 60:
         return _installed_cache[1]
@@ -217,7 +219,144 @@ def launch_env() -> dict:
     return env
 
 
+# ── docker 后端（默认）：官方镜像自带 CUDA 工具链，不动主机的 python ──────────
+_docker_cache: tuple[float, bool] | None = None
+_pulling = False
+_pull_log: list[str] = []
+_pull_error: str | None = None
+
+
+def _run(cmd: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def use_docker() -> bool:
+    return (config.VLLM_BACKEND or "docker").lower() == "docker"
+
+
+def docker_available() -> bool:
+    """docker 命令在、daemon 通（缓存一分钟）。"""
+    global _docker_cache
+    now = time.monotonic()
+    if _docker_cache and now - _docker_cache[0] < 60:
+        return _docker_cache[1]
+    ok = shutil.which("docker") is not None
+    if ok:
+        try:
+            ok = _run(["docker", "info", "--format", "{{.ServerVersion}}"], 15).returncode == 0
+        except Exception:  # noqa: BLE001
+            ok = False
+    _docker_cache = (now, ok)
+    return ok
+
+
+def image_present() -> bool:
+    try:
+        return _run(["docker", "image", "inspect", config.VLLM_IMAGE], 15).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pull_image() -> None:
+    """后台拉镜像（十几 GB），输出末尾几行进 status。"""
+    global _pulling, _pull_error
+    _pulling, _pull_error = True, None
+    _pull_log.clear()
+    try:
+        p = subprocess.Popen(["docker", "pull", config.VLLM_IMAGE], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in p.stdout or []:
+            line = line.strip()
+            if line:
+                _pull_log.append(line[:200])
+                del _pull_log[:-8]
+        p.wait()
+        if p.returncode != 0:
+            _pull_error = f"docker pull {config.VLLM_IMAGE} 失败：" + (_pull_log[-1] if _pull_log else "看 docker 日志")
+    except Exception as e:  # noqa: BLE001
+        _pull_error = f"拉镜像失败：{type(e).__name__}: {e}"
+    finally:
+        _pulling = False
+
+
+def _container() -> dict:
+    """{exists, running, exit_code, started_at}。"""
+    try:
+        r = _run(["docker", "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}} {{.State.StartedAt}}", config.VLLM_CONTAINER], 15)
+    except Exception:  # noqa: BLE001
+        return {"exists": False, "running": False, "exit_code": None, "started_at": None}
+    if r.returncode != 0:
+        return {"exists": False, "running": False, "exit_code": None, "started_at": None}
+    parts = r.stdout.strip().split()
+    running = parts[0] == "true" if parts else False
+    code = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
+    return {"exists": True, "running": running, "exit_code": code, "started_at": parts[2] if len(parts) > 2 else None}
+
+
+def _docker_start() -> dict:
+    global _started_at, _last_error
+    if not docker_available():
+        _last_error = "docker 不可用（没装或 daemon 没起）；或者 VLLM_BACKEND=process 用 pip 装的 vllm"
+        return {"ok": False, "error": _last_error}
+    if not image_present():
+        if not _pulling:
+            threading.Thread(target=_pull_image, name="vllm-pull", daemon=True).start()
+        return {"ok": False, "pulling": True,
+                "error": f"镜像 {config.VLLM_IMAGE} 还没拉下来，正在拉（十几 GB，看状态）；拉好后再点一次启动"}
+    st = _container()
+    if st["exists"]:
+        _run(["docker", "rm", "-f", config.VLLM_CONTAINER], 60)
+    root = os.path.abspath(config.VLLM_LOCAL_ROOT)
+    name = config.VLLM_MODEL.split("/")[-1]
+    cmd = ["docker", "run", "-d", "--name", config.VLLM_CONTAINER, "--gpus", "all", "--ipc=host",
+           "-p", f"{config.VLLM_PORT}:8000", "-v", f"{root}:/models:ro",
+           "-e", "VLLM_USE_FLASHINFER_SAMPLER=0",
+           config.VLLM_IMAGE,
+           "--model", f"/models/{name}", "--served-model-name", config.VLLM_MODEL,
+           "--max-model-len", str(config.VLLM_MAX_LEN),
+           "--gpu-memory-utilization", str(config.VLLM_GPU_UTIL)]
+    if config.VLLM_ARGS:
+        cmd += config.VLLM_ARGS.split()
+    try:
+        with open(LOG_PATH, "ab") as log:
+            log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动（docker）：{' '.join(cmd)}\n".encode())
+        r = _run(cmd, 120)
+    except Exception as e:  # noqa: BLE001
+        _last_error = f"docker run 失败：{type(e).__name__}: {e}"
+        return {"ok": False, "error": _last_error}
+    if r.returncode != 0:
+        _last_error = f"docker run 失败：{(r.stderr or r.stdout).strip()[:300]}"
+        return {"ok": False, "error": _last_error}
+    _started_at = time.time()
+    _logger.info("vLLM 容器已拉起：%s", " ".join(cmd))
+    return {"ok": True}
+
+
+def _docker_stop() -> dict:
+    global _started_at
+    st = _container()
+    if not st["exists"]:
+        return {"ok": True, "note": "本来就没在跑"}
+    try:
+        r = _run(["docker", "rm", "-f", config.VLLM_CONTAINER], 60)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"停不掉：{type(e).__name__}: {e}"}
+    if r.returncode != 0:
+        return {"ok": False, "error": f"停不掉：{(r.stderr or r.stdout).strip()[:300]}"}
+    _started_at = None
+    return {"ok": True}
+
+
+def _docker_logs(n: int) -> list[str]:
+    try:
+        r = _run(["docker", "logs", "--tail", str(n), config.VLLM_CONTAINER], 20)
+    except Exception:  # noqa: BLE001
+        return []
+    return ((r.stdout or "") + (r.stderr or "")).splitlines()[-n:]
+
+
 def _alive() -> bool:
+    if use_docker():
+        return _container()["running"]
     return _proc is not None and _proc.poll() is None
 
 
@@ -250,7 +389,9 @@ def _log_tail(n: int = 30) -> list[str]:
 
 
 def read_log(n: int = 300) -> list[str]:
-    """日志最后 n 行（只读这次启动之后的：从最后一个「===== 启动」分隔起）。"""
+    """日志最后 n 行（只读这次启动之后的：从最后一个「===== 启动」分隔起）。docker 跑的直接 docker logs。"""
+    if use_docker():
+        return _docker_logs(n)
     try:
         with open(LOG_PATH, "rb") as f:
             f.seek(0, 2)
@@ -350,7 +491,15 @@ def startup_progress() -> dict | None:
 def status() -> dict:
     alive = _alive()
     port = _port_open()
+    cont = _container() if use_docker() else None
     return {
+        "backend": "docker" if use_docker() else "process",
+        "image": config.VLLM_IMAGE if use_docker() else None,
+        "docker_available": docker_available() if use_docker() else None,
+        "image_present": image_present() if use_docker() else None,
+        "pulling": _pulling,
+        "pull_log": _pull_log[-3:],
+        "pull_error": _pull_error,
         "installed": installed(),
         "model": config.VLLM_MODEL,
         "local_dir": local_dir(),
@@ -362,7 +511,7 @@ def status() -> dict:
         "download_progress": download_progress(),
         "startup_progress": startup_progress(),
         "running": alive,
-        "pid": _proc.pid if alive else None,
+        "pid": (None if use_docker() else (_proc.pid if alive else None)),
         "port": config.VLLM_PORT,
         "port_open": port,
         "ready": port and health().get("ok", False),
@@ -371,8 +520,8 @@ def status() -> dict:
         "error": _last_error,
         "log_tail": _log_tail(),
         # 进程死了（起过但现在不活）也要说：不然页面只看到"没启动"
-        "exited": (_proc is not None and _proc.poll() is not None),
-        "exit_code": (_proc.poll() if _proc is not None else None),
+        "exited": ((cont["exists"] and not cont["running"]) if cont else (_proc is not None and _proc.poll() is not None)),
+        "exit_code": (cont["exit_code"] if cont else (_proc.poll() if _proc is not None else None)),
         "log_errors": log_errors(),
         "args": config.VLLM_ARGS,
         "cuda_home": _cuda_home(),
@@ -390,6 +539,19 @@ def start() -> dict:
         if _port_open():
             _last_error = f"端口 {config.VLLM_PORT} 已被别的进程占着（可能是手动起的 vllm）；不归这里管，先停掉它"
             return {"ok": False, "error": _last_error, "status": status()}
+        if not weights_ready():
+            if not _downloading:
+                threading.Thread(target=_download, name="vllm-download", daemon=True).start()
+            miss = missing_weight_files()
+            return {"ok": False, "downloading": True,
+                    "error": f"权重还没齐（缺 {', '.join(miss[:3])}{'…' if len(miss) > 3 else ''}），正在下到 {local_dir()}"
+                             f"（几 GB，看状态里的进度；下过一半的会接着下）；下好后再点一次启动",
+                    "status": status()}
+        if use_docker():
+            r = _docker_start()
+            if r.get("ok"):
+                r["note"] = "容器已拉起，模型加载要一两分钟，状态里 ready 变 True 才能用"
+            return {**r, "status": status()}
         if not installed():
             _last_error = "没装 vllm。重跑 ./up.sh deploy -g 会自动装（几 GB）；装完再点启动"
             return {"ok": False, "error": _last_error, "status": status()}
@@ -426,6 +588,9 @@ def start() -> dict:
 def stop() -> dict:
     global _proc, _started_at
     with _lock:
+        if use_docker():
+            r = _docker_stop()
+            return {**r, "status": status()}
         if not _alive():
             _proc = None
             return {"ok": True, "note": "本来就没在跑", "status": status()}
@@ -459,9 +624,11 @@ def test() -> dict:
 
 
 def shutdown_on_exit() -> None:
-    """视觉服务自己退出时把 vLLM 一起带走，别留个孤儿占着显存。"""
-    if _alive():
+    """视觉服务自己退出时把 vLLM 进程一起带走，别留个孤儿占着显存。
+    docker 跑的不停：容器独立于视觉服务，重新部署视觉服务不用重新加载 7B。"""
+    if not use_docker() and _alive():
         stop()
 
 
-__all__ = ["status", "start", "stop", "test", "health", "installed", "weights_ready", "shutdown_on_exit"]
+__all__ = ["status", "start", "stop", "test", "health", "installed", "weights_ready", "shutdown_on_exit",
+           "use_docker", "docker_available", "image_present"]
