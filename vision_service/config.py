@@ -8,7 +8,7 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   SAM_DEVICE          cuda / cpu（默认 cuda，没有卡会自动退回 cpu）
   VISION_WARMUP       启动时预热模型（默认 1；设 0 退回懒加载，第一刀要多等十几秒）
   VIDEO_ROOT          采集视频的 NAS 挂载点（默认 /home/toky/ai_data），扫描路径相对它
-  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 yolo26x.pt，实测 nano 在夜里红外上漏 98%）
+  DOG_WEIGHTS         画面狗检测的 COCO 预训练权重（默认 models/vision/yolo/yolo26x.pt，实测 nano 在夜里红外上漏 98%）
   VISION_LOG_DIR      日志目录（默认 vision_service/logs）
   ANTHROPIC_API_KEY   「画面找片段」用的 Claude API key（不配 = 这一项关着，别的不受影响）
   SEEK_MODEL          用哪个模型（默认 claude-opus-5）
@@ -75,7 +75,8 @@ VIDEO_ROOT     = _env("VIDEO_ROOT", "/home/toky/ai_data")
 #
 # 换型号只要改这个环境变量，代码一行不用动——ultralytics 按文件名解析，
 # 本地没有就自己下。省显存想换小的话，**先拿夜里的素材重验一遍**再换。
-DOG_WEIGHTS    = _env("DOG_WEIGHTS", "yolo26x.pt")
+# 放仓库的 models/vision/yolo/ 下跟别的模型一起管；文件不在时 ultralytics 会按文件名自动下到这个路径
+DOG_WEIGHTS    = _env("DOG_WEIGHTS", os.path.join(HERE, "..", "models", "vision", "yolo", "yolo26x.pt"))
 LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))
 
 # ── 画面找片段（视觉大模型走 API，不本地起） ────────────────────────────

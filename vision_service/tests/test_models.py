@@ -56,7 +56,7 @@ def test_加载卸载测试_走各模块(monkeypatch):
     monkeypatch.setattr(dog, "detect", fake_detect)
     r = models.act("dog", "test")
     assert r["ok"] is True and "框到 1 个" in r["detail"] and r["latency_ms"] >= 0
-    assert meter.get("dog")["calls"] == 1
+    assert meter.get("dog")["calls"] == 0                 # 页面上的测试不算业务调用
     # 卸载：模型清掉、状态变不可用
     r = models.act("dog", "unload")
     assert r["ok"] is True and dog._model is None and r["status"]["available"] is False
@@ -113,3 +113,15 @@ def test_检测入口有计数(monkeypatch):
     dog.detect(frames[0])
     m = meter.get("dog")
     assert m["calls"] == 2 and m["frames"] == 6
+
+
+def test_检测权重路径_老位置的文件挪到models目录(tmp_path, monkeypatch):
+    dest = tmp_path / "models" / "vision" / "yolo" / "yolo26x.pt"
+    monkeypatch.setattr(dog.config, "DOG_WEIGHTS", str(dest))
+    old = tmp_path / "yolo26x.pt"
+    old.write_bytes(b"w")
+    monkeypatch.chdir(tmp_path)
+    assert dog._weights_path() == str(dest) and dest.read_bytes() == b"w" and not old.exists()
+    # 没有老文件：目录建好，路径原样返回，让 ultralytics 自己下
+    dest.unlink()
+    assert dog._weights_path() == str(dest) and dest.parent.is_dir()
