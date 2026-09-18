@@ -144,3 +144,22 @@ def test_日志_只看这次启动_挑出报错行_进程退出有说明(monkeyp
     assert st["exited"] is True and st["running"] is False
     row = next(m for m in models.list_models() if m["key"] == "vllm")
     assert "退出" in row["error"] and "Engine core initialization failed" in row["error"]
+
+
+def test_权重齐不齐按index核对_缺分片和临时文件都算没齐(monkeypatch, tmp_path):
+    import json
+
+    _reset(monkeypatch, tmp_path, weights=False)
+    d = tmp_path / f"r{_n[0]}" / "M-AWQ"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}))
+    (d / "model-00002-of-00002.safetensors").write_bytes(b"0")
+    assert vm.weights_ready() is False and vm.missing_weight_files() == ["model-00001-of-00002.safetensors"]
+    (d / "model-00001-of-00002.safetensors").write_bytes(b"0")
+    assert vm.weights_ready() is True
+    (d / "model-00001-of-00002.safetensors.incomplete").write_bytes(b"0")
+    assert vm.weights_ready() is False
+    (d / "model-00001-of-00002.safetensors.incomplete").unlink()
+    st = vm.status()
+    assert st["weights_ready"] is True and st["missing_files"] == []
