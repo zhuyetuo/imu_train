@@ -121,3 +121,26 @@ def test_下载进度_按目录体积和总大小算(monkeypatch, tmp_path):
     assert p3["pct"] is None and p3["done_mb"] == 2.0
     monkeypatch.setattr(vm, "_downloading", False)
     assert vm.download_progress() is None
+
+
+def test_日志_只看这次启动_挑出报错行_进程退出有说明(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    log = tmp_path / f"r{_n[0]}" / "vllm.log"
+    log.write_text("===== 1 启动：x\nold ERROR boom\n===== 2 启动：y\nINFO loading\n"
+                   "(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB\n"
+                   "(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB\n"
+                   "  File x, line 1\n    ^\nRuntimeError: Engine core initialization failed\n")
+    monkeypatch.setattr(vm, "LOG_PATH", str(log))
+    lines = vm.read_log(100)
+    assert lines[0].startswith("===== 2") and "old ERROR" not in "\n".join(lines)
+    errs = vm.log_errors()
+    assert errs == ["(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB",
+                    "RuntimeError: Engine core initialization failed"]
+    # 进程起过但死了
+    p = _P()
+    p.alive = False
+    monkeypatch.setattr(vm, "_proc", p)
+    st = vm.status()
+    assert st["exited"] is True and st["running"] is False
+    row = next(m for m in models.list_models() if m["key"] == "vllm")
+    assert "退出" in row["error"] and "Engine core initialization failed" in row["error"]

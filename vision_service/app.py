@@ -398,6 +398,14 @@ def models_act(key: str, body: ModelActionIn):
         raise HTTPException(404, f"没有这个模型：{key}") from None
 
 
+@app.get("/api/v1/models/vllm/log")
+def models_vllm_log(n: int = 300):
+    """vLLM 这次启动的日志（最后 n 行）+ 挑出来的报错行。"""
+    from . import vllm_manager
+
+    return {"lines": vllm_manager.read_log(max(20, min(3000, n))), "errors": vllm_manager.log_errors(30)}
+
+
 @app.post("/api/v1/models/meter/reset")
 def models_meter_reset():
     models.reset_meter()
