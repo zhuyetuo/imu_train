@@ -259,3 +259,10 @@ POST /api/v1/embed/search   {text | ref:{path,t}, paths, top_k, min_score, gap_s
 - 平台那边建索引默认 3 路并行送（`VISION_INDEX_CONCURRENCY`），GPU 有锁，解码各自并行
 
 `sudo apt install ffmpeg` 装上就生效，不用改配置。
+
+### 找片段走索引
+
+建过画面索引的视频，「画面找片段」不再解码、不再检测：每秒有没有狗、动没动直接从索引拿
+（动作量 = 相邻两秒向量距离，门槛 `SEEK_INDEX_MOTION_MIN`，默认 0.06），预览秒出；
+真跑时只把选中的窗那几秒用 ffmpeg 定位抽出来、按索引里的框裁狗再送模型。
+所以顺序是：先「建画面索引」，再「画面找片段」。

@@ -448,17 +448,91 @@ def merge_segments(wins: list[Window], answers: list[dict], min_conf: float = 0.
 
 # ── 整条流水线 ────────────────────────────────────────────────────────
 
+def samples_from_index(rel_path: str, start_s: float = 0.0, end_s: float | None = None) -> list[dict] | None:
+    """建过画面索引的视频：直接从索引拿"每秒有没有狗 + 动没动"，不再解码、不再检测。
+
+    索引里每秒一条 (t, 向量, 框)。动作量用相邻两秒向量的距离（‖e_t − e_{t−1}‖/2，0~1）：
+    狗趴着不动 0.02 左右，舔/抓/走 0.1 以上。跟像素帧差不是一个刻度，所以 seek 用
+    索引时的 motion_min 走 config.SEEK_INDEX_MOTION_MIN，不用调用方传的那个。
+    jpeg 先留空，选中的窗再去视频里抽那几帧（frames_for_window）。
+    """
+    from . import embed
+
+    import numpy as np
+
+    d = embed.load(rel_path)
+    if d is None or not len(d["t"]):
+        return None
+    ts, emb, boxes = d["t"], d["emb"], d["box"]
+    out: list[dict] = []
+    prev = None
+    for i in range(len(ts)):
+        t = float(ts[i])
+        if t < start_s or (end_s is not None and t > end_s):
+            continue
+        x1, y1, x2, y2 = (float(v) for v in boxes[i])
+        rec = {"t": round(t, 2), "boxes": [{"bbox": [round(x1, 4), round(y1, 4), round(x2 - x1, 4), round(y2 - y1, 4)], "conf": 1.0}],
+               "jpeg": b"", "motion": None, "_i": i}
+        if prev is not None and t - float(ts[prev]) <= 2.5:
+            rec["motion"] = float(np.linalg.norm(emb[i] - emb[prev]) / 2.0)
+        prev = i
+        out.append(rec)
+    return out
+
+
+def frames_for_window(full_path: str, w: Window, samples: list[dict], n_frames: int,
+                      max_side: int = 512, jpeg_quality: int = 80) -> list[bytes]:
+    """只把选中窗那几秒的帧抽出来（ffmpeg -ss 定位，几十毫秒），按索引里的框裁狗。"""
+    import cv2
+    import numpy as np
+
+    idx = w.idx
+    if len(idx) > n_frames:
+        step = len(idx) / n_frames
+        idx = [idx[int(i * step)] for i in range(n_frames)]
+    want = {round(samples[i]["t"], 2): samples[i]["boxes"] for i in idx}
+    out: list[bytes] = []
+    for t, frame in iter_frames(full_path, 1.0, start_s=w.start, end_s=w.end + 0.5):
+        key = round(t, 2)
+        # ffmpeg 抽出来的时间是 start + k 秒，索引里的 t 也是整秒起，取最近的
+        near = min(want, key=lambda x: abs(x - key)) if want else None
+        if near is None or abs(near - key) > 0.6:
+            continue
+        boxes = want.pop(near)
+        h, wd = frame.shape[:2]
+        x1, y1, x2, y2 = crop_rect(boxes, wd, h)
+        crop = frame[y1:y2, x1:x2]
+        if not crop.size:
+            continue
+        scale = max_side / max(crop.shape[:2])
+        if scale < 1:
+            crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
+        ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+        if ok:
+            out.append(bytes(np.asarray(buf).tobytes()))
+        if not want:
+            break
+    return out
+
+
 def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s: float = 6.0,
                stride_s: float = 3.0, n_frames: int = 6, max_clips: int = 120,
                min_dog_frac: float = 0.8, motion_min: float = 0.02, motion_max: float = 1.0,
                min_conf: float = 0.5, start_s: float = 0.0, end_s: float | None = None,
                dry_run: bool = False, conf: float = 0.35, concurrency: int | None = None,
-               llm: llmmod.LLM | None = None, client=None, http=None) -> dict:
+               llm: llmmod.LLM | None = None, client=None, http=None,
+               rel_path: str | None = None) -> dict:
     t0 = time.monotonic()
     llm = llm or llmmod.from_env()
     if llm is None and not dry_run:
         raise RuntimeError("没有可用的大模型：请求里没带 llm，环境变量也没配 ANTHROPIC_API_KEY")
-    samples = sample_video(path, every_sec=every_sec, conf=conf, start_s=start_s, end_s=end_s)
+    # 建过索引的视频走索引：不解码不检测，预览秒出；只有选中的窗才去抽那几帧
+    samples = samples_from_index(rel_path, start_s, end_s) if rel_path else None
+    from_index = samples is not None
+    if from_index:
+        motion_min, motion_max = config.SEEK_INDEX_MOTION_MIN, config.SEEK_INDEX_MOTION_MAX
+    else:
+        samples = sample_video(path, every_sec=every_sec, conf=conf, start_s=start_s, end_s=end_s)
     wins = pick_windows(samples, clip_s=clip_s, stride_s=stride_s, min_dog_frac=min_dog_frac,
                         motion_min=motion_min, motion_max=motion_max, max_clips=max_clips)
     stats = {
@@ -468,6 +542,7 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
         "clips_sent": 0,
         "usage": {"input": 0, "output": 0, "est_usd": 0.0},
         "llm": llmmod.describe(llm),
+        "from_index": from_index,
         "seconds": 0.0,
     }
     if dry_run or not wins:
@@ -475,6 +550,8 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
         return {"segments": [], "windows": [w.__dict__ | {"idx": None} for w in wins], "stats": stats, "dry_run": True}
 
     def frames_of(w: Window) -> list[bytes]:
+        if from_index:
+            return frames_for_window(path, w, samples, n_frames)
         idx = w.idx
         if len(idx) > n_frames:
             step = len(idx) / n_frames
