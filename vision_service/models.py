@@ -121,8 +121,10 @@ def _embed_test() -> dict:
 
 def _pose_status() -> dict:
     st = pose.status()
-    return {"available": st["available"], "error": st["error"], "device": config.POSE_DEVICE if st["available"] else None,
-            "weights": config.POSE_ONNX}
+    err = st["error"]
+    if st["available"] and st["device"] == "cpu" and (config.POSE_DEVICE or "").startswith("cuda"):
+        err = "在 CPU 上跑：onnxruntime 没有 CUDA provider（重跑 ./up.sh deploy 会装 onnxruntime-gpu）"
+    return {"available": st["available"], "error": err, "device": st["device"], "weights": config.POSE_ONNX}
 
 
 def _pose_unload() -> None:
