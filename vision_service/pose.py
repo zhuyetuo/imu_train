@@ -53,7 +53,7 @@ def _load():
         _loaded = True
         p = onnx_path()
         if not p:
-            _error = "没有姿态模型权重（POSE_ONNX 没指向一个存在的 .onnx；./vision_service/get_weights.sh 会下）"
+            _error = "没有姿态模型权重（POSE_ONNX 没指向一个存在的 .onnx；./vision_service/get_pose_weights.sh 会下，下不到看它打印的办法）"
             return
         try:
             from rtmlib import RTMPose
