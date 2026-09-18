@@ -257,20 +257,41 @@ def image_present() -> bool:
         return False
 
 
+def mirror_prefix() -> str:
+    """最快的 Docker Hub 加速站（测速缓存一天）；测不到返回空串 = 官方。"""
+    try:
+        from . import pick_docker_mirror
+
+        return pick_docker_mirror.pick(quiet=True) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _pull_image() -> None:
-    """后台拉镜像（十几 GB），输出末尾几行进 status。"""
+    """后台拉镜像（十几 GB）：先从最快的加速站拉、tag 回原名；不行走官方。输出末尾几行进 status。"""
     global _pulling, _pull_error
     _pulling, _pull_error = True, None
     _pull_log.clear()
     try:
-        p = subprocess.Popen(["docker", "pull", config.VLLM_IMAGE], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in p.stdout or []:
-            line = line.strip()
-            if line:
-                _pull_log.append(line[:200])
-                del _pull_log[:-8]
-        p.wait()
-        if p.returncode != 0:
+        mirror = mirror_prefix()
+        attempts = ([f"{mirror}/{config.VLLM_IMAGE}"] if mirror else []) + [config.VLLM_IMAGE]
+        ok = False
+        for ref in attempts:
+            _pull_log.append(f"docker pull {ref}")
+            p = subprocess.Popen(["docker", "pull", ref], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in p.stdout or []:
+                line = line.strip()
+                if line:
+                    _pull_log.append(line[:200])
+                    del _pull_log[:-8]
+            p.wait()
+            if p.returncode == 0:
+                if ref != config.VLLM_IMAGE:
+                    _run(["docker", "tag", ref, config.VLLM_IMAGE], 60)
+                    _run(["docker", "rmi", ref], 60)
+                ok = True
+                break
+        if not ok:
             _pull_error = f"docker pull {config.VLLM_IMAGE} 失败：" + (_pull_log[-1] if _pull_log else "看 docker 日志")
     except Exception as e:  # noqa: BLE001
         _pull_error = f"拉镜像失败：{type(e).__name__}: {e}"
