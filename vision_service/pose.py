@@ -58,7 +58,7 @@ def _load():
         try:
             from rtmlib import RTMPose
         except ImportError:
-            _error = "没装 rtmlib（pip install rtmlib onnxruntime-gpu）"
+            _error = "没装 rtmlib（pip install rtmlib onnxruntime；重跑 ./up.sh deploy 会自动装）"
             return
         try:
             dev = "cuda" if (config.POSE_DEVICE or "").startswith("cuda") else "cpu"
