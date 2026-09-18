@@ -188,15 +188,42 @@ def health() -> dict:
 
 
 def _log_tail(n: int = 30) -> list[str]:
+    return read_log(n)
+
+
+def read_log(n: int = 300) -> list[str]:
+    """日志最后 n 行（只读这次启动之后的：从最后一个「===== 启动」分隔起）。"""
     try:
         with open(LOG_PATH, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 20000))
+            f.seek(max(0, size - 400000))
             lines = f.read().decode("utf-8", "replace").splitlines()
-        return lines[-n:]
     except OSError:
         return []
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("===== "):
+            lines = lines[i:]
+            break
+    return lines[-n:]
+
+
+_ERR_PAT = ("ERROR", "Error", "error:", "Exception", "CUDA out of memory", "OutOfMemory", "not supported",
+            "No module", "RuntimeError", "ValueError", "Killed", "core dumped")
+
+
+def log_errors(limit: int = 15) -> list[str]:
+    """从这次启动的日志里把像报错的行挑出来（引擎那边的错在 API 进程堆栈之前，尾巴看不到）。"""
+    out = []
+    for line in read_log(2000):
+        if any(p in line for p in _ERR_PAT) and "Traceback" not in line and not line.strip().endswith("^"):
+            out.append(line.strip()[:300])
+    # 去掉连续重复
+    dedup: list[str] = []
+    for l in out:
+        if not dedup or dedup[-1] != l:
+            dedup.append(l)
+    return dedup[-limit:]
 
 
 def status() -> dict:
@@ -220,6 +247,10 @@ def status() -> dict:
         "uptime_s": int(time.time() - _started_at) if alive and _started_at else None,
         "error": _last_error,
         "log_tail": _log_tail(),
+        # 进程死了（起过但现在不活）也要说：不然页面只看到"没启动"
+        "exited": (_proc is not None and _proc.poll() is not None),
+        "exit_code": (_proc.poll() if _proc is not None else None),
+        "log_errors": log_errors(),
         "args": config.VLLM_ARGS,
     }
 
