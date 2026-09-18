@@ -127,15 +127,16 @@ def test_日志_只看这次启动_挑出报错行_进程退出有说明(monkeyp
     _reset(monkeypatch, tmp_path)
     log = tmp_path / f"r{_n[0]}" / "vllm.log"
     log.write_text("===== 1 启动：x\nold ERROR boom\n===== 2 启动：y\nINFO loading\n"
-                   "(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB\n"
-                   "(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB\n"
-                   "  File x, line 1\n    ^\nRuntimeError: Engine core initialization failed\n")
+                   "(EngineCore pid=1) ERROR 09-18 17:10:26 [core.py:1374]   File \"/x/y.py\", line 1, in f\n"
+                   "(EngineCore pid=1) ERROR 09-18 17:10:26 [core.py:1374]     ^^^^^^^\n"
+                   "(EngineCore pid=1) ERROR 09-18 17:10:26 [core.py:1374] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2 GB\n"
+                   "(APIServer pid=2) RuntimeError: Engine core initialization failed. See root cause above.\n")
     monkeypatch.setattr(vm, "LOG_PATH", str(log))
     lines = vm.read_log(100)
     assert lines[0].startswith("===== 2") and "old ERROR" not in "\n".join(lines)
     errs = vm.log_errors()
-    assert errs == ["(EngineCore pid=1) ERROR CUDA out of memory. Tried to allocate 2 GB",
-                    "RuntimeError: Engine core initialization failed"]
+    assert errs[0] == "[EngineCore] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2 GB"   # 根因在前
+    assert any("Engine core initialization failed" in e for e in errs) and not any("File" in e for e in errs)
     # 进程起过但死了
     p = _P()
     p.alive = False
@@ -143,7 +144,7 @@ def test_日志_只看这次启动_挑出报错行_进程退出有说明(monkeyp
     st = vm.status()
     assert st["exited"] is True and st["running"] is False
     row = next(m for m in models.list_models() if m["key"] == "vllm")
-    assert "退出" in row["error"] and "Engine core initialization failed" in row["error"]
+    assert "退出" in row["error"] and "CUDA out of memory" in row["error"]
 
 
 def test_权重齐不齐按index核对_缺分片和临时文件都算没齐(monkeypatch, tmp_path):
@@ -163,3 +164,21 @@ def test_权重齐不齐按index核对_缺分片和临时文件都算没齐(monk
     (d / "model-00001-of-00002.safetensors.incomplete").unlink()
     st = vm.status()
     assert st["weights_ready"] is True and st["missing_files"] == []
+
+
+def test_启动进度_按日志里程碑估(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    log = tmp_path / f"r{_n[0]}" / "vllm.log"
+    monkeypatch.setattr(vm, "LOG_PATH", str(log))
+    monkeypatch.setattr(vm, "_proc", _P())
+    monkeypatch.setattr(vm, "_started_at", vm.time.time() - 30)
+    log.write_text("===== 1 启动：x\nINFO Loading safetensors checkpoint shards:  50% Completed | 1/2\n")
+    sp = vm.startup_progress()
+    assert 20 <= sp["pct"] <= 25 and "50%" in sp["stage"] and sp["elapsed_s"] >= 29
+    log.write_text(log.read_text() + "INFO Model loading took 6.67 GiB\nINFO Capturing CUDA graphs\n")
+    assert vm.startup_progress()["pct"] == 75
+    monkeypatch.setattr(vm, "_port_open", lambda: True)
+    monkeypatch.setattr(vm, "health", lambda: {"ok": True})
+    assert vm.startup_progress()["pct"] == 100
+    monkeypatch.setattr(vm, "_proc", None)
+    assert vm.startup_progress() is None

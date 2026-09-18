@@ -232,20 +232,83 @@ def read_log(n: int = 300) -> list[str]:
 
 _ERR_PAT = ("ERROR", "Error", "error:", "Exception", "CUDA out of memory", "OutOfMemory", "not supported",
             "No module", "RuntimeError", "ValueError", "Killed", "core dumped")
+_EXC_RE = None
 
 
 def log_errors(limit: int = 15) -> list[str]:
-    """从这次启动的日志里把像报错的行挑出来（引擎那边的错在 API 进程堆栈之前，尾巴看不到）。"""
-    out = []
-    for line in read_log(2000):
-        if any(p in line for p in _ERR_PAT) and "Traceback" not in line and not line.strip().endswith("^"):
-            out.append(line.strip()[:300])
-    # 去掉连续重复
-    dedup: list[str] = []
-    for l in out:
-        if not dedup or dedup[-1] != l:
-            dedup.append(l)
-    return dedup[-limit:]
+    """从这次启动的日志里把像报错的行挑出来。引擎进程（EngineCore）里带异常类型的那行是根因，
+    排最前；API 进程那句「Engine core initialization failed」只是总结，放最后。"""
+    import re
+
+    global _EXC_RE
+    if _EXC_RE is None:
+        _EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception|Interrupt)\b\s*[:(]")
+    root: list[str] = []      # 带异常类型的（根因）
+    other: list[str] = []
+    for line in read_log(3000):
+        t = line.strip()
+        if not t or "Traceback" in t or t.endswith("^") or "File \"" in t or set(t.replace(" ", "")) <= set("~^.|"):
+            continue
+        if not any(p in t for p in _ERR_PAT):
+            continue
+        # 去掉 vllm 日志前缀「(EngineCore pid=1) ERROR 09-18 17:10:26 [core.py:1374] 」，留进程名
+        m = re.match(r"^\((\w+)[^)]*\)\s+(?:ERROR|WARNING|INFO)\s+\S+\s+\S+\s+\[[^\]]+\]\s*(.*)$", t)
+        if m:
+            t = f"[{m.group(1)}] {m.group(2).strip()}"
+            if not m.group(2).strip():
+                continue
+        t = t[:300]
+        if _EXC_RE.search(t) and not t.endswith(("(", ",", "=")):
+            if "Engine core initialization failed" in t:
+                other.append(t)
+            else:
+                root.append(t)
+        else:
+            other.append(t)
+    out: list[str] = []
+    for l in root + other:
+        if l not in out:
+            out.append(l)
+    # 根因在前：最多 limit 条，根因优先占位
+    return (root[:limit] + [l for l in other if l not in root])[:limit] if root else out[-limit:]
+
+
+# 启动阶段的里程碑：日志里出现这句 → 走到了这个百分比。分片加载那段再按它自己报的百分比细分
+_STAGES = [
+    ("Loading safetensors checkpoint shards", 5, "读权重分片"),
+    ("Model loading took", 40, "权重已进显存"),
+    ("torch_compile_cache", 50, "编译计算图"),
+    ("Dynamo bytecode transform", 55, "编译计算图"),
+    ("Compiling a graph", 60, "编译计算图"),
+    ("torch.compile takes", 70, "编译完成"),
+    ("Capturing CUDA graphs", 75, "捕获 CUDA 图"),
+    ("Graph capturing finished", 88, "CUDA 图完成"),
+    ("init engine", 92, "引擎初始化"),
+    ("Starting vLLM API server", 96, "起 API 服务"),
+    ("Application startup complete", 100, "就绪"),
+]
+
+
+def startup_progress() -> dict | None:
+    """进程在跑、还没 ready 时，从这次启动的日志估个进度 {pct, stage, elapsed_s}。"""
+    if not _alive():
+        return None
+    lines = read_log(3000)
+    pct, stage = 0, "拉起进程"
+    for line in lines:
+        for key, p, name in _STAGES:
+            if key in line and p > pct:
+                pct, stage = p, name
+        if "Loading safetensors checkpoint shards" in line and "%" in line and pct < 40:
+            try:
+                sub = int(line.split("Completed")[0].strip().split()[-1].rstrip("%"))
+                pct, stage = max(pct, 5 + int(sub * 0.35)), f"读权重分片 {sub}%"
+            except (ValueError, IndexError):
+                pass
+    if _port_open() and health().get("ok"):
+        pct, stage = 100, "就绪"
+    return {"pct": min(100, pct), "stage": stage,
+            "elapsed_s": int(time.time() - _started_at) if _started_at else 0}
 
 
 def status() -> dict:
@@ -261,6 +324,7 @@ def status() -> dict:
         "download_error": _download_error,
         "download_log": _download_log[-5:],
         "download_progress": download_progress(),
+        "startup_progress": startup_progress(),
         "running": alive,
         "pid": _proc.pid if alive else None,
         "port": config.VLLM_PORT,

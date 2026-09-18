@@ -153,7 +153,8 @@ def _vllm_status() -> dict:
     if st["ready"]:
         err = None
     elif st["running"]:
-        err = "进程在跑，模型还在加载（7B 要一两分钟）；看日志末尾"
+        sp = st.get("startup_progress") or {}
+        err = f"模型加载中：{sp.get('stage', '')}（{sp.get('pct', 0)}%，已用 {sp.get('elapsed_s', 0)} 秒；7B 一般一两分钟）"
     elif st["downloading"]:
         pr = st.get("download_progress") or {}
         if pr.get("total_mb"):
@@ -164,7 +165,7 @@ def _vllm_status() -> dict:
             err = f"正在下权重：已下 {pr.get('done_mb', 0) / 1000:.2f} GB，{pr.get('speed_mbps', 0)} MB/s；" + "；".join(st["download_log"][-1:])
     elif st.get("exited"):
         errs = st.get("log_errors") or []
-        err = f"vllm 进程退出了（code {st.get('exit_code')}）：" + (errs[-1] if errs else "看日志") + "。点「日志」看全部"
+        err = f"vllm 进程退出了（code {st.get('exit_code')}）：" + (errs[0] if errs else "看日志") + "。点「日志」看全部"
     else:
         err = st["error"] or st["download_error"] or (
             "没装 vllm（重跑 ./up.sh deploy -g 会自动装）" if not st["installed"] else
@@ -172,6 +173,7 @@ def _vllm_status() -> dict:
     return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
             "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
             "progress": st.get("download_progress"),
+            "startup": st.get("startup_progress"),
             "vllm": {k: st[k] for k in ("installed", "model", "weights_ready", "downloading", "running", "pid", "port",
                                         "port_open", "ready", "uptime_s", "log_tail", "download_log", "download_error",
                                         "exited", "exit_code", "log_errors")}}
