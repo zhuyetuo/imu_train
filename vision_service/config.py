@@ -107,6 +107,17 @@ POSE_DEVICE = _env("POSE_DEVICE", SAM_DEVICE)
 # 搜索时姿态相似占多少（0 = 只看画面，1 = 只看姿态）。前端可调
 POSE_W = float(_env("POSE_W", "0.5"))
 
+# ── 本地大模型（vLLM）────────────────────────────────────────────────
+# 「模型服务」页一键起停。权重放 models/vision/llm/<模型名>；vllm 这个包不自动装
+VLLM_MODEL      = _env("VLLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct-AWQ")
+VLLM_PORT       = int(_env("VLLM_PORT", "8386"))
+VLLM_LOCAL_ROOT = _env("VLLM_LOCAL_ROOT", os.path.join(HERE, "..", "models", "vision", "llm"))
+VLLM_MAX_LEN    = int(_env("VLLM_MAX_LEN", "8192"))
+# 显存留一半给别的模型（狗检测 / SigLIP / 姿态 / SAM 都在同一张卡上）
+VLLM_GPU_UTIL   = float(_env("VLLM_GPU_UTIL", "0.5"))
+# 额外参数，原样拼到命令行后面（比如 --quantization awq --dtype half）
+VLLM_ARGS       = _env("VLLM_ARGS", "")
+
 # ── 解码 / 检测的速度开关 ─────────────────────────────────────────────
 # 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2
 DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
