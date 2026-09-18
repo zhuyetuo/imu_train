@@ -160,7 +160,7 @@ def test_local_不要_key_也不发鉴权头():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     text, _ = L.chat_vision(L.LLM("local", "Qwen/Qwen2.5-VL-7B-Instruct", ""), "s", "u", JPEGS, http=_http(handler))
-    assert text == "ok" and seen["url"] == "http://127.0.0.1:8000/v1/chat/completions" and seen["auth"] is None
+    assert text == "ok" and seen["url"] == "http://127.0.0.1:8386/v1/chat/completions" and seen["auth"] is None
     # 给了 key（vLLM 开了 --api-key）就带上
     L.chat_vision(L.LLM("local", "m", "tok", base_url="http://gpu:8000/v1"), "s", "u", [], http=_http(handler))
     assert seen["auth"] == "Bearer tok" and seen["url"].startswith("http://gpu:8000/v1/")
