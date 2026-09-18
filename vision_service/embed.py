@@ -98,25 +98,32 @@ def _do_load() -> None:
     global _model, _processor, _load_error, _device
     try:
         import torch
-        from transformers import AutoModel, AutoProcessor
+        import transformers  # noqa: F401  只验证装没装；具体类下面单独 import，失败要能看到真正原因
     except ImportError as e:
         _load_error = f"没装 transformers/torch：{e}（pip install transformers）"
         return
     try:
         _predownload()
         # 先用 SigLIP 自己的类（transformers 5.x 下 Auto* 的懒加载偶尔因为某个可选依赖缺失整个失败，
-        # 报一句「Could not import module 'AutoProcessor'」看不出真正原因）；不行再退回 Auto*
+        # 只报一句「Could not import module 'AutoProcessor'」看不出真正原因）；不行再退回 Auto*
+        errors = []
+        m = None
         try:
             from transformers import SiglipModel, SiglipProcessor
 
             _processor = SiglipProcessor.from_pretrained(config.EMBED_MODEL)
             m = SiglipModel.from_pretrained(config.EMBED_MODEL)
         except Exception as e1:  # noqa: BLE001
+            errors.append(f"SigLIP 类：{_cause(e1)}")
             try:
+                from transformers import AutoModel, AutoProcessor
+
                 _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
                 m = AutoModel.from_pretrained(config.EMBED_MODEL)
             except Exception as e2:  # noqa: BLE001
-                raise RuntimeError(f"SigLIP 类：{_cause(e1)}；Auto 类：{_cause(e2)}") from e2
+                errors.append(f"Auto 类：{_cause(e2)}")
+        if m is None:
+            raise RuntimeError("；".join(errors))
         want = config.EMBED_DEVICE
         _device = "cuda" if (want == "cuda" and torch.cuda.is_available()) else "cpu"
         _model = m.to(_device).eval()
