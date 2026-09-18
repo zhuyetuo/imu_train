@@ -117,6 +117,8 @@ if [ "$SUB" = "deploy" ]; then
         # 画面向量模型的权重：机器直连 HF 常卡死，先用 get_weights.sh 按国内源挨个试下到本地
         # （已经有了秒过）；三个源都不通它会说怎么从别的电脑拷。下不到不挡住起服务
         deploy_run ./vision_service/get_weights.sh || FAILED+=("向量模型权重没下到（看上面怎么拷）")
+        # 姿态关键点模型（以图搜图第二路信号）：下不到不算失败，那一路自动关
+        deploy_run ./vision_service/get_pose_weights.sh || true
         deploy_run ./vision_service/run.sh down
         deploy_run ./vision_service/run.sh -d || FAILED+=("vision_service 起不来（看 vision_service/.run.log）")
     fi
