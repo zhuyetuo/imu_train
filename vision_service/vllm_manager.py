@@ -232,20 +232,45 @@ def read_log(n: int = 300) -> list[str]:
 
 _ERR_PAT = ("ERROR", "Error", "error:", "Exception", "CUDA out of memory", "OutOfMemory", "not supported",
             "No module", "RuntimeError", "ValueError", "Killed", "core dumped")
+_EXC_RE = None
 
 
 def log_errors(limit: int = 15) -> list[str]:
-    """从这次启动的日志里把像报错的行挑出来（引擎那边的错在 API 进程堆栈之前，尾巴看不到）。"""
-    out = []
-    for line in read_log(2000):
-        if any(p in line for p in _ERR_PAT) and "Traceback" not in line and not line.strip().endswith("^"):
-            out.append(line.strip()[:300])
-    # 去掉连续重复
-    dedup: list[str] = []
-    for l in out:
-        if not dedup or dedup[-1] != l:
-            dedup.append(l)
-    return dedup[-limit:]
+    """从这次启动的日志里把像报错的行挑出来。引擎进程（EngineCore）里带异常类型的那行是根因，
+    排最前；API 进程那句「Engine core initialization failed」只是总结，放最后。"""
+    import re
+
+    global _EXC_RE
+    if _EXC_RE is None:
+        _EXC_RE = re.compile(r"\b[A-Z]\w*(?:Error|Exception|Interrupt)\b\s*[:(]")
+    root: list[str] = []      # 带异常类型的（根因）
+    other: list[str] = []
+    for line in read_log(3000):
+        t = line.strip()
+        if not t or "Traceback" in t or t.endswith("^") or "File \"" in t or set(t.replace(" ", "")) <= set("~^.|"):
+            continue
+        if not any(p in t for p in _ERR_PAT):
+            continue
+        # 去掉 vllm 日志前缀「(EngineCore pid=1) ERROR 09-18 17:10:26 [core.py:1374] 」，留进程名
+        m = re.match(r"^\((\w+)[^)]*\)\s+(?:ERROR|WARNING|INFO)\s+\S+\s+\S+\s+\[[^\]]+\]\s*(.*)$", t)
+        if m:
+            t = f"[{m.group(1)}] {m.group(2).strip()}"
+            if not m.group(2).strip():
+                continue
+        t = t[:300]
+        if _EXC_RE.search(t) and not t.endswith(("(", ",", "=")):
+            if "Engine core initialization failed" in t:
+                other.append(t)
+            else:
+                root.append(t)
+        else:
+            other.append(t)
+    out: list[str] = []
+    for l in root + other:
+        if l not in out:
+            out.append(l)
+    # 根因在前：最多 limit 条，根因优先占位
+    return (root[:limit] + [l for l in other if l not in root])[:limit] if root else out[-limit:]
 
 
 # 启动阶段的里程碑：日志里出现这句 → 走到了这个百分比。分片加载那段再按它自己报的百分比细分

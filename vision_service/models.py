@@ -165,7 +165,7 @@ def _vllm_status() -> dict:
             err = f"正在下权重：已下 {pr.get('done_mb', 0) / 1000:.2f} GB，{pr.get('speed_mbps', 0)} MB/s；" + "；".join(st["download_log"][-1:])
     elif st.get("exited"):
         errs = st.get("log_errors") or []
-        err = f"vllm 进程退出了（code {st.get('exit_code')}）：" + (errs[-1] if errs else "看日志") + "。点「日志」看全部"
+        err = f"vllm 进程退出了（code {st.get('exit_code')}）：" + (errs[0] if errs else "看日志") + "。点「日志」看全部"
     else:
         err = st["error"] or st["download_error"] or (
             "没装 vllm（重跑 ./up.sh deploy -g 会自动装）" if not st["installed"] else
