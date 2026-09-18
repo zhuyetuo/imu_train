@@ -62,11 +62,33 @@ def local_dir() -> str:
     return os.path.join(config.VLLM_LOCAL_ROOT, config.VLLM_MODEL.split("/")[-1])
 
 
-def weights_ready() -> bool:
+def missing_weight_files() -> list[str]:
+    """按 model.safetensors.index.json 核对：里面引用的每个分片都得在、且没有下到一半的临时文件。
+    没有 index 的小模型：至少一个 .safetensors / .bin。返回缺的文件名（空 = 齐了）。"""
+    import json
+
     d = local_dir()
     if not os.path.isdir(d) or not os.path.isfile(os.path.join(d, "config.json")):
-        return False
-    return any(f.endswith((".safetensors", ".bin")) for f in os.listdir(d))
+        return ["config.json"]
+    files = set(os.listdir(d))
+    # 下到一半的临时文件（huggingface_hub 是 .incomplete，modelscope 是 .tmp / ._）
+    partial = [f for f in files if f.endswith((".incomplete", ".tmp")) or f.startswith("._")]
+    idx = os.path.join(d, "model.safetensors.index.json")
+    if os.path.isfile(idx):
+        try:
+            with open(idx, encoding="utf-8") as f:
+                shards = sorted(set((json.load(f).get("weight_map") or {}).values()))
+        except (OSError, ValueError):
+            shards = []
+        missing = [sh for sh in shards if sh not in files]
+        return missing + partial
+    if any(f.endswith((".safetensors", ".bin")) for f in files):
+        return partial
+    return ["*.safetensors"]
+
+
+def weights_ready() -> bool:
+    return not missing_weight_files()
 
 
 def _dir_bytes(d: str) -> int:
@@ -234,6 +256,7 @@ def status() -> dict:
         "model": config.VLLM_MODEL,
         "local_dir": local_dir(),
         "weights_ready": weights_ready(),
+        "missing_files": missing_weight_files()[:5],
         "downloading": _downloading,
         "download_error": _download_error,
         "download_log": _download_log[-5:],
@@ -272,8 +295,10 @@ def start() -> dict:
         if not weights_ready():
             if not _downloading:
                 threading.Thread(target=_download, name="vllm-download", daemon=True).start()
+            miss = missing_weight_files()
             return {"ok": False, "downloading": True,
-                    "error": f"权重还没在本地，正在下到 {local_dir()}（几 GB，看状态里的进度）；下好后再点一次启动",
+                    "error": f"权重还没齐（缺 {', '.join(miss[:3])}{'…' if len(miss) > 3 else ''}），正在下到 {local_dir()}"
+                             f"（几 GB，看状态里的进度；下过一半的会接着下）；下好后再点一次启动",
                     "status": status()}
         cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
                "--model", local_dir(), "--served-model-name", config.VLLM_MODEL,
