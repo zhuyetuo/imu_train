@@ -106,6 +106,22 @@ ensure_deps() {
         fi
     fi
 
+    # torch / torchaudio 的 CUDA 版本对不上（装 vllm 换了 torch，torchaudio 还是老的）：transformers 一 import
+    # 就炸，SigLIP 整个不可用。我们不用 torchaudio——先试装跟 torch 同源的版本，不行就卸掉
+    if ! "$PY_BIN" -c "import torch, torchaudio" >/dev/null 2>&1 && "$PY_BIN" -c "import torch" >/dev/null 2>&1; then
+        if "$PY_BIN" -c "import torch, torchaudio" 2>&1 | grep -q "different CUDA versions"; then
+            echo "torch 和 torchaudio 的 CUDA 版本对不上（装 vllm 换了 torch），修一下..."
+            ta_ver="$("$PY_BIN" -c "import importlib.metadata as m; print(m.version('torchaudio').split('+')[0])" 2>/dev/null)"
+            if [ -n "$ta_ver" ] && "$PY_BIN" -m pip install --force-reinstall --no-deps "torchaudio==$ta_ver" >/dev/null 2>&1 \
+               && "$PY_BIN" -c "import torch, torchaudio" >/dev/null 2>&1; then
+                echo "  重装了 torchaudio==$ta_ver，跟 torch 对上了"
+            else
+                "$PY_BIN" -m pip uninstall -y -q torchaudio >/dev/null 2>&1 || true
+                echo "  卸掉了 torchaudio（这里用不到它）"
+            fi
+        fi
+    fi
+
     # ffmpeg：系统包，有它解码抽帧快好几倍（还能走 NVDEC）；没有退回 cv2，慢但能用。
     # 是 apt 装的，要 sudo：能免密就直接装，不能就问一次密码（不想装就 --no-install）
     if ! command -v ffmpeg >/dev/null 2>&1; then
