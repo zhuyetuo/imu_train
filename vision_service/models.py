@@ -179,7 +179,8 @@ def act(key: str, action: str) -> dict:
     if action == "test":
         t0 = time.monotonic()
         try:
-            r = spec["test"]()
+            with _meter.paused():      # 调试测试不进统计
+                r = spec["test"]()
             return {"ok": True, "error": None, "latency_ms": r.get("latency_ms", int((time.monotonic() - t0) * 1000)),
                     "detail": r.get("detail"), "status": spec["status"]()}
         except Exception as e:  # noqa: BLE001 测试就是要把错误原样带回给人看

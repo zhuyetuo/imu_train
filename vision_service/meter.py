@@ -7,10 +7,14 @@ import time
 
 _lock = threading.Lock()
 _meter: dict[str, dict] = {}
+# 「模型服务」页点「测试」跑的那一次不算业务调用：测试期间把计数关掉
+_paused = 0
 
 
 def record(key: str, ms: float, frames: int = 1, ok: bool = True) -> None:
     """一次推理记一笔。frames：这一次处理了几张（批量检测一次几十张）。"""
+    if _paused:
+        return
     with _lock:
         m = _meter.setdefault(key, {"calls": 0, "frames": 0, "total_ms": 0.0, "max_ms": 0.0, "errors": 0, "last_at": None})
         m["calls"] += 1
@@ -49,4 +53,20 @@ class timed:
 
     def __exit__(self, et, ev, tb):
         record(self.key, (time.monotonic() - self.t0) * 1000, frames=self.frames, ok=et is None)
+        return False
+
+
+class paused:
+    """with meter.paused(): ... 这段里的推理不计数（页面上的调试测试）。"""
+
+    def __enter__(self):
+        global _paused
+        with _lock:
+            _paused += 1
+        return self
+
+    def __exit__(self, *a):
+        global _paused
+        with _lock:
+            _paused -= 1
         return False

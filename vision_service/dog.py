@@ -79,6 +79,26 @@ _warm = False
 _device_used: str | None = None
 
 
+def _weights_path() -> str:
+    """权重文件：配置的路径不存在、但同名文件躺在仓库根 / vision_service 目录（老版本 ultralytics 下到
+    当前目录的），挪到配置的位置；都没有就把目录建好，ultralytics 会按文件名下到那里。"""
+    import shutil
+
+    p = config.DOG_WEIGHTS
+    if os.path.isfile(p):
+        return p
+    name = os.path.basename(p)
+    here = os.path.dirname(os.path.abspath(__file__))
+    for old in (os.path.join(here, name), os.path.join(here, "..", name), os.path.join(os.getcwd(), name)):
+        if os.path.isfile(old) and os.path.abspath(old) != os.path.abspath(p):
+            os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+            shutil.move(old, p)
+            _logger.info("把检测权重从 %s 挪到 %s", old, p)
+            return p
+    os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
+    return p
+
+
 def _load(force: bool = False):
     global _model, _load_error, _last_try
     if _model is not None:
@@ -96,7 +116,7 @@ def _load(force: bool = False):
             _load_error = f"没装 ultralytics：{e}"
             return
         try:
-            _model = YOLO(config.DOG_WEIGHTS)
+            _model = YOLO(_weights_path())
             globals()["_dog_class"] = _resolve_dog_class(_model)
             # **加载时就搬上卡**，不要靠 predict(device=...) 每次搬。
             #
