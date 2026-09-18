@@ -182,3 +182,24 @@ def test_启动进度_按日志里程碑估(monkeypatch, tmp_path):
     assert vm.startup_progress()["pct"] == 100
     monkeypatch.setattr(vm, "_proc", None)
     assert vm.startup_progress() is None
+
+
+def test_没有系统CUDA时用pip装的nvcc(monkeypatch, tmp_path):
+    fake = tmp_path / "sp" / "nvidia" / "cuda_nvcc"
+    (fake / "bin").mkdir(parents=True)
+    (fake / "bin" / "nvcc").write_text("")
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(vm.os.path, "isfile", lambda p: str(p).startswith(str(tmp_path)) and __import__("os").path.exists(p))
+    import site
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(tmp_path / "sp")])
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(tmp_path / "nowhere"))
+    assert vm._cuda_home() == str(fake)
+    env = vm.launch_env()
+    assert env["CUDA_HOME"] == str(fake) and env["PATH"].startswith(str(fake / "bin")) and env["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
+    # 人设了 CUDA_HOME 且真有 nvcc 就用人的
+    real = tmp_path / "cuda"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "nvcc").write_text("")
+    monkeypatch.setenv("CUDA_HOME", str(real))
+    assert vm._cuda_home() == str(real)
