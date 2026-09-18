@@ -34,7 +34,8 @@ def test_from_dict_和默认地址():
 
 
 @pytest.mark.parametrize("provider,default_base", [("openai", "https://api.openai.com/v1"),
-                                                   ("doubao", "https://ark.cn-beijing.volces.com/api/v3")])
+                                                   ("doubao", "https://ark.cn-beijing.volces.com/api/v3"),
+                                                   ("zhipu", "https://open.bigmodel.cn/api/paas/v4")])
 def test_openai_协议_请求形状和用量(provider, default_base):
     seen = {}
 
