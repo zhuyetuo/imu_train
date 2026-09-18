@@ -103,8 +103,22 @@ ensure_deps() {
         VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
         if command -v docker >/dev/null 2>&1 && command -v nvidia-smi >/dev/null 2>&1 && [ "${VLLM_INSTALL:-1}" != "0" ] \
            && ! docker image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
-            echo "拉 vLLM 镜像 $VLLM_IMAGE（十几 GB；慢的话给 docker 配国内镜像源，或 VLLM_IMAGE 指到别的仓库）..."
-            docker pull "$VLLM_IMAGE" || echo "  ⚠ 镜像没拉下来，页面上点「启动」时会再试"
+            # 先测哪个 Docker Hub 加速站最快（各 3 秒，缓存一天），从它那拉，拉完 tag 回原名。
+            # 不改 daemon.json：改了要重启 docker，label_service 那些容器会跟着断
+            MIRROR="$("$PY_BIN" vision_service/pick_docker_mirror.py --quiet 2>/dev/null || true)"
+            "$PY_BIN" vision_service/pick_docker_mirror.py >/dev/null 2>&1 || true
+            if [ -n "$MIRROR" ]; then
+                echo "拉 vLLM 镜像 $VLLM_IMAGE（十几 GB），走加速站 $MIRROR ..."
+                if docker pull "$MIRROR/$VLLM_IMAGE" && docker tag "$MIRROR/$VLLM_IMAGE" "$VLLM_IMAGE"; then
+                    docker rmi "$MIRROR/$VLLM_IMAGE" >/dev/null 2>&1 || true
+                else
+                    echo "  ⚠ 加速站没拉下来，换官方再试..."
+                    docker pull "$VLLM_IMAGE" || echo "  ⚠ 镜像没拉下来，页面上点「启动」时会再试"
+                fi
+            else
+                echo "拉 vLLM 镜像 $VLLM_IMAGE（十几 GB；各加速站都测不到速度，走官方）..."
+                docker pull "$VLLM_IMAGE" || echo "  ⚠ 镜像没拉下来，页面上点「启动」时会再试"
+            fi
         fi
     elif [ "${VLLM_INSTALL:-1}" != "0" ] && command -v nvidia-smi >/dev/null 2>&1 && ! "$PY_BIN" -c "import vllm" >/dev/null 2>&1; then
         echo "缺 vllm（本地大模型），装一下：几 GB，会连带装它要的 torch 版本，看下面 pip 的进度..."
