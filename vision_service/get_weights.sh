@@ -20,6 +20,7 @@ MODEL_ID="${SIGLIP_MODEL_ID:-google/siglip-base-patch16-224}"
 DEST="${SIGLIP_LOCAL_DIR:-models/vision/$(basename "$MODEL_ID")}"
 ENV_FILE="vision_service/.env"
 PY_BIN="${PY_BIN:-python}"
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
