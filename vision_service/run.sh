@@ -77,9 +77,9 @@ ensure_deps() {
     # requirements 里写的是 CPU 版兜底；这里发现有 nvidia-smi 且当前 onnxruntime 没有 CUDA provider，
     # 就卸掉 CPU 版装 GPU 版（两个包不能共存）。装不上就留 CPU 版，功能不受影响
     if command -v nvidia-smi >/dev/null 2>&1 && ! "$PY_BIN" -c "import onnxruntime as o, sys; sys.exit(0 if 'CUDAExecutionProvider' in o.get_available_providers() else 1)" >/dev/null 2>&1; then
-        echo "有显卡，把 onnxruntime 换成 GPU 版（姿态关键点快十倍）..."
+        echo "有显卡，把 onnxruntime 换成 GPU 版（姿态关键点快十倍）。包连 CUDA 运行库有几百 MB，看下面 pip 的进度..."
         "$PY_BIN" -m pip uninstall -y -q onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
-        if "$PY_BIN" -m pip install -q onnxruntime-gpu; then
+        if "$PY_BIN" -m pip install --progress-bar on onnxruntime-gpu; then
             if "$PY_BIN" -c "import onnxruntime as o, sys; sys.exit(0 if 'CUDAExecutionProvider' in o.get_available_providers() else 1)" >/dev/null 2>&1; then
                 echo "  onnxruntime-gpu 装好了，CUDA provider 可用"
             else
@@ -87,7 +87,7 @@ ensure_deps() {
             fi
         else
             echo "  ⚠ onnxruntime-gpu 装不上，退回 CPU 版"
-            "$PY_BIN" -m pip install -q onnxruntime >/dev/null 2>&1 || true
+            "$PY_BIN" -m pip install onnxruntime || true
         fi
     fi
 
