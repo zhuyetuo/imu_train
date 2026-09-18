@@ -104,15 +104,39 @@ def _do_load() -> None:
         return
     try:
         _predownload()
-        _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
-        m = AutoModel.from_pretrained(config.EMBED_MODEL)
+        # 先用 SigLIP 自己的类（transformers 5.x 下 Auto* 的懒加载偶尔因为某个可选依赖缺失整个失败，
+        # 报一句「Could not import module 'AutoProcessor'」看不出真正原因）；不行再退回 Auto*
+        try:
+            from transformers import SiglipModel, SiglipProcessor
+
+            _processor = SiglipProcessor.from_pretrained(config.EMBED_MODEL)
+            m = SiglipModel.from_pretrained(config.EMBED_MODEL)
+        except Exception as e1:  # noqa: BLE001
+            try:
+                _processor = AutoProcessor.from_pretrained(config.EMBED_MODEL)
+                m = AutoModel.from_pretrained(config.EMBED_MODEL)
+            except Exception as e2:  # noqa: BLE001
+                raise RuntimeError(f"SigLIP 类：{_cause(e1)}；Auto 类：{_cause(e2)}") from e2
         want = config.EMBED_DEVICE
         _device = "cuda" if (want == "cuda" and torch.cuda.is_available()) else "cpu"
         _model = m.to(_device).eval()
         _load_error = None
     except Exception as e:  # noqa: BLE001 权重下不动/版本不对，都要报出来
-        _load_error = (f"加载 {config.EMBED_MODEL} 失败：{type(e).__name__}: {e}"
-                       f"（这台机器下不动权重的话，先在能上网的机器上下好放到 HF 缓存目录，或设 EMBED_MODEL 指向本地路径）")
+        _load_error = (f"加载 {config.EMBED_MODEL} 失败：{_cause(e)}"
+                       f"（这台机器下不动权重的话，先在能上网的机器上下好放到 HF 缓存目录，或设 EMBED_MODEL 指向本地路径；"
+                       f"报 import 错多半是 transformers / torchvision / pillow 版本对不上，pip install -U transformers）")
+
+
+def _cause(e: BaseException) -> str:
+    """异常连同它的 __cause__ 链一起写出来：transformers 的懒加载把真正原因藏在 cause 里。"""
+    parts = []
+    seen = 0
+    cur: BaseException | None = e
+    while cur is not None and seen < 4:
+        parts.append(f"{type(cur).__name__}: {str(cur)[:300]}")
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return " ← ".join(parts)
 
 
 def _as_tensor(out):
