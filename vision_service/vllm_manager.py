@@ -248,6 +248,44 @@ def log_errors(limit: int = 15) -> list[str]:
     return dedup[-limit:]
 
 
+# 启动阶段的里程碑：日志里出现这句 → 走到了这个百分比。分片加载那段再按它自己报的百分比细分
+_STAGES = [
+    ("Loading safetensors checkpoint shards", 5, "读权重分片"),
+    ("Model loading took", 40, "权重已进显存"),
+    ("torch_compile_cache", 50, "编译计算图"),
+    ("Dynamo bytecode transform", 55, "编译计算图"),
+    ("Compiling a graph", 60, "编译计算图"),
+    ("torch.compile takes", 70, "编译完成"),
+    ("Capturing CUDA graphs", 75, "捕获 CUDA 图"),
+    ("Graph capturing finished", 88, "CUDA 图完成"),
+    ("init engine", 92, "引擎初始化"),
+    ("Starting vLLM API server", 96, "起 API 服务"),
+    ("Application startup complete", 100, "就绪"),
+]
+
+
+def startup_progress() -> dict | None:
+    """进程在跑、还没 ready 时，从这次启动的日志估个进度 {pct, stage, elapsed_s}。"""
+    if not _alive():
+        return None
+    lines = read_log(3000)
+    pct, stage = 0, "拉起进程"
+    for line in lines:
+        for key, p, name in _STAGES:
+            if key in line and p > pct:
+                pct, stage = p, name
+        if "Loading safetensors checkpoint shards" in line and "%" in line and pct < 40:
+            try:
+                sub = int(line.split("Completed")[0].strip().split()[-1].rstrip("%"))
+                pct, stage = max(pct, 5 + int(sub * 0.35)), f"读权重分片 {sub}%"
+            except (ValueError, IndexError):
+                pass
+    if _port_open() and health().get("ok"):
+        pct, stage = 100, "就绪"
+    return {"pct": min(100, pct), "stage": stage,
+            "elapsed_s": int(time.time() - _started_at) if _started_at else 0}
+
+
 def status() -> dict:
     alive = _alive()
     port = _port_open()
@@ -261,6 +299,7 @@ def status() -> dict:
         "download_error": _download_error,
         "download_log": _download_log[-5:],
         "download_progress": download_progress(),
+        "startup_progress": startup_progress(),
         "running": alive,
         "pid": _proc.pid if alive else None,
         "port": config.VLLM_PORT,

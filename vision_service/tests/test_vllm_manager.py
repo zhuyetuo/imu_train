@@ -163,3 +163,21 @@ def test_权重齐不齐按index核对_缺分片和临时文件都算没齐(monk
     (d / "model-00001-of-00002.safetensors.incomplete").unlink()
     st = vm.status()
     assert st["weights_ready"] is True and st["missing_files"] == []
+
+
+def test_启动进度_按日志里程碑估(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    log = tmp_path / f"r{_n[0]}" / "vllm.log"
+    monkeypatch.setattr(vm, "LOG_PATH", str(log))
+    monkeypatch.setattr(vm, "_proc", _P())
+    monkeypatch.setattr(vm, "_started_at", vm.time.time() - 30)
+    log.write_text("===== 1 启动：x\nINFO Loading safetensors checkpoint shards:  50% Completed | 1/2\n")
+    sp = vm.startup_progress()
+    assert 20 <= sp["pct"] <= 25 and "50%" in sp["stage"] and sp["elapsed_s"] >= 29
+    log.write_text(log.read_text() + "INFO Model loading took 6.67 GiB\nINFO Capturing CUDA graphs\n")
+    assert vm.startup_progress()["pct"] == 75
+    monkeypatch.setattr(vm, "_port_open", lambda: True)
+    monkeypatch.setattr(vm, "health", lambda: {"ok": True})
+    assert vm.startup_progress()["pct"] == 100
+    monkeypatch.setattr(vm, "_proc", None)
+    assert vm.startup_progress() is None

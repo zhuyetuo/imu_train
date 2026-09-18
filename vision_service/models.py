@@ -153,7 +153,8 @@ def _vllm_status() -> dict:
     if st["ready"]:
         err = None
     elif st["running"]:
-        err = "进程在跑，模型还在加载（7B 要一两分钟）；看日志末尾"
+        sp = st.get("startup_progress") or {}
+        err = f"模型加载中：{sp.get('stage', '')}（{sp.get('pct', 0)}%，已用 {sp.get('elapsed_s', 0)} 秒；7B 一般一两分钟）"
     elif st["downloading"]:
         pr = st.get("download_progress") or {}
         if pr.get("total_mb"):
@@ -172,6 +173,7 @@ def _vllm_status() -> dict:
     return {"available": bool(st["ready"]), "error": err, "device": "cuda" if st["running"] else None,
             "weights": st["local_dir"], "warm": st["ready"], "loading": bool(st["running"] and not st["ready"]) or st["downloading"],
             "progress": st.get("download_progress"),
+            "startup": st.get("startup_progress"),
             "vllm": {k: st[k] for k in ("installed", "model", "weights_ready", "downloading", "running", "pid", "port",
                                         "port_open", "ready", "uptime_s", "log_tail", "download_log", "download_error",
                                         "exited", "exit_code", "log_errors")}}
