@@ -35,7 +35,7 @@ DEFAULT_BASE_URL = {
     "doubao": "https://ark.cn-beijing.volces.com/api/v3",
     "gemini": "https://generativelanguage.googleapis.com/v1beta",
     # 本地起的服务（vLLM / SGLang / Ollama 都能开 OpenAI 兼容口），key 可以不填
-    "local": "http://127.0.0.1:8000/v1",
+    "local": "http://127.0.0.1:8386/v1",   # 8000 太常用，多半被占着；挨着 vision_service 的 8385
 }
 # 不需要 key 的提供方：本地服务
 _KEY_OPTIONAL = {"local"}

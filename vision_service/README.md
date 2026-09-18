@@ -216,7 +216,7 @@ Opus 5 一段不到 2 美分，一个视频最多一两美元。
 
 ```bash
 pip install vllm
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct-AWQ --port 8000 --max-model-len 8192 --gpu-memory-utilization 0.6
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct-AWQ --port 8386 --max-model-len 8192 --gpu-memory-utilization 0.6
 ```
 
 `--gpu-memory-utilization 0.6` 给 SAM/YOLO 留显存（它们在同一张卡上）。换模型就 Ctrl-C 重起一个，
