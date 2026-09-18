@@ -183,7 +183,9 @@ def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
         return []
     # 半精度：5090 上 x 模型快近一倍，框的差别在小数点后。CPU 上 half 不支持，自动不用
     half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
-    with _lock:
+    from . import meter
+
+    with _lock, meter.timed("dog", frames=len(frames)):
         res = _model.predict(list(frames), verbose=False, conf=conf, half=half,
                              classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
                              device=_device_used or "cpu")
@@ -208,7 +210,9 @@ def detect(frame, conf: float = 0.35) -> list[dict]:
     调用方保证模型已加载（先 _load()）。锁在这里拿：一张卡上并发只会买到
     显存峰值翻倍。
     """
-    with _lock:
+    from . import meter
+
+    with _lock, meter.timed("dog"):
         res = _model.predict(frame, verbose=False, conf=conf,
                              classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
                              device=_device_used or "cpu")

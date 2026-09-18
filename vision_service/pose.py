@@ -90,7 +90,9 @@ def keypoints(frame, boxes: list[dict]):
     b = max(boxes, key=lambda x: x["bbox"][2] * x["bbox"][3])
     x, y, bw, bh = b["bbox"]
     xyxy = np.array([[x * w, y * h, (x + bw) * w, (y + bh) * h]], dtype="float32")
-    with _lock:
+    from . import meter
+
+    with _lock, meter.timed("pose"):
         kps, scores = _model(frame, bboxes=xyxy)
     kps = np.asarray(kps, dtype="float32")
     scores = np.asarray(scores, dtype="float32")
