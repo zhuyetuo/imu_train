@@ -108,6 +108,7 @@ def fake_cv2(monkeypatch):
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
     # 这些用例走的是假 cv2 那条路：把 ffmpeg 关掉，不然有 ffmpeg 的机器上会去解一个不存在的文件
     monkeypatch.setattr(dog.config, "DECODE_FFMPEG", False)
+    monkeypatch.setattr(dog.config, "SCAN_CLIP_FALLBACK", False)   # 兜底单独测
     np  # noqa: B018
     return cv2
 
@@ -332,9 +333,11 @@ def test_scan_用的是查出来的类别号不是写死的(fake_cv2, monkeypatc
     m = M()
     monkeypatch.setattr(dog, "_model", m)
     monkeypatch.setattr(dog, "_dog_class", dog._resolve_dog_class(m))
+    monkeypatch.setattr(dog, "_classes", dog._resolve_classes(m))
     fake_cv2._cap = FakeCap([0])
     dog.scan_video("x.mp4")
-    assert got["classes"] == [3], got
+    # dog 在前、cat 在后（DETECT_CLASSES 的顺序），都按这份权重自己的号
+    assert got["classes"] == [3, 0], got
 
 
 def test_类别号会在_status_里报出来(monkeypatch):
@@ -475,3 +478,47 @@ def test_predict用的是实际设备不是配置值(fake_cv2, monkeypatch):
     fake_cv2._cap = FakeCap([0])
     dog.scan_video("x.mp4")
     assert got["device"] == "cpu"
+
+
+def test_yolo没框到的帧_siglip说有狗就算有狗(fake_cv2, monkeypatch):
+    """俯拍缩成一团的黑狗 COCO 模型认不出。YOLO 一只都没框到的帧再问 SigLIP 一句，
+    它说像狗就记 n_dogs=1（没框、标 via=clip），整段不会因此变成"没狗"。"""
+    import numpy as np
+
+    from vision_service import embed
+
+    fake_cv2._cap = FakeCap([0, 1000, 2000, 3000])
+    fake_cv2.imencode = lambda ext, f, params=None: (True, np.zeros(4, dtype="uint8"))
+    fake_cv2.IMWRITE_JPEG_QUALITY = 1
+    _stub_predict(monkeypatch, [1, 0, 0, 0])            # 只有第一帧框到了
+    monkeypatch.setattr(dog.config, "SCAN_CLIP_FALLBACK", True)
+
+    class Enc:
+        def encode_text(self, texts):
+            # 狗提示词 → (1,0)，空房间提示词 → (0,1)
+            return np.array([[1.0, 0.0]] * len(texts)) if "dog" in texts[0] else np.array([[0.0, 1.0]] * len(texts))
+
+        def encode_images(self, jpegs):
+            # 第 2、3 帧（漏检的前两帧）像狗，最后一帧像空房间
+            return np.array([[0.9, 0.1], [0.8, 0.2], [0.1, 0.9]][: len(jpegs)])
+
+    monkeypatch.setattr(embed, "_default_encoder", Enc())
+    monkeypatch.setattr(embed, "_load", lambda force=False: None)
+    monkeypatch.setattr(embed, "_model", object())
+    monkeypatch.setattr(embed, "_prompt_vecs", None)
+    r = dog.scan_video("x.mp4", every_sec=1.0)
+    assert [f["n_dogs"] for f in r["frames"]] == [1, 1, 1, 0]
+    assert r["frames"][1]["via"] == "clip" and r["frames"][1]["boxes"] == [] and "via" not in r["frames"][0]
+    assert r["frames_with_dog"] == 3 and r["frames_with_dog_clip"] == 2 and r["verdict"] == "has_dog"
+
+
+def test_算作狗的类别按名字解析():
+    class M:
+        names = {0: "person", 15: "cat", 16: "dog", 21: "bear", 77: "teddy bear"}
+
+    assert dog._resolve_classes(M()) == [16, 15, 21, 77]     # 按 DETECT_CLASSES 的顺序，没有的跳过
+
+    class N:
+        names = {0: "person"}
+
+    assert dog._resolve_classes(N()) == [16]
