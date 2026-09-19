@@ -181,3 +181,44 @@ def test_分割在裁剪块上跑_掩码按块给_框换算到块里(monkeypatch
     # 抠不到：None，调用方用原图
     monkeypatch.setattr(segmask, "dog_mask_batch", lambda c, b, imgsz=None: [None] * len(c))
     assert segmask.masked_crop(frame, boxes, crop_fn) is None
+
+
+def test_静止的帧沿用上一帧的抠图_不再送分割_向量只算一次(monkeypatch, tmp_path):
+    from vision_service import embed, seek
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    monkeypatch.setattr(embed.config, "EMBED_MODEL", "fake/siglip")
+    monkeypatch.setattr(embed.config, "EMBED_MASK_BG", True)
+    monkeypatch.setattr(embed.pose, "available", lambda: False)
+    monkeypatch.setattr(segmask, "available", lambda: True)
+    embed._cache.clear()
+    sent = []
+
+    def fake_batch(frames, boxes_list, crop_fn, max_side=512):
+        sent.append(len(frames))
+        return [np.full((8, 8, 3), 9 + 40 * len(sent) + i, dtype="uint8") for i, _ in enumerate(frames)]   # 每张不一样
+
+    monkeypatch.setattr(segmask, "masked_crop_batch", fake_batch)
+    box = [{"bbox": [0.1, 0.1, 0.5, 0.5], "conf": 1}]
+    frames = [np.full((40, 40, 3), 77, dtype="uint8") for _ in range(5)]
+
+    def fake_sample(path, every_sec=1.0, conf=0.35, on_frame=None, on_batch=None, **kw):
+        # 第 0 帧真检测，1~3 静止沿用，第 4 帧又变了
+        recs = [{"t": float(i), "boxes": box, "jpeg": b"orig%d" % i, "motion": None, "static": i in (1, 2, 3)}
+                for i in range(5)]
+        on_batch(list(zip(recs, frames)))
+        return recs
+
+    monkeypatch.setattr(seek, "sample_video", fake_sample)
+    encoded = []
+
+    class Enc:
+        def encode_images(self, jpegs):
+            encoded.extend(jpegs)
+            return np.arange(len(jpegs) * 4, dtype="float32").reshape(len(jpegs), 4)
+
+    r = embed.build("A.mp4", "/x/A.mp4", encoder=Enc())
+    assert sent == [2] and r["with_mask"] == 2 and r["static_reused"] == 3
+    assert len(encoded) == 2                                   # 5 帧只算 2 个向量
+    d = embed.load("A.mp4")
+    assert len(d["t"]) == 5 and np.allclose(d["emb"][0], d["emb"][2]) and not np.allclose(d["emb"][0], d["emb"][4])

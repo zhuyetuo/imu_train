@@ -102,7 +102,7 @@ def test_建索引_只存有狗的点_t是pts_模型不变就复用(index_dir, f
     enc = FakeEncoder()
     r = embed.build("d/a.mp4", "x.mp4", encoder=enc)
     assert r["cached"] is False and r["n"] == 5 and r["with_dog"] == 5 and r["sampled"] == 6
-    assert enc.calls == [("img", 5)]
+    assert enc.calls == [("img", 3)]                  # 5 帧有狗，但假视频里只有 3 种画面：一样的图只算一次向量
     d = embed.load("d/a.mp4")
     assert d["t"].tolist() == [0.0, 1.0, 3.0, 4.0, 5.0]
     assert d["emb"].shape == (5, 8) and d["box"].shape == (5, 4)
@@ -113,7 +113,7 @@ def test_建索引_只存有狗的点_t是pts_模型不变就复用(index_dir, f
     # 再建：直接用旧的，不解码不编码
     fake_video["cap"] = _Cap([0])
     r2 = embed.build("d/a.mp4", "x.mp4", encoder=enc)
-    assert r2["cached"] is True and enc.calls == [("img", 5)]
+    assert r2["cached"] is True and enc.calls == [("img", 3)]
     # 模型换了 → 重建
     monkeypatch.setattr(embed.config, "EMBED_MODEL", "fake/siglip-v2")
     fake_video["cap"] = _Cap([0, 1000])

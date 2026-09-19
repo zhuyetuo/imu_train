@@ -102,7 +102,8 @@ EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 # 用 YOLO 分割版权重（跟检测同一家）；没权重 / 加载失败自动退回不抠。
 # 改这个开关后老索引会自动重建（索引 meta 里记着有没有抠）
 EMBED_MASK_BG   = _env("EMBED_MASK_BG", "1").lower() not in ("0", "false", "no", "")
-SEG_WEIGHTS     = _env("SEG_WEIGHTS", os.path.join(HERE, "..", "models", "vision", "yolo", "yolo26x-seg.pt"))
+# m 档就够：分割是在裁出来的块上跑的，狗占大半，不像整帧检测那样要 x 才找得到小狗；比 x 快两三倍
+SEG_WEIGHTS     = _env("SEG_WEIGHTS", os.path.join(HERE, "..", "models", "vision", "yolo", "yolo26m-seg.pt"))
 
 # ── 姿态关键点（以图搜图的第二路信号）────────────────────────────────
 # RTMPose-m AP-10K 的 ONNX 一个文件，rtmlib + onnxruntime 跑。没权重 / 没装就自动关，
