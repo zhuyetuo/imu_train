@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, dog, embed, pose, sam, vllm_manager
+from . import config, dog, embed, pose, sam, segmask, vllm_manager
 from . import meter as _meter
 
 _started = time.time()
@@ -197,6 +197,39 @@ def _vllm_unload() -> None:
         raise RuntimeError(r.get("error") or "停不掉")
 
 
+def _seg_status() -> dict:
+    st = segmask.status()
+    err = st["error"]
+    if not st["enabled"]:
+        err = "EMBED_MASK_BG=0 关着：建索引 / 找相似不抠狗"
+    return {"available": st["available"], "error": err, "device": st["device"], "weights": config.SEG_WEIGHTS}
+
+
+def _seg_load() -> dict:
+    segmask._load(force=True)
+    return {"warm": segmask._model is not None, "error": segmask._load_error}
+
+
+def _seg_unload() -> None:
+    with segmask._lock:
+        segmask._model = None
+        segmask._load_error = None
+    _cuda_free()
+
+
+def _seg_test() -> dict:
+    import numpy as np
+
+    segmask._load(force=True)
+    if segmask._model is None:
+        raise RuntimeError(segmask._load_error or "没加载")
+    img = np.random.default_rng(4).integers(0, 256, size=(640, 640, 3), dtype="uint8")
+    t0 = time.monotonic()
+    m = segmask.dog_mask(img, None)
+    return {"latency_ms": int((time.monotonic() - t0) * 1000),
+            "detail": "随机图跑一次，" + ("抠到了一块" if m is not None else "没抠到东西（随机图没狗，正常）")}
+
+
 REGISTRY: dict[str, dict] = {
     "dog": {"name": "狗检测（YOLO）", "purpose": "画面里有没有狗、狗在哪；建索引 / 找片段 / 找相似都先用它框狗",
             "status": _dog_status, "load": lambda: dog.warmup(), "unload": _dog_unload, "test": _dog_test},
@@ -204,6 +237,8 @@ REGISTRY: dict[str, dict] = {
             "status": _sam_status, "load": lambda: sam.warmup(), "unload": _sam_unload, "test": _sam_test},
     "embed": {"name": "画面向量（SigLIP）", "purpose": "画面向量索引：以图搜图 / 一句话搜",
               "status": _embed_status, "load": lambda: embed.warmup(), "unload": _embed_unload, "test": _embed_test},
+    "seg": {"name": "抠狗分割（YOLO-seg）", "purpose": "建索引 / 找相似算向量前把狗抠出来、背景涂灰，向量里只剩狗；没加载就退回按框裁（有背景噪音）",
+            "status": _seg_status, "load": _seg_load, "unload": _seg_unload, "test": _seg_test},
     "pose": {"name": "姿态关键点（RTMPose AP-10K）", "purpose": "以图搜图的第二路信号：鼻子够到了哪只爪",
              "status": _pose_status, "load": lambda: {"warm": pose.available(), "error": pose.status()["error"]},
              "unload": _pose_unload, "test": _pose_test},
