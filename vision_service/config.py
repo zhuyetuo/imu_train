@@ -130,6 +130,17 @@ DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
 DETECT_BATCH    = int(_env("DETECT_BATCH", "32"))
 # 半精度推理（GPU 上快近一倍，框差别在小数点后）
 DETECT_HALF     = _env("DETECT_HALF", "1") not in ("0", "false", "False", "")
+# 检测输入边长。默认 640 对 720p 俯拍的狗太糙（缩成一团的黑狗直接漏掉），960 在 5090 上没什么代价
+DETECT_IMGSZ    = int(_env("DETECT_IMGSZ", "960"))
+# 算作"狗"的类别（按权重 names 表里的名字）。COCO 模型把趴着 / 缩成一团 / 俯拍的狗经常判成
+# cat / sheep / bear / teddy bear——狗舍里出现的四条腿的东西反正都是狗，全收
+DETECT_CLASSES  = [c.strip().lower() for c in _env("DETECT_CLASSES", "dog,cat,sheep,cow,horse,bear,teddy bear").split(",") if c.strip()]
+# 扫描默认置信度。0.35 对漏检的代价（一整段"没狗"）比误检（多一帧"有狗"）大得多，放低
+SCAN_CONF       = float(_env("SCAN_CONF", "0.2"))
+# YOLO 一只都没框到的帧，再让 SigLIP 看一眼"画面里有没有狗"（零样本，不出框）。俯拍缩成一团的
+# 狗 YOLO 认不出，SigLIP 一般认得出。SCAN_CLIP_FALLBACK=0 关掉；MARGIN 是"像狗"要比"空房间"高出多少
+SCAN_CLIP_FALLBACK = _env("SCAN_CLIP_FALLBACK", "1") not in ("0", "false", "False", "")
+SCAN_CLIP_MARGIN   = float(_env("SCAN_CLIP_MARGIN", "0.0"))
 # 画面没变（狗睡着 / 空房间）就不再送检测，直接沿用上一次的框：24 小时里大半时间是静止的。
 # 整帧缩到 64x36 灰度后的平均像素差（0~1），低于它算没变；0 = 关掉这个优化
 STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.01"))

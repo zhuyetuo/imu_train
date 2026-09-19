@@ -206,6 +206,48 @@ class Encoder:
 
 _default_encoder = Encoder()
 
+# ── 零样本"画面里有没有狗"：给狗检测漏检兜底 ─────────────────────────────
+# 不出框，只回答有没有。提示词两组：像狗的 / 空房间的，取各组最高相似度比大小。
+_DOG_PROMPTS = ["a photo of a dog", "a dog lying on the floor", "a dog sleeping curled up on tiles",
+                "a black dog seen from above", "a dog in a kennel"]
+_EMPTY_PROMPTS = ["an empty room with a tiled floor", "an empty dog kennel with nobody in it",
+                  "a floor with nothing on it", "an empty cage"]
+_prompt_vecs = None
+
+
+def _prompts():
+    global _prompt_vecs
+    if _prompt_vecs is None:
+        d = _default_encoder.encode_text(_DOG_PROMPTS)
+        e = _default_encoder.encode_text(_EMPTY_PROMPTS)
+        _prompt_vecs = (d, e)
+    return _prompt_vecs
+
+
+def looks_like_dog(frames_bgr: list, margin: float = 0.0, encoder=None) -> list[bool]:
+    """每一帧：SigLIP 觉得更像"有狗"还是"空房间"。encoder 只在测试里换。"""
+    import cv2
+    import numpy as np
+
+    if not frames_bgr:
+        return []
+    enc = encoder or _default_encoder
+    if enc is _default_encoder:
+        _load()
+        if _model is None:
+            raise RuntimeError(_load_error or "SigLIP 没加载")
+        d, e = _prompts()
+    else:
+        d, e = enc.encode_text(_DOG_PROMPTS), enc.encode_text(_EMPTY_PROMPTS)
+    jpegs = []
+    for f in frames_bgr:
+        ok, buf = cv2.imencode(".jpg", f, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        jpegs.append(buf.tobytes() if ok else b"")
+    v = enc.encode_images(jpegs)
+    dog_s = (v @ np.asarray(d).T).max(axis=1)
+    empty_s = (v @ np.asarray(e).T).max(axis=1)
+    return [bool(a - b > margin) for a, b in zip(dog_s, empty_s)]
+
 
 def warmup() -> dict:
     """启动时后台加载（跟 SAM/狗检测一样），别让第一个建索引的人替所有人等。"""

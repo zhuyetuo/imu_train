@@ -49,6 +49,24 @@ _logger = logging.getLogger("vision_service.dog")
 # 16 并记一条日志——总比直接不干活强，但要让人知道是在猜。
 _DOG_FALLBACK_CLASS = 16
 _dog_class: int | None = None
+# 算作"狗"的全部类别号（见 config.DETECT_CLASSES）：没解析出来之前只有 dog 那一个
+_classes: list[int] = [_DOG_FALLBACK_CLASS]
+
+
+def _resolve_classes(model) -> list[int]:
+    """config.DETECT_CLASSES 里的名字在这份权重的 names 表里各是几号。找不到的名字跳过；
+    一个都没找到就退回 dog 那一个。"""
+    names = getattr(model, "names", None) or {}
+    out: list[int] = []
+    try:
+        items = names.items() if hasattr(names, "items") else enumerate(names)
+        table = {str(v).strip().lower(): int(k) for k, v in items}
+    except Exception:  # noqa: BLE001
+        table = {}
+    for name in config.DETECT_CLASSES:
+        if name in table and table[name] not in out:
+            out.append(table[name])
+    return out or [_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS]
 
 
 def _resolve_dog_class(model) -> int:
@@ -118,6 +136,7 @@ def _load(force: bool = False):
         try:
             _model = YOLO(_weights_path())
             globals()["_dog_class"] = _resolve_dog_class(_model)
+            globals()["_classes"] = _resolve_classes(_model)
             # **加载时就搬上卡**，不要靠 predict(device=...) 每次搬。
             #
             # ultralytics 的 YOLO(权重) 是加载到 CPU 的，predict(device="cuda")
@@ -175,6 +194,8 @@ def status() -> dict:
         "warm": _warm,
         # 报出来：万一退回了兜底值，人看 status 就该看得见，而不是等结果不对才查
         "dog_class": _dog_class,
+        "classes": list(_classes),
+        "imgsz": config.DETECT_IMGSZ,
     }
 
 
@@ -206,8 +227,8 @@ def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
     from . import meter
 
     with _lock, meter.timed("dog", frames=len(frames)):
-        res = _model.predict(list(frames), verbose=False, conf=conf, half=half,
-                             classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
+        res = _model.predict(list(frames), verbose=False, conf=conf, half=half, imgsz=config.DETECT_IMGSZ,
+                             classes=list(_classes),
                              device=_device_used or "cpu")
     out = []
     for frame, r in zip(frames, res):
@@ -233,8 +254,8 @@ def detect(frame, conf: float = 0.35) -> list[dict]:
     from . import meter
 
     with _lock, meter.timed("dog"):
-        res = _model.predict(frame, verbose=False, conf=conf,
-                             classes=[_dog_class if _dog_class is not None else _DOG_FALLBACK_CLASS],
+        res = _model.predict(frame, verbose=False, conf=conf, imgsz=config.DETECT_IMGSZ,
+                             classes=list(_classes),
                              device=_device_used or "cpu")
     h, w = frame.shape[:2]
     boxes = []
@@ -271,12 +292,32 @@ def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames
     frames: list[dict] = []
     pending: list[tuple[float, object]] = []
 
+    clip_hits = 0
+
     def flush():
+        nonlocal clip_hits
         if not pending:
             return
         results = detect_batch([f for _t, f in pending], conf)
-        for (t, _f), boxes in zip(pending, results):
-            frames.append({"t": round(t, 2), "n_dogs": len(boxes), "boxes": boxes})
+        # YOLO 一只都没框到的帧：让 SigLIP 看一眼"画面里有没有狗"。俯拍缩成一团 / 趴着的
+        # 黑狗 COCO 模型经常认不出，整段就成了"没狗"。SigLIP 不出框，只把 n_dogs 记成 1
+        miss = [i for i, b in enumerate(results) if not b]
+        via_clip: set[int] = set()
+        if miss and config.SCAN_CLIP_FALLBACK:
+            try:
+                from . import embed
+
+                flags = embed.looks_like_dog([pending[i][1] for i in miss], margin=config.SCAN_CLIP_MARGIN)
+                via_clip = {i for i, ok in zip(miss, flags) if ok}
+            except Exception as e:  # noqa: BLE001 兜底挂了不能把扫描带死，少几帧而已
+                _logger.warning("SigLIP 兜底没跑成：%s", e)
+        for i, ((t, _f), boxes) in enumerate(zip(pending, results)):
+            rec = {"t": round(t, 2), "n_dogs": len(boxes), "boxes": boxes}
+            if i in via_clip:
+                rec["n_dogs"] = 1
+                rec["via"] = "clip"
+                clip_hits += 1
+            frames.append(rec)
         pending.clear()
 
     last_t = 0.0
@@ -294,7 +335,9 @@ def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames
     # 时长按最后一个采样点算，最多差半个间隔
     frames.sort(key=lambda f: f["t"])
     return {"duration_sec": round(last_t, 2), "every_sec": every_sec,
-            "conf": conf, **summarize(frames), "frames": frames}
+            "conf": conf, **summarize(frames), "frames": frames,
+            # 其中多少帧是 YOLO 没框到、SigLIP 说有狗的（没框）
+            "frames_with_dog_clip": clip_hits}
 
 
 def summarize(frames: list[dict]) -> dict:
