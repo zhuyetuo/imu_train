@@ -95,9 +95,10 @@ def dog_mask_batch(frames: list, boxes_list: list) -> list:
         return [None] * len(frames)
     from . import meter
 
-    half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
+    # 不用 half：分割头算掩码时 proto 是 float、系数是 half，ultralytics 会抛
+    # "expected mat1 and mat2 to have the same dtype: Half != float"。分割一批也就几十毫秒，不差这点
     with _lock, meter.timed("seg", frames=len(frames)):
-        res = _model.predict(list(frames), verbose=False, conf=config.SEG_CONF, half=half, imgsz=config.SEG_IMGSZ,
+        res = _model.predict(list(frames), verbose=False, conf=config.SEG_CONF, half=False, imgsz=config.SEG_IMGSZ,
                              classes=list(_classes) or None, agnostic_nms=True, retina_masks=True,
                              device=_device_used or "cpu")
     return [_mask_of(r, frame, boxes) for r, frame, boxes in zip(res, frames, boxes_list)]
