@@ -432,3 +432,49 @@ def test_接口_thumb(monkeypatch, tmp_path):
         r = tc.get("/api/v1/embed/thumb", params={"path": "a.mp4", "t": 3, "crop": "false"})
         assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content.endswith(b"False")
         assert tc.get("/api/v1/embed/thumb", params={"path": "../a.mp4", "t": 3}).status_code == 422
+
+
+def test_缩略图_四种看法(fake_video, monkeypatch):
+    """mask = 抠掉背景；raw = 原图那块；pose = 原图画骨架；box = 整帧带框。"""
+    class _CapSeek(_Cap):
+        def set(self, prop, val):
+            return True
+
+        def read(self):
+            self.i = 0
+            return self.retrieve()
+
+    fake_video["cap"] = _CapSeek([0])
+    _stub_detect(monkeypatch, lambda f, conf=0.35: [{"bbox": [0.4, 0.4, 0.2, 0.2], "conf": 0.9}])
+    monkeypatch.setattr(embed.config, "EMBED_MASK_BG", True)
+    calls = []
+    monkeypatch.setattr(embed.segmask, "masked_crop",
+                        lambda frame, boxes, crop_fn, max_side=512: (calls.append("mask"), np.full((30, 30, 3), 114, dtype="uint8"))[1])
+    monkeypatch.setattr(embed.pose, "available", lambda: True)
+    monkeypatch.setattr(embed.pose, "keypoints",
+                        lambda frame, boxes: (calls.append("pose"), (np.full((17, 2), 600.0), np.ones(17), (0, 0, 1, 1)))[1])
+    import cv2
+
+    def dec(b):
+        return cv2.imdecode(np.frombuffer(b, dtype="uint8"), cv2.IMREAD_COLOR)
+
+    m = dec(embed.frame_thumb("x.mp4", 1.0, view="mask"))
+    assert calls == ["mask"] and m.shape[:2] == (30, 30)
+    raw = dec(embed.frame_thumb("x.mp4", 1.0, view="raw"))
+    assert calls == ["mask"] and raw.shape[:2] != (30, 30)            # 不抠
+    p = dec(embed.frame_thumb("x.mp4", 1.0, view="pose"))
+    assert calls == ["mask", "pose"] and p.shape[:2] == raw.shape[:2]
+    box = dec(embed.frame_thumb("x.mp4", 1.0, view="box"))
+    assert max(box.shape[:2]) <= 320
+    # 老参数还认：crop=True 就是 mask
+    dec(embed.frame_thumb("x.mp4", 1.0, crop=True))
+    assert calls == ["mask", "pose", "mask"]
+
+
+def test_画骨架_只画过阈值的点():
+    img = np.zeros((100, 100, 3), dtype="uint8")
+    kps = np.array([[10, 10]] * 17, dtype="float32")
+    kps[2] = [50, 50]                     # 鼻子
+    sc = np.zeros(17); sc[2] = 0.9
+    embed.draw_pose(img, kps, sc, offset=(0, 0))
+    assert img[50, 50].any() and not img[10, 10].any()

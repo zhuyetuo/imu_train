@@ -467,25 +467,66 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
     return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s), "pose": pvec, "masked": masked}
 
 
-def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = True, max_side: int = 320) -> bytes:
-    """某一秒那一帧的缩略图 JPEG：crop=True 拿狗框那一块（跟建索引 / 查询裁的同一块），
-    没狗就整帧；crop=False 整帧带框。给"先看命中"那一排缩略图用。"""
+# AP-10K 骨架：画姿态缩略图用（点的顺序见 pose.py 顶部）
+_SKELETON = [(0, 2), (1, 2), (2, 3), (3, 4), (3, 5), (5, 6), (6, 7), (3, 8), (8, 9), (9, 10),
+             (4, 11), (11, 12), (12, 13), (4, 14), (14, 15), (15, 16)]
+
+
+def draw_pose(img, kps, scores, offset=(0, 0), min_score: float | None = None):
+    """在图上画关键点 + 骨架（原地改）。offset：图是从整帧裁出来的，点要减掉裁剪起点。"""
     import cv2
     import numpy as np
 
+    thr = pose.MIN_KP_SCORE if min_score is None else min_score
+    kps = np.asarray(kps, dtype="float32").reshape(-1, 2) - np.array(offset, dtype="float32")
+    sc = np.asarray(scores, dtype="float32").reshape(-1)
+    # 线粗 / 点大小按图的尺寸走，缩略图上不至于糊成一团
+    lw = max(1, int(round(max(img.shape[:2]) / 200)))
+    for a, b in _SKELETON:
+        if a < len(sc) and b < len(sc) and sc[a] >= thr and sc[b] >= thr:
+            cv2.line(img, (int(kps[a][0]), int(kps[a][1])), (int(kps[b][0]), int(kps[b][1])), (0, 200, 255), lw)
+    for i, (x, y) in enumerate(kps):
+        if i >= len(sc) or sc[i] < thr:
+            continue
+        color = (0, 0, 255) if i == pose.NOSE else (255, 80, 0) if i in pose.PAWS else (0, 255, 0)
+        cv2.circle(img, (int(x), int(y)), lw + 2, color, -1)
+    return img
+
+
+def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = True, max_side: int = 320,
+                view: str | None = None) -> bytes:
+    """某一秒那一帧的缩略图 JPEG。view：
+      mask  狗框那一块、抠掉背景（跟拿去比的那张一样；抠不到就退回 raw）
+      raw   狗框那一块，原图
+      pose  狗框那一块，原图上画关键点 + 骨架（姿态模型不可用就跟 raw 一样）
+      box   整帧带检测框
+    老参数 crop=True/False 对应 mask/box。没狗时 mask/raw/pose 都是整帧。"""
+    import cv2
+    import numpy as np
+
+    view = view or ("mask" if crop else "box")
     frame = _read_frame(full_path, t_s)
     boxes = dog.detect(frame, conf)
     h, w = frame.shape[:2]
-    if crop and boxes:
-        img = segmask.masked_crop(frame, boxes, seek.crop_rect, max_side=max_side) if config.EMBED_MASK_BG else None
-        if img is None:
-            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
-            img = frame[y1:y2, x1:x2]
-    else:
+    img = None
+    if view == "box" or not boxes:
         img = frame.copy()
         for b in boxes:
             bx, by, bw, bh = b["bbox"]
             cv2.rectangle(img, (int(bx * w), int(by * h)), (int((bx + bw) * w), int((by + bh) * h)), (26, 196, 82), 3)
+    else:
+        if view == "mask" and config.EMBED_MASK_BG:
+            img = segmask.masked_crop(frame, boxes, seek.crop_rect, max_side=max_side)
+        if img is None:
+            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
+            img = frame[y1:y2, x1:x2].copy()
+            if view == "pose" and pose.available():
+                try:
+                    r = pose.keypoints(frame, boxes)
+                except Exception:  # noqa: BLE001 画不出来就给原图
+                    r = None
+                if r is not None:
+                    draw_pose(img, r[0], r[1], offset=(x1, y1))
     scale = max_side / max(img.shape[:2])
     if scale < 1:
         img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))

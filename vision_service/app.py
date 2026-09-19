@@ -350,8 +350,9 @@ def embed_preview(body: EmbedPreviewIn):
 
 
 @app.get("/api/v1/embed/thumb")
-def embed_thumb(path: str, t: float, crop: bool = True, max_side: int = 320):
-    """某视频某一秒的缩略图（狗框那一块 / 整帧带框）。给平台"先看命中"那一排图用。"""
+def embed_thumb(path: str, t: float, crop: bool = True, max_side: int = 320, view: str | None = None):
+    """某视频某一秒的缩略图。view = mask（抠掉背景的那块，拿去比的就是它）/ raw（那块原图）/
+    pose（那块画上关键点骨架）/ box（整帧带检测框）；不给 view 时按 crop 老规矩。给平台"先看命中"用。"""
     from fastapi.responses import Response
 
     full = _resolve_under(config.VIDEO_ROOT, path)
@@ -359,7 +360,9 @@ def embed_thumb(path: str, t: float, crop: bool = True, max_side: int = 320):
     if not st.get("available"):
         raise HTTPException(503, st.get("error") or "狗检测模型不可用")
     try:
-        data = embed.frame_thumb(full, max(0.0, t), crop=crop, max_side=max(64, min(1920, max_side)))
+        if view is not None and view not in ("mask", "raw", "pose", "box"):
+            raise HTTPException(422, "view 只能是 mask / raw / pose / box")
+        data = embed.frame_thumb(full, max(0.0, t), crop=crop, max_side=max(64, min(1920, max_side)), view=view)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
