@@ -28,7 +28,7 @@ import os
 import threading
 import time
 
-from . import config, dog, pose, seek
+from . import config, dog, pose, seek, segmask
 
 _logger = logging.getLogger("vision_service.embed")
 
@@ -270,7 +270,7 @@ def status() -> dict:
     return {"available": _model is not None, "loading": _loading, "error": err if _model is None else None,
             "progress": download_progress(),
             "model": config.EMBED_MODEL, "device": _device, "indexed_videos": n, "index_dir": config.EMBED_INDEX_DIR,
-            "pose": pose.status()}
+            "pose": pose.status(), "mask": segmask.status()}
 
 
 def download_progress() -> dict | None:
@@ -326,15 +326,27 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
 
     enc = encoder or _default_encoder
     t0 = time.monotonic()
+    # 抠不抠狗（背景涂灰）：抠了的和没抠的向量不在一个分布里，索引 meta 记着，不一致就重建
+    use_mask = config.EMBED_MASK_BG and segmask.available()
     if not force:
         old = load(rel_path)
-        if old is not None and old["meta"].get("model") == config.EMBED_MODEL:
-            return {"n": int(len(old["t"])), "cached": True, "seconds": 0.0, "model": config.EMBED_MODEL}
+        if old is not None and old["meta"].get("model") == config.EMBED_MODEL \
+                and bool(old["meta"].get("masked", False)) == bool(use_mask):
+            return {"n": int(len(old["t"])), "cached": True, "seconds": 0.0, "model": config.EMBED_MODEL,
+                    "masked": bool(use_mask)}
     # 姿态可用就顺路算：每个有狗的帧一条姿态向量（整帧只在采样那一刻拿得到）
     use_pose = pose.available()
 
     def on_frame(rec: dict, frame) -> None:
         rec["pose"] = pose.frame_descriptor(frame, rec["boxes"]) if use_pose else None
+        if use_mask:
+            img = segmask.masked_crop(frame, rec["boxes"], seek.crop_rect)
+            if img is not None:
+                import cv2
+
+                ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ok_:
+                    rec["jpeg"] = bytes(np.asarray(buf_).tobytes())
 
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame)
     with_dog = [s for s in samples if s["jpeg"] is not None]
@@ -351,7 +363,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     n_pose = int(sum(1 for s in with_dog if s.get("pose")))
     meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
-            "pose": use_pose, "with_pose": n_pose}
+            "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask)}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
@@ -361,7 +373,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
-            "with_pose": n_pose}
+            "with_pose": n_pose, "masked": bool(use_mask)}
 
 
 # ── 查询向量 ──────────────────────────────────────────────────────────
@@ -393,19 +405,26 @@ def frame_query(full_path: str, t_s: float, conf: float = 0.35, encoder: Encoder
     frame = _read_frame(full_path, t_s)
     boxes = dog.detect(frame, conf)
     h, w = frame.shape[:2]
-    if boxes:
-        x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
-        crop = frame[y1:y2, x1:x2]
-    else:
-        crop = frame
-    scale = 512 / max(crop.shape[:2])
-    if scale < 1:
-        crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
+    crop = None
+    masked = False
+    if boxes and config.EMBED_MASK_BG:
+        # 跟建索引同一套：抠狗、涂灰。样例和索引必须同一种处理，不然比的不是一回事
+        crop = segmask.masked_crop(frame, boxes, seek.crop_rect)
+        masked = crop is not None
+    if crop is None:
+        if boxes:
+            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
+            crop = frame[y1:y2, x1:x2]
+        else:
+            crop = frame
+        scale = 512 / max(crop.shape[:2])
+        if scale < 1:
+            crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
     ok2, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     vec = enc.encode_images([bytes(np.asarray(buf).tobytes())])[0]
     # 姿态那一路：有狗且模型可用才有
     pvec = pose.frame_descriptor(frame, boxes) if boxes else None
-    return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s), "pose": pvec}
+    return {"vec": vec, "has_dog": bool(boxes), "t": float(t_s), "pose": pvec, "masked": masked}
 
 
 def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = True, max_side: int = 320) -> bytes:
@@ -418,8 +437,10 @@ def frame_thumb(full_path: str, t_s: float, conf: float = 0.35, crop: bool = Tru
     boxes = dog.detect(frame, conf)
     h, w = frame.shape[:2]
     if crop and boxes:
-        x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
-        img = frame[y1:y2, x1:x2]
+        img = segmask.masked_crop(frame, boxes, seek.crop_rect, max_side=max_side) if config.EMBED_MASK_BG else None
+        if img is None:
+            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h)
+            img = frame[y1:y2, x1:x2]
     else:
         img = frame.copy()
         for b in boxes:
@@ -470,7 +491,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
            pose_vec=None, pose_w: float | None = None) -> dict:
     """在这些视频的索引里找最像的，按视频把相邻命中合成段。
 
-    返回 {hits:[{path,t,score}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
+    返回 {hits:[{path,t,score,vis_score,pose_score?}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
     exclude=(path, t0, t1)：把样例自己那一段排掉，不然第一名永远是它自己。
 
     center：先把所有帧的平均向量减掉再比。同一只狗、同一间房、同一块花砖地，每一帧的向量
@@ -515,6 +536,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             emb = emb - mu
             emb = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
         scores = emb @ q
+        vscores = scores                                # 纯画面分，混姿态之前的
         pscores = None
         if pq is not None and d.get("pose") is not None and len(d["pose"]) == len(d["t"]):
             P = d["pose"].astype("float32")
@@ -532,7 +554,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             t = float(d["t"][i])
             if exclude and exclude[0] == rp and exclude[1] <= t <= exclude[2]:
                 continue
-            h = {"path": rp, "t": round(t, 2), "score": round(s, 4)}
+            h = {"path": rp, "t": round(t, 2), "score": round(s, 4), "vis_score": round(float(vscores[i]), 4)}
             if pscores is not None:
                 h["pose_score"] = round(float(pscores[i]), 4)
             hits.append(h)

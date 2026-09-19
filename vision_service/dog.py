@@ -228,21 +228,44 @@ def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
 
     with _lock, meter.timed("dog", frames=len(frames)):
         res = _model.predict(list(frames), verbose=False, conf=conf, half=half, imgsz=config.DETECT_IMGSZ,
-                             classes=list(_classes),
+                             classes=list(_classes), agnostic_nms=True,
                              device=_device_used or "cpu")
-    out = []
-    for frame, r in zip(frames, res):
-        h, w = frame.shape[:2]
-        boxes = []
-        for b in getattr(r, "boxes", []):
-            x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
-            boxes.append({
-                "bbox": [round(x1 / w, 4), round(y1 / h, 4),
-                         round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
-                "conf": round(float(b.conf[0]), 3),
-            })
-        out.append(boxes)
-    return out
+    return [_boxes_of(r, frame) for frame, r in zip(frames, res)]
+
+
+def _boxes_of(r, frame) -> list[dict]:
+    """一帧的结果 → 归一化框。同一只狗被判成两类（dog 又 bear）的重叠框只留分高的那一个：
+    模型的 NMS 默认按类别分开做，几个类都算"狗"的话一只狗会框出两个。"""
+    h, w = frame.shape[:2]
+    boxes = []
+    for b in getattr(r, "boxes", []):
+        x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+        boxes.append({
+            "bbox": [round(x1 / w, 4), round(y1 / h, 4),
+                     round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
+            "conf": round(float(b.conf[0]), 3),
+        })
+    return dedup_boxes(boxes)
+
+
+def dedup_boxes(boxes: list[dict], thr: float = 0.6) -> list[dict]:
+    """重叠得厉害的框合成一个（留分高的）。重叠按"交集占小框的比例"算，不按 IoU：
+    一只狗被框成"整只 + 半只"两个框，IoU 可能只有 0.4，但小框几乎整个在大框里。"""
+    keep: list[dict] = []
+    for b in sorted(boxes, key=lambda x: -x.get("conf", 0.0)):
+        bx, by, bw, bh = b["bbox"]
+        dup = False
+        for k in keep:
+            kx, ky, kw, kh = k["bbox"]
+            ix = max(0.0, min(bx + bw, kx + kw) - max(bx, kx))
+            iy = max(0.0, min(by + bh, ky + kh) - max(by, ky))
+            small = min(bw * bh, kw * kh)
+            if small > 0 and ix * iy / small >= thr:
+                dup = True
+                break
+        if not dup:
+            keep.append(b)
+    return keep
 
 
 def detect(frame, conf: float = 0.35) -> list[dict]:
@@ -255,19 +278,12 @@ def detect(frame, conf: float = 0.35) -> list[dict]:
 
     with _lock, meter.timed("dog"):
         res = _model.predict(frame, verbose=False, conf=conf, imgsz=config.DETECT_IMGSZ,
-                             classes=list(_classes),
+                             classes=list(_classes), agnostic_nms=True,
                              device=_device_used or "cpu")
-    h, w = frame.shape[:2]
-    boxes = []
+    boxes: list[dict] = []
     for r in res:
-        for b in getattr(r, "boxes", []):
-            x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
-            boxes.append({
-                "bbox": [round(x1 / w, 4), round(y1 / h, 4),
-                         round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
-                "conf": round(float(b.conf[0]), 3),
-            })
-    return boxes
+        boxes.extend(_boxes_of(r, frame))
+    return dedup_boxes(boxes)
 
 
 def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames: int = 1200,

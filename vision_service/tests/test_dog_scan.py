@@ -522,3 +522,15 @@ def test_算作狗的类别按名字解析():
         names = {0: "person"}
 
     assert dog._resolve_classes(N()) == [16]
+
+
+def test_同一只狗两类都框到_只留一个():
+    """dog 和 bear 各框一次同一只狗（按类别分开 NMS 的后果）：留分高的；挨着的两只不合。"""
+    from vision_service import dog
+
+    whole = {"bbox": [0.1, 0.1, 0.4, 0.4], "conf": 0.8}
+    half = {"bbox": [0.15, 0.15, 0.2, 0.3], "conf": 0.5}       # 几乎整个在 whole 里，IoU 却不高
+    other = {"bbox": [0.6, 0.6, 0.3, 0.3], "conf": 0.7}
+    out = dog.dedup_boxes([half, other, whole])
+    assert out == [whole, other]
+    assert dog.dedup_boxes([]) == []

@@ -14,6 +14,7 @@ vision_service 的配置，全部走环境变量，风格跟 label_service/confi
   SEEK_MODEL          用哪个模型（默认 claude-opus-5）
   SEEK_CONCURRENCY    同时问几段（默认 4）
   EMBED_MODEL         画面向量索引用的模型（默认 google/siglip-base-patch16-224）
+  EMBED_MASK_BG       算向量前先把狗抠出来、背景涂灰（默认开；SEG_WEIGHTS 是分割权重）
   EMBED_INDEX_DIR     索引文件放哪（默认 vision_service/index，每个视频一个 npz）
 
 为什么单独起一个服务而不是加进 label_service：那边是 IMU 推理，纯 CPU、同步
@@ -97,6 +98,11 @@ EMBED_MODEL     = _env("EMBED_MODEL", "google/siglip-base-patch16-224")
 EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
 EMBED_BATCH     = int(_env("EMBED_BATCH", "128"))
 EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
+# 算向量前先把狗抠出来、背景涂灰（实例分割）：花砖地 / 门框不再进向量，分数只看狗。
+# 用 YOLO 分割版权重（跟检测同一家）；没权重 / 加载失败自动退回不抠。
+# 改这个开关后老索引会自动重建（索引 meta 里记着有没有抠）
+EMBED_MASK_BG   = _env("EMBED_MASK_BG", "1").lower() not in ("0", "false", "no", "")
+SEG_WEIGHTS     = _env("SEG_WEIGHTS", os.path.join(HERE, "..", "models", "vision", "yolo", "yolo26x-seg.pt"))
 
 # ── 姿态关键点（以图搜图的第二路信号）────────────────────────────────
 # RTMPose-m AP-10K 的 ONNX 一个文件，rtmlib + onnxruntime 跑。没权重 / 没装就自动关，

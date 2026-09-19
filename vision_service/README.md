@@ -239,6 +239,8 @@ curl -s localhost:8385/api/v1/embed/status   # available / model / indexed_video
 | `HF_ENDPOINT` | `https://hf-mirror.com` | 国内直连 huggingface.co 常卡死，默认走镜像；能直连就在 .env 里改回官方 |
 | `EMBED_INDEX_DIR` | `vision_service/index` | 索引文件放哪 |
 | `EMBED_DEVICE` | 跟 `SAM_DEVICE` | 没卡退回 cpu |
+| `EMBED_MASK_BG` | `1` | 算向量前先把狗**抠出来**、背景涂灰（见下） |
+| `SEG_WEIGHTS` | `models/vision/yolo/yolo26x-seg.pt` | 抠狗用的分割权重，跟检测一样 ultralytics 按文件名自动下 |
 
 ```
 POST /api/v1/embed/build    {path, every_sec, force}     → {n, cached, seconds}
@@ -249,6 +251,21 @@ POST /api/v1/embed/search   {text | ref:{path,t}, paths, top_k, min_score, gap_s
 
 平台那边：项目页「建画面索引」→ 工作台「疑似片段」里「找相似」（当前帧或一句英文）→
 候选 reason=similar。
+
+### 先抠狗再算向量（2026-09-19）
+
+狗只占画面一角，按框裁出来的那一块一大半是花砖地、门框、笼子。向量里这些
+"共同背景"的分量比狗的姿态还大——去均值能压一部分，压不干净：狗挪到另一块
+地砖上分数就乱。所以建索引和查询都先用 YOLO 分割版把狗抠出来，背景涂 114 灰
+（边缘羽化几个像素），再送 SigLIP。检测框 / 姿态照旧用原图。
+
+- 分割和检测同一家模型，一帧几十毫秒；不用 SAM（一帧几百毫秒，一路几千帧扛不住）
+- 分割模型没加载（权重下不动）→ 自动退回不抠，`/embed/status` 的 `mask` 里报出来
+- 索引 meta 记着抠没抠；开关变了、模型上线了，`建画面索引` 会自动重建（不用勾"重建"）
+- 「先看命中」的缩略图（狗框那一块）显示的就是抠完的那张——看到的和拿去比的是同一张
+
+检测那边同时改了：几个 COCO 类都算"狗"（dog / cat / bear …），模型默认按类分开做
+NMS，一只狗会框出 dog + bear 两个框。现在跨类 NMS，再把几乎套在一起的框合掉。
 
 ### 建索引 / 找片段的速度
 
