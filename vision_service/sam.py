@@ -131,34 +131,53 @@ def warmup() -> dict:
 
 
 def refine_gingiva(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
-    """牙龈专用的掩膜修整：SAM 给的那块里把不是牙龈颜色的像素去掉。
+    """牙龈专用的掩膜修整：SAM 给的那块里去掉明显不是牙龈的，再并成**一整片**。
 
     牙龈是一条又薄又不规则的粉红色带，紧贴着白牙和黑嘴唇。SAM 没有"牙龈"这个概念，
-    框提示给它的是"框里最像一个物体的那块"——经常连牙、连嘴唇一起。颜色恰好是最可靠的
-    区分：牙是白 / 黄（饱和度低、亮度高），嘴唇 / 口腔深处是黑（亮度低），牙龈是粉红
-    （色相在红那一段、有饱和度、有亮度）。所以在 SAM 的掩膜里只留粉红那部分，再开闭
-    运算把牙缝里的毛刺去掉，只取最大的那块。
+    框提示给它的是"框里最像一个物体的那块"——经常连牙、连嘴唇一起。
 
-    去掉的都是"确定不是牙龈"的像素，判错的方向是安全的：留下的一定是粉红，最多漏一点
-    发白的龈缘，比把半颗牙算进牙龈强。
+    第一版按颜色只留"标准粉红"，结果太碎：靠近牙的龈缘偏白、反光的高光点、色素沉着的
+    暗斑全被抠掉，剩下一堆碎片。标注员要的是"上面一整片、下面一整片"。所以现在：
+      1. 只去掉**明显不是**牙龈的：黑嘴唇 / 口腔深处（很暗）、白牙（几乎没饱和度又很亮）
+      2. 大核闭运算把碎片连回去、把高光留下的空洞填上，只取最大那块
+      3. 边缘抹平滑（模糊再二值化），不要锯齿
+    去掉的都是"确定不是牙龈"的像素，留下的一定是一整片连着的龈组织。
     """
     import cv2
 
-    m = np.asarray(mask).astype(np.uint8)
+    m = (np.asarray(mask) > 0).astype(np.uint8)
     if m.ndim != 2 or not m.any():
         return m
+    hgt, wid = m.shape
     hsv = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2HSV)
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    # OpenCV 的 H 是 0~180：红 / 粉在 0~20 和 160~180 两头
-    pink_hue = (h <= 22) | (h >= 155)
-    keep = pink_hue & (s >= 45) & (v >= 60)
-    out = (m > 0) & keep
-    out = out.astype(np.uint8)
-    k = np.ones((5, 5), np.uint8)
-    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, k)
+    black = v < 45                                   # 嘴唇、口腔深处
+    white = (s < 40) & (v > 175)                     # 牙面、强高光
+    # 有饱和度但色相明显不是红 / 粉的（黄牙、绿蓝的杂物）也去掉；偏白的不管色相
+    off_hue = (s >= 60) & (h > 28) & (h < 150)
+    keep = m.astype(bool) & ~black & ~white & ~off_hue
+    out = keep.astype(np.uint8)
+    # 闭运算的核按图的尺寸走：1.2% 的边长，720p 上约 9 像素，高光点和牙缝里的断口都能连上
+    k = max(7, int(round(0.012 * max(hgt, wid))) | 1)
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
     out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # 只取最大那块，再把它里面的洞填上（高光点抠掉后留下的）
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(out, connectivity=8)
+    if n > 1:
+        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        out = (labels == biggest).astype(np.uint8)
+        contours, _ = cv2.findContours(out, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            filled = np.zeros_like(out)
+            cv2.drawContours(filled, [max(contours, key=cv2.contourArea)], -1, 1, thickness=-1)
+            # 填洞但别把牙填回去：洞里如果是白牙 / 黑唇就还留着
+            hole = (filled > 0) & (out == 0) & ~(black | white)
+            out[hole] = 1
+    # 边缘抹平滑：锯齿状的龈缘在标注上没意义，圆滑的边人看着也顺
+    blur = cv2.GaussianBlur(out.astype(np.float32), (0, 0), sigmaX=max(1.5, k / 4))
+    out = (blur >= 0.5).astype(np.uint8)
     # 颜色一过滤可能什么都不剩（光线 / 白平衡很怪）：那就退回 SAM 原样，别返回空
-    if out.sum() < 0.05 * (m > 0).sum():
+    if out.sum() < 0.05 * m.sum():
         return m
     return out
 
@@ -310,6 +329,19 @@ def _segment(image_path: str, points: list[dict], box: list[float] | None, prefe
     bx = np.array([box[0] * w, box[1] * h, (box[0] + box[2]) * w, (box[1] + box[3]) * h], dtype=np.float32) if box else None
     if pt is None and bx is None:
         raise ValueError("至少给一个点或一个框")
+    # 标牙龈时把已经标好的牙的中心当**负点**喂给 SAM：它自己就会避开牙，出来的掩膜是
+    # 牙之间连着的那一整条龈，而不是"框里最像一个物体的那块"。事后再挖一遍是兜底
+    if refine == "gingiva" and exclude:
+        neg = []
+        for poly in exclude[:24]:
+            xs_ = [p[0] for p in poly if p and p[0] is not None]
+            ys_ = [p[1] for p in poly if p and p[1] is not None]
+            if len(xs_) >= 3:
+                neg.append([sum(xs_) / len(xs_) * w, sum(ys_) / len(ys_) * h])
+        if neg:
+            neg_a = np.array(neg, dtype=np.float32)
+            pt = neg_a if pt is None else np.concatenate([pt, neg_a], axis=0)
+            lb = np.zeros(len(neg), dtype=np.int32) if lb is None else np.concatenate([lb, np.zeros(len(neg), dtype=np.int32)])
 
     with _lock:
         _model.set_image(img)
@@ -320,7 +352,8 @@ def _segment(image_path: str, points: list[dict], box: list[float] | None, prefe
 
     # 三个都转出来再挑。原来是先 argmax 再转，于是另外两个候选**根本看不到**——
     # 而实测发现对的那个经常就在没被选中的里面
-    eps = 0.0015 if refine == "gingiva" else 0.004
+    # 牙龈的轮廓已经在 refine_gingiva 里抹平滑了，抽稀稍细一点就够
+    eps = 0.0025 if refine == "gingiva" else 0.004
     if exclude:
         # 先挖掉已经标好的牙，再按颜色修：挖是确定性的（人标的），颜色是兜底
         masks = [subtract_polygons(m, exclude) for m in masks]

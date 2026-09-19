@@ -225,14 +225,18 @@ def test_全都退化时退回score():
 def test_牙龈修整_只留粉红_去掉白牙和黑嘴唇():
     from vision_service.sam import refine_gingiva
 
-    rgb = np.zeros((40, 60, 3), dtype=np.uint8)
-    rgb[:, :20] = (245, 240, 230)      # 白牙
-    rgb[:, 20:40] = (230, 120, 140)    # 粉红牙龈
-    rgb[:, 40:] = (20, 15, 15)         # 黑嘴唇
-    mask = np.ones((40, 60), dtype=np.uint8)
+    rgb = np.zeros((120, 180, 3), dtype=np.uint8)
+    rgb[:, :60] = (245, 240, 230)      # 白牙
+    rgb[:, 60:120] = (230, 120, 140)   # 粉红牙龈
+    rgb[:, 120:] = (20, 15, 15)        # 黑嘴唇
+    rgb[50:54, 80:84] = (255, 255, 255)   # 牙龈上一个高光点：要被填回去，不能留个洞
+    mask = np.ones((120, 180), dtype=np.uint8)
     out = refine_gingiva(mask, rgb)
     ys, xs = np.where(out > 0)
-    assert xs.min() >= 20 and xs.max() < 40 and len(xs) > 0.8 * 40 * 20
+    assert xs.min() >= 58 and xs.max() < 122 and len(xs) > 0.9 * 120 * 60
+    assert out[52, 82] == 1                     # 高光洞填上了
+    n, _ = __import__("cv2").connectedComponents(out)
+    assert n == 2                               # 一整片
 
 
 def test_牙龈修整_颜色全过滤掉时退回原样():
