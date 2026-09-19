@@ -33,7 +33,7 @@ def test_列表_不触发加载_每个都有状态和计数(monkeypatch):
     ov = models.overview()
     assert calls == []                                    # 列表不加载
     keys = [m["key"] for m in ov["models"]]
-    assert keys == ["dog", "sam", "embed", "pose", "vllm"]
+    assert keys == ["dog", "sam", "embed", "seg", "pose", "vllm"]
     d = next(m for m in ov["models"] if m["key"] == "dog")
     assert d["available"] is False and d["error"] == "没装 ultralytics" and d["meter"]["calls"] == 0
     assert "uptime_s" in ov and all("name" in m and "purpose" in m for m in ov["models"])
@@ -94,7 +94,7 @@ def test_接口(monkeypatch):
 
     with TestClient(appmod.app) as tc:
         r = tc.get("/api/v1/models")
-        assert r.status_code == 200 and [m["key"] for m in r.json()["models"]] == ["dog", "sam", "embed", "pose", "vllm"]
+        assert r.status_code == 200 and [m["key"] for m in r.json()["models"]] == ["dog", "sam", "embed", "seg", "pose", "vllm"]
         monkeypatch.setattr(models, "act", lambda k, a: {"ok": True, "error": None, "status": {}, "k": k, "a": a})
         r = tc.post("/api/v1/models/dog", json={"action": "test"})
         assert r.status_code == 200 and r.json()["a"] == "test"
