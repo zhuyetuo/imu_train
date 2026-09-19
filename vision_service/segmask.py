@@ -82,34 +82,47 @@ def status() -> dict:
 def dog_mask(frame, boxes: list[dict] | None = None, conf: float = 0.25):
     """整帧上狗的掩码（HxW uint8，1 = 狗）。几只狗都算进去；boxes 给了就只要跟检测框
     有重叠的实例（分割模型偶尔会把沙发也当熊）。没模型 / 一个实例都没有 → None。"""
+    return dog_mask_batch([frame], [boxes])[0]
+
+
+def dog_mask_batch(frames: list, boxes_list: list) -> list:
+    """一批帧一起过分割模型（建索引时一批 16~32 张，比一张张送快好几倍）。每帧一个掩码或 None。"""
     import numpy as np
 
+    if not frames:
+        return []
     if not available():
-        return None
+        return [None] * len(frames)
     from . import meter
 
-    h, w = frame.shape[:2]
-    with _lock, meter.timed("seg"):
-        res = _model.predict(frame, verbose=False, conf=conf, imgsz=config.DETECT_IMGSZ,
+    half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
+    with _lock, meter.timed("seg", frames=len(frames)):
+        res = _model.predict(list(frames), verbose=False, conf=config.SEG_CONF, half=half, imgsz=config.SEG_IMGSZ,
                              classes=list(_classes) or None, agnostic_nms=True, retina_masks=True,
                              device=_device_used or "cpu")
+    return [_mask_of(r, frame, boxes) for r, frame, boxes in zip(res, frames, boxes_list)]
+
+
+def _mask_of(r, frame, boxes: list[dict] | None):
+    import numpy as np
+
+    h, w = frame.shape[:2]
+    m = getattr(r, "masks", None)
+    if m is None or getattr(m, "data", None) is None:
+        return None
+    data = m.data.cpu().numpy() if hasattr(m.data, "cpu") else np.asarray(m.data)
+    xyxy = r.boxes.xyxy.cpu().numpy() if hasattr(r.boxes.xyxy, "cpu") else np.asarray(r.boxes.xyxy)
     mask = np.zeros((h, w), dtype="uint8")
     found = False
-    for r in res:
-        m = getattr(r, "masks", None)
-        if m is None or getattr(m, "data", None) is None:
+    for inst, bb in zip(data, xyxy):
+        if boxes and not _overlaps_any(bb, boxes, w, h):
             continue
-        data = m.data.cpu().numpy() if hasattr(m.data, "cpu") else np.asarray(m.data)
-        xyxy = r.boxes.xyxy.cpu().numpy() if hasattr(r.boxes.xyxy, "cpu") else np.asarray(r.boxes.xyxy)
-        for inst, bb in zip(data, xyxy):
-            if boxes and not _overlaps_any(bb, boxes, w, h):
-                continue
-            inst = np.asarray(inst)
-            if inst.shape != (h, w):
-                import cv2
-                inst = cv2.resize(inst.astype("float32"), (w, h), interpolation=cv2.INTER_LINEAR)
-            mask |= (inst > 0.5).astype("uint8")
-            found = True
+        inst = np.asarray(inst)
+        if inst.shape != (h, w):
+            import cv2
+            inst = cv2.resize(inst.astype("float32"), (w, h), interpolation=cv2.INTER_LINEAR)
+        mask |= (inst > 0.5).astype("uint8")
+        found = True
     return mask if found else None
 
 
@@ -140,11 +153,13 @@ def apply(frame, mask, feather_px: int = 3):
     return (frame.astype("float32") * m + bg.astype("float32") * (1 - m)).astype("uint8")
 
 
-def masked_crop(frame, boxes: list[dict], crop_fn, max_side: int = 512):
-    """建索引 / 查询共用：抠狗 → 按检测框裁 → 缩到 max_side。抠不到就返回 None（调用方用原图）。"""
+def masked_crop(frame, boxes: list[dict], crop_fn, max_side: int = 512, mask=None):
+    """建索引 / 查询共用：抠狗 → 按检测框裁 → 缩到 max_side。抠不到就返回 None（调用方用原图）。
+    mask 给了就不再跑模型（建索引时一批算好了再挨个裁）。"""
     import cv2
 
-    mask = dog_mask(frame, boxes)
+    if mask is None:
+        mask = dog_mask(frame, boxes)
     if mask is None:
         return None
     h, w = frame.shape[:2]
