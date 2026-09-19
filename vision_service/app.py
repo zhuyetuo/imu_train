@@ -116,6 +116,10 @@ class SegmentIn(BaseModel):
     # auto：给了框用 score 挑，只给点挑最小的那个（点提示的歧义永远是
     # "这颗牙/这排牙/整个嘴"，要的永远是最小那个）。score = 老行为，留着能对比
     prefer: str = Field("auto", pattern="^(auto|score)$")
+    # gingiva：牙龈专用修整——SAM 的掩膜里只留粉红色那部分（去掉连带的牙和嘴唇），多边形抽稀更细
+    refine: str | None = Field(None, pattern="^(gingiva)$")
+    # 这张图上已经标好的别的东西的轮廓（归一化 [[x,y],...]，框给四个角）：从结果里挖掉。标牙龈时传牙
+    exclude: list[list[list[float]]] = Field(default_factory=list, max_length=200)
 
 
 @app.get("/health")
@@ -136,7 +140,8 @@ def sam_segment(body: SegmentIn):
         # 503 而不是 500：平台据此把按钮置灰并提示原因，而不是弹一个红叉
         raise HTTPException(503, st["error"] or "SAM 模型不可用")
     try:
-        return sam.segment(full, [p.model_dump() for p in body.points], body.box, prefer=body.prefer)
+        return sam.segment(full, [p.model_dump() for p in body.points], body.box, prefer=body.prefer, refine=body.refine,
+                           exclude=body.exclude or None)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
