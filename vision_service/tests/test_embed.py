@@ -165,7 +165,7 @@ def test_搜索_最像的在前_排掉自己_合段_缺索引报出来(index_dir
     # 排掉样例自己：样例在 A 的 11 秒 ±2 秒
     r2 = embed.search(a, ["A.mp4", "B.mp4"], top_k=10, exclude=("A.mp4", 9.0, 13.0))
     assert ("A.mp4", 10.0) not in [(h["path"], h["t"]) for h in r2["hits"]]
-    assert r2["hits"][0] == {"path": "B.mp4", "t": 5.0, "score": 1.0}
+    assert r2["hits"][0] == {"path": "B.mp4", "t": 5.0, "score": 1.0, "vis_score": 1.0}
     # top_k 截断
     assert len(embed.search(a, ["A.mp4", "B.mp4"], top_k=2)["hits"]) == 2
 

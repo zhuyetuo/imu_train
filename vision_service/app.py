@@ -75,6 +75,13 @@ def _warmup_on_startup():
             _logger.info("姿态模型已加载（%s）", pose.status().get("device"))
         else:
             _logger.info("姿态模型没加载：%s", pose.status().get("error"))
+        from . import segmask
+
+        ms = segmask.status()
+        if ms["available"]:
+            _logger.info("分割模型已加载（%s），建索引 / 查询会先把狗抠出来", ms.get("device"))
+        elif ms["enabled"]:
+            _logger.warning("分割模型没加载，索引不抠狗：%s", ms.get("error"))
         if e.get("warm"):
             _logger.info("画面向量模型预热完成")
         else:
