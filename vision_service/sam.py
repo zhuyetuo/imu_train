@@ -130,8 +130,42 @@ def warmup() -> dict:
     return {"warm": True, "error": None, "warm_seconds": _warm_seconds}
 
 
-def mask_to_shapes(mask: np.ndarray) -> dict | None:
-    """掩膜 → 归一化的框 + 多边形。
+def refine_gingiva(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """牙龈专用的掩膜修整：SAM 给的那块里把不是牙龈颜色的像素去掉。
+
+    牙龈是一条又薄又不规则的粉红色带，紧贴着白牙和黑嘴唇。SAM 没有"牙龈"这个概念，
+    框提示给它的是"框里最像一个物体的那块"——经常连牙、连嘴唇一起。颜色恰好是最可靠的
+    区分：牙是白 / 黄（饱和度低、亮度高），嘴唇 / 口腔深处是黑（亮度低），牙龈是粉红
+    （色相在红那一段、有饱和度、有亮度）。所以在 SAM 的掩膜里只留粉红那部分，再开闭
+    运算把牙缝里的毛刺去掉，只取最大的那块。
+
+    去掉的都是"确定不是牙龈"的像素，判错的方向是安全的：留下的一定是粉红，最多漏一点
+    发白的龈缘，比把半颗牙算进牙龈强。
+    """
+    import cv2
+
+    m = np.asarray(mask).astype(np.uint8)
+    if m.ndim != 2 or not m.any():
+        return m
+    hsv = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    # OpenCV 的 H 是 0~180：红 / 粉在 0~20 和 160~180 两头
+    pink_hue = (h <= 22) | (h >= 155)
+    keep = pink_hue & (s >= 45) & (v >= 60)
+    out = (m > 0) & keep
+    out = out.astype(np.uint8)
+    k = np.ones((5, 5), np.uint8)
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, k)
+    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # 颜色一过滤可能什么都不剩（光线 / 白平衡很怪）：那就退回 SAM 原样，别返回空
+    if out.sum() < 0.05 * (m > 0).sum():
+        return m
+    return out
+
+
+def mask_to_shapes(mask: np.ndarray, poly_eps: float = 0.004) -> dict | None:
+    """掩膜 → 归一化的框 + 多边形。poly_eps 是抽稀力度（占周长的比例）：牙齿那种凸形
+    0.004 够了，牙龈那种锯齿状的龈缘要 0.0015 才留得住形状。
 
     框是必给的（训练走检测口径）；多边形是顺手的（掩膜质心比框心准，牙齿倾斜时
     框心明显偏，几何推号直接吃这个精度；将来要升分割也不用重标）。
@@ -158,7 +192,7 @@ def mask_to_shapes(mask: np.ndarray) -> dict | None:
             c = max(contours, key=cv2.contourArea)
             # 抽稀到几十个点：原始轮廓动辄上千点，存库和传输都没必要，
             # 而牙齿这种凸形目标抽稀之后形状几乎不变
-            eps = 0.004 * cv2.arcLength(c, True)
+            eps = poly_eps * cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, eps, True).reshape(-1, 2)
             if len(approx) >= 3:
                 polygon = [[float(px) / w, float(py) / h] for px, py in approx]
@@ -207,14 +241,38 @@ def pick_mask(shapes: list[dict], scores: list[float], has_box: bool, prefer: st
     return min(usable, key=lambda i: shapes[i]["area_ratio"])
 
 
+def subtract_polygons(mask: np.ndarray, polygons: list[list[list[float]]], dilate_px: int = 3) -> np.ndarray:
+    """把已经标好的别的东西（牙）从掩膜里挖掉。polygons 归一化 [[x,y],...]，四个点的就是框。
+    往外胀几个像素再挖：牙和龈缘之间那一圈过渡带不该算牙龈，SAM 的牙轮廓也常常略小于牙。"""
+    import cv2
+
+    m = np.asarray(mask).astype(np.uint8)
+    if m.ndim != 2 or not polygons:
+        return m
+    h, w = m.shape
+    hole = np.zeros_like(m)
+    for poly in polygons:
+        pts = np.array([[int(round(x * w)), int(round(y * h))] for x, y in poly if x is not None], dtype=np.int32)
+        if len(pts) >= 3:
+            cv2.fillPoly(hole, [pts], 1)
+    if dilate_px > 0 and hole.any():
+        hole = cv2.dilate(hole, np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), np.uint8))
+    out = m.copy()
+    out[hole > 0] = 0
+    return out
+
+
 def segment(image_path: str, points: list[dict], box: list[float] | None = None,
-            prefer: str = "auto") -> dict:
+            prefer: str = "auto", refine: str | None = None,
+            exclude: list[list[list[float]]] | None = None) -> dict:
     """按提示分割。
 
     points：[{x, y, label}]，x/y 是**归一化**的 0-1（前端拿到的图是缩放过的，
     传像素坐标就得两边都知道原图尺寸，迟早错一次）；label 1=正点 0=负点。
     box：可选的框提示，同样归一化。
     prefer：三个候选怎么挑，见 pick_mask。
+    refine："gingiva" = 牙龈专用修整（按颜色只留粉红那部分，多边形抽稀更细），见 refine_gingiva。
+    exclude：这张图上已经标好的别的东西的轮廓（标牙龈时把牙挖掉），见 subtract_polygons。
     """
     _load()
     if _model is None:
@@ -225,10 +283,11 @@ def segment(image_path: str, points: list[dict], box: list[float] | None = None,
     from . import meter
 
     with meter.timed("sam"):
-        return _segment(image_path, points, box, prefer)
+        return _segment(image_path, points, box, prefer, refine, exclude)
 
 
-def _segment(image_path: str, points: list[dict], box: list[float] | None, prefer: str) -> dict:
+def _segment(image_path: str, points: list[dict], box: list[float] | None, prefer: str,
+             refine: str | None = None, exclude: list[list[list[float]]] | None = None) -> dict:
     import cv2
 
     img = cv2.imread(image_path)
@@ -252,7 +311,13 @@ def _segment(image_path: str, points: list[dict], box: list[float] | None, prefe
 
     # 三个都转出来再挑。原来是先 argmax 再转，于是另外两个候选**根本看不到**——
     # 而实测发现对的那个经常就在没被选中的里面
-    cand = [mask_to_shapes(m) for m in masks]
+    eps = 0.0015 if refine == "gingiva" else 0.004
+    if exclude:
+        # 先挖掉已经标好的牙，再按颜色修：挖是确定性的（人标的），颜色是兜底
+        masks = [subtract_polygons(m, exclude) for m in masks]
+    if refine == "gingiva":
+        masks = [refine_gingiva(m, img) for m in masks]
+    cand = [mask_to_shapes(m, poly_eps=eps) for m in masks]
     best = pick_mask(cand, [float(x) for x in scores], has_box=bx is not None, prefer=prefer)
     shapes = cand[best]
     if shapes is None:

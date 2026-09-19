@@ -220,3 +220,34 @@ def test_退化掩膜不参与挑选():
 def test_全都退化时退回score():
     """一个能用的都没有——这时挑谁都一样，别抛异常，交给上层去报"没分割出东西"。"""
     assert pick_mask([None, None, None], [0.1, 0.9, 0.2], has_box=False) == 1
+
+
+def test_牙龈修整_只留粉红_去掉白牙和黑嘴唇():
+    from vision_service.sam import refine_gingiva
+
+    rgb = np.zeros((40, 60, 3), dtype=np.uint8)
+    rgb[:, :20] = (245, 240, 230)      # 白牙
+    rgb[:, 20:40] = (230, 120, 140)    # 粉红牙龈
+    rgb[:, 40:] = (20, 15, 15)         # 黑嘴唇
+    mask = np.ones((40, 60), dtype=np.uint8)
+    out = refine_gingiva(mask, rgb)
+    ys, xs = np.where(out > 0)
+    assert xs.min() >= 20 and xs.max() < 40 and len(xs) > 0.8 * 40 * 20
+
+
+def test_牙龈修整_颜色全过滤掉时退回原样():
+    from vision_service.sam import refine_gingiva
+
+    rgb = np.full((20, 20, 3), 250, dtype=np.uint8)     # 一片白
+    mask = np.ones((20, 20), dtype=np.uint8)
+    assert refine_gingiva(mask, rgb).sum() == 400
+
+
+def test_挖掉已经标好的牙():
+    from vision_service.sam import subtract_polygons
+
+    mask = np.ones((100, 100), dtype=np.uint8)
+    out = subtract_polygons(mask, [[[0.2, 0.2], [0.4, 0.2], [0.4, 0.4], [0.2, 0.4]]], dilate_px=2)
+    assert out[30, 30] == 0 and out[80, 80] == 1
+    assert out[19, 30] == 0 and out[15, 30] == 1           # 往外胀了 2 像素
+    assert subtract_polygons(mask, []).sum() == 10000
