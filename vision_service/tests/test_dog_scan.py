@@ -106,6 +106,8 @@ def fake_cv2(monkeypatch):
     monkeypatch.setitem(sys.modules, "cv2", cv2)
     monkeypatch.setattr(dog, "_model", object())          # 装作模型在
     monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    # 这些用例走的是假 cv2 那条路：把 ffmpeg 关掉，不然有 ffmpeg 的机器上会去解一个不存在的文件
+    monkeypatch.setattr(dog.config, "DECODE_FFMPEG", False)
     np  # noqa: B018
     return cv2
 
@@ -130,10 +132,16 @@ def _stub_predict(monkeypatch, per_call):
             self.boxes = [Box() for _ in range(k)]
 
     class M:
-        def predict(self, *a, **kw):
-            k = per_call[min(calls["n"], len(per_call) - 1)]
-            calls["n"] += 1
-            return [Res(k)]
+        # 真的 ultralytics 一张图一个结果：传一批就返回一批。scan_video 现在是
+        # 按批送的，桩只返回一个结果的话后面的帧全丢了
+        def predict(self, imgs, *a, **kw):
+            n = len(imgs) if isinstance(imgs, (list, tuple)) else 1
+            out = []
+            for _ in range(n):
+                k = per_call[min(calls["n"], len(per_call) - 1)]
+                calls["n"] += 1
+                out.append(Res(k))
+            return out
 
     monkeypatch.setattr(dog, "_model", M())
     return calls

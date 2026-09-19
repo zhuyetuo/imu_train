@@ -249,50 +249,51 @@ def detect(frame, conf: float = 0.35) -> list[dict]:
     return boxes
 
 
-def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames: int = 1200) -> dict:
+def scan_video(path: str, every_sec: float = 5.0, conf: float = 0.35, max_frames: int = 1200,
+               batch: int = 32) -> dict:
     """按时间采样跑狗检测。
 
     every_sec：多少秒看一眼。5 秒是够的——要回答的是"这段有没有狗"，不是
     "狗每一秒在哪"。一小时的视频就是 720 个采样点。
     max_frames：上限，防止有人传个 every_sec=0.01 把显卡占一下午。
+
+    快在两处（一小时 720p 从十几秒到两三秒）：
+      1. 解码走 ffmpeg（多线程，有卡时 NVDEC），不再 cv2 逐帧 grab 九万次；
+         ffmpeg 不在 / 起不来就退回 cv2 那条老路，结果一样只是慢
+      2. 检测按 batch 张一起送 GPU，不是一张张送
     """
     _load()
     if _model is None:
         raise RuntimeError(_load_error or "模型没加载")
 
-    import cv2
+    from . import seek
 
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise ValueError(f"打不开这个视频：{path}")
-    try:
-        frames = []
-        next_t = 0.0
-        last_ms = 0.0
-        n_grabbed = 0
-        while len(frames) < max_frames:
-            # grab 只取不解码，便宜；只有跨过采样点时才 retrieve
-            if not cap.grab():
-                break
-            n_grabbed += 1
-            ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            # 有些容器最后几帧读不出 PTS（返回 0）。别把它当成"回到了 0 秒"——
-            # 那会让采样点整个乱掉。读不出就沿用上一次的时间，跳过这一帧
-            if ms <= 0 and n_grabbed > 1:
-                continue
-            last_ms = ms
-            if ms / 1000.0 < next_t:
-                continue
-            ok, frame = cap.retrieve()
-            if not ok:
-                continue
-            next_t = ms / 1000.0 + every_sec
-            boxes = detect(frame, conf)
-            frames.append({"t": round(ms / 1000.0, 2), "n_dogs": len(boxes), "boxes": boxes})
-    finally:
-        cap.release()
+    frames: list[dict] = []
+    pending: list[tuple[float, object]] = []
 
-    return {"duration_sec": round(last_ms / 1000.0, 2), "every_sec": every_sec,
+    def flush():
+        if not pending:
+            return
+        results = detect_batch([f for _t, f in pending], conf)
+        for (t, _f), boxes in zip(pending, results):
+            frames.append({"t": round(t, 2), "n_dogs": len(boxes), "boxes": boxes})
+        pending.clear()
+
+    last_t = 0.0
+    # 有 ffmpeg 走 ffmpeg（先 NVDEC 再软解），没有退回 cv2，见 seek.iter_frames
+    it = seek.iter_frames(path, every_sec)
+    for t, frame in it:
+        if len(frames) + len(pending) >= max_frames:
+            break
+        last_t = t
+        pending.append((t, frame))
+        if len(pending) >= batch:
+            flush()
+    flush()
+    # cv2 那条路给的 t 是 PTS，最后一帧的时间才是真实时长；ffmpeg 那条路是等间隔抽的，
+    # 时长按最后一个采样点算，最多差半个间隔
+    frames.sort(key=lambda f: f["t"])
+    return {"duration_sec": round(last_t, 2), "every_sec": every_sec,
             "conf": conf, **summarize(frames), "frames": frames}
 
 
