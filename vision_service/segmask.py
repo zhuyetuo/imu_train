@@ -85,10 +85,9 @@ def dog_mask(frame, boxes: list[dict] | None = None, conf: float = 0.25):
     return dog_mask_batch([frame], [boxes])[0]
 
 
-def dog_mask_batch(frames: list, boxes_list: list) -> list:
-    """一批帧一起过分割模型（建索引时一批 16~32 张，比一张张送快好几倍）。每帧一个掩码或 None。"""
-    import numpy as np
-
+def dog_mask_batch(frames: list, boxes_list: list, imgsz: int | None = None) -> list:
+    """一批图一起过分割模型。每张一个掩码（跟输入同尺寸）或 None。
+    建索引走 masked_crop_batch：先按检测框裁再分割，不是整帧。"""
     if not frames:
         return []
     if not available():
@@ -96,10 +95,13 @@ def dog_mask_batch(frames: list, boxes_list: list) -> list:
     from . import meter
 
     # 不用 half：分割头算掩码时 proto 是 float、系数是 half，ultralytics 会抛
-    # "expected mat1 and mat2 to have the same dtype: Half != float"。分割一批也就几十毫秒，不差这点
+    # "expected mat1 and mat2 to have the same dtype: Half != float"
+    # retina_masks 也不开：那是把每个实例的掩码在 GPU 上放大到原图分辨率，一批 720p 帧很贵；
+    # 这里拿 1/4 分辨率的掩码自己 resize，涂背景够用（边缘还要羽化）
     with _lock, meter.timed("seg", frames=len(frames)):
-        res = _model.predict(list(frames), verbose=False, conf=config.SEG_CONF, half=False, imgsz=config.SEG_IMGSZ,
-                             classes=list(_classes) or None, agnostic_nms=True, retina_masks=True,
+        res = _model.predict(list(frames), verbose=False, conf=config.SEG_CONF, half=False,
+                             imgsz=imgsz or config.SEG_IMGSZ,
+                             classes=list(_classes) or None, agnostic_nms=True, retina_masks=False,
                              device=_device_used or "cpu")
     return [_mask_of(r, frame, boxes) for r, frame, boxes in zip(res, frames, boxes_list)]
 
@@ -154,21 +156,46 @@ def apply(frame, mask, feather_px: int = 3):
     return (frame.astype("float32") * m + bg.astype("float32") * (1 - m)).astype("uint8")
 
 
-def masked_crop(frame, boxes: list[dict], crop_fn, max_side: int = 512, mask=None):
-    """建索引 / 查询共用：抠狗 → 按检测框裁 → 缩到 max_side。抠不到就返回 None（调用方用原图）。
-    mask 给了就不再跑模型（建索引时一批算好了再挨个裁）。"""
+def _crop_boxes(boxes: list[dict], w: int, h: int, x1: int, y1: int, cw: int, ch: int) -> list[dict]:
+    """整帧归一化的检测框 → 裁剪块里的归一化框（给 _overlaps_any 用）。"""
+    out = []
+    for b in boxes or []:
+        bx, by, bw, bh = b["bbox"]
+        out.append({"bbox": [(bx * w - x1) / cw, (by * h - y1) / ch, bw * w / cw, bh * h / ch]})
+    return out
+
+
+def masked_crop_batch(frames: list, boxes_list: list, crop_fn, max_side: int = 512) -> list:
+    """建索引 / 查询共用：按检测框裁 → **在裁剪块上**分割 → 背景涂灰 → 缩到 max_side。
+    每张一个图或 None（抠不到，调用方用原图）。
+
+    在裁剪块上分割而不是整帧：狗只占整帧一角，整帧要 960 才抠得到；裁出来狗占大半，
+    384 就够，一批的算力省十倍不止。掩码和检测框也天然对齐。
+    """
     import cv2
 
-    if mask is None:
-        mask = dog_mask(frame, boxes)
-    if mask is None:
-        return None
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = crop_fn(boxes, w, h)
-    img = apply(frame[y1:y2, x1:x2], mask[y1:y2, x1:x2])
-    if not img.size:
-        return None
-    scale = max_side / max(img.shape[:2])
-    if scale < 1:
-        img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
-    return img
+    crops, rel_boxes, sizes = [], [], []
+    for frame, boxes in zip(frames, boxes_list):
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = crop_fn(boxes, w, h)
+        crop = frame[y1:y2, x1:x2]
+        crops.append(crop)
+        sizes.append(crop.shape[:2])
+        rel_boxes.append(_crop_boxes(boxes, w, h, x1, y1, max(1, x2 - x1), max(1, y2 - y1)))
+    keep = [i for i, c in enumerate(crops) if c.size]
+    masks = dog_mask_batch([crops[i] for i in keep], [rel_boxes[i] for i in keep])
+    out: list = [None] * len(frames)
+    for i, mask in zip(keep, masks):
+        if mask is None:
+            continue
+        img = apply(crops[i], mask)
+        scale = max_side / max(img.shape[:2])
+        if scale < 1:
+            img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+        out[i] = img
+    return out
+
+
+def masked_crop(frame, boxes: list[dict], crop_fn, max_side: int = 512):
+    """单张版，查询 / 缩略图用。"""
+    return masked_crop_batch([frame], [boxes], crop_fn, max_side)[0]
