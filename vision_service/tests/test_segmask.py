@@ -48,6 +48,7 @@ class _Model:
 
     def predict(self, frame, **kw):
         assert kw.get("agnostic_nms") is True and kw.get("retina_masks") is True
+        assert kw.get("half") is False            # half 会让分割头 dtype 对不上，直接崩
         return self.res
 
 
