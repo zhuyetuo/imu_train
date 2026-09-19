@@ -178,18 +178,26 @@ def mask_to_shapes(mask: np.ndarray, poly_eps: float = 0.004) -> dict | None:
         return None
     h, w = m.shape
 
+    polygon = None
+    area = float((m > 0).sum())
     ys, xs = np.where(m > 0)
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
-    bbox = [x0 / w, y0 / h, (x1 - x0 + 1) / w, (y1 - y0 + 1) / h]
-
-    polygon = None
     try:
         import cv2
 
         contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             c = max(contours, key=cv2.contourArea)
+            # **框也按最大那块算**，不按整张掩膜：SAM 偶尔在框里另外多吐一小片碎点，
+            # 轮廓只取最大那块、框却把碎点也圈进去，画面上就是框比轮廓大出一截
+            bx, by, bw, bh = cv2.boundingRect(c)
+            x0, y0, x1, y1 = bx, by, bx + bw - 1, by + bh - 1
+            if len(contours) > 1:
+                # 面积也只算最大那块（按像素数，跟原来一个口径；contourArea 对小块偏小）
+                only = np.zeros_like(m)
+                cv2.drawContours(only, [c], -1, 1, thickness=-1)
+                area = float(((only > 0) & (m > 0)).sum())
             # 抽稀到几十个点：原始轮廓动辄上千点，存库和传输都没必要，
             # 而牙齿这种凸形目标抽稀之后形状几乎不变
             eps = poly_eps * cv2.arcLength(c, True)
@@ -198,11 +206,12 @@ def mask_to_shapes(mask: np.ndarray, poly_eps: float = 0.004) -> dict | None:
                 polygon = [[float(px) / w, float(py) / h] for px, py in approx]
     except ImportError:
         pass
+    bbox = [x0 / w, y0 / h, (x1 - x0 + 1) / w, (y1 - y0 + 1) / h]
 
     return {
         "bbox": [round(v, 6) for v in bbox],
         "polygon": [[round(px, 6), round(py, 6)] for px, py in polygon] if polygon else None,
-        "area_ratio": round(float(m.sum()) / (w * h), 6),
+        "area_ratio": round(area / (w * h), 6),
     }
 
 
