@@ -77,6 +77,7 @@ def _warmup_on_startup():
             _logger.info("姿态模型没加载：%s", pose.status().get("error"))
         from . import segmask
 
+        segmask.available()          # 触发加载（第一次下权重）；status 本身不加载
         ms = segmask.status()
         if ms["available"]:
             _logger.info("分割模型已加载（%s），建索引 / 查询会先把狗抠出来", ms.get("device"))

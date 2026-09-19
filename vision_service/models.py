@@ -202,7 +202,8 @@ def _seg_status() -> dict:
     err = st["error"]
     if not st["enabled"]:
         err = "EMBED_MASK_BG=0 关着：建索引 / 找相似不抠狗"
-    return {"available": st["available"], "error": err, "device": st["device"], "weights": config.SEG_WEIGHTS}
+    return {"available": st["available"], "error": err, "device": st["device"], "weights": config.SEG_WEIGHTS,
+            "loading": st["loading"]}
 
 
 def _seg_load() -> dict:

@@ -23,6 +23,7 @@ def test_没模型_返回None_不抛(monkeypatch):
     monkeypatch.setattr(segmask, "_model", None)
     monkeypatch.setattr(segmask, "_load_error", "没装")
     monkeypatch.setattr(segmask, "_last_try", 1e18)
+    monkeypatch.setattr(segmask, "_loading", False)
     frame = np.zeros((10, 10, 3), dtype="uint8")
     assert segmask.dog_mask(frame) is None
     assert segmask.masked_crop(frame, [{"bbox": [0, 0, 1, 1], "conf": 1}], lambda b, w, h: (0, 0, w, h)) is None

@@ -28,13 +28,15 @@ _last_try = 0.0
 _RETRY_AFTER_S = 60.0
 _device_used: str | None = None
 _classes: list[int] = []
+#: 正在加载（第一次要下权重，几十秒到几分钟）
+_loading = False
 
 #: 背景涂成什么颜色（BGR）。114 灰是 YOLO 系列 letterbox 的填充色，模型对它最"无感"
 BG_COLOR = (114, 114, 114)
 
 
 def _load(force: bool = False):
-    global _model, _load_error, _last_try, _device_used, _classes
+    global _load_error, _last_try, _loading
     if _model is not None or not config.EMBED_MASK_BG:
         return
     if _load_error is not None and not force and (time.monotonic() - _last_try) < _RETRY_AFTER_S:
@@ -44,28 +46,37 @@ def _load(force: bool = False):
             return
         _last_try = time.monotonic()
         _load_error = None
+        _loading = True
         try:
-            from ultralytics import YOLO
-        except ImportError as e:
-            _load_error = f"没装 ultralytics：{e}"
-            return
-        try:
-            p = config.SEG_WEIGHTS
-            os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
-            m = YOLO(p)
-            from . import dog
+            _load_locked()
+        finally:
+            _loading = False
 
-            _classes = dog._resolve_classes(m)
-            _device_used = dog._pick_device()
-            try:
-                m.to(_device_used)
-            except Exception as e:  # noqa: BLE001
-                _logger.warning("把分割模型搬到 %s 失败，留在 CPU 上：%s", _device_used, e)
-                _device_used = "cpu"
-            _model = m
+
+def _load_locked() -> None:
+    global _model, _load_error, _device_used, _classes
+    try:
+        from ultralytics import YOLO
+    except ImportError as e:
+        _load_error = f"没装 ultralytics：{e}"
+        return
+    try:
+        p = config.SEG_WEIGHTS
+        os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
+        m = YOLO(p)
+        from . import dog
+
+        _classes = dog._resolve_classes(m)
+        _device_used = dog._pick_device()
+        try:
+            m.to(_device_used)
         except Exception as e:  # noqa: BLE001
-            _load_error = (f"加载失败：{type(e).__name__}: {e}（权重 {config.SEG_WEIGHTS}；"
-                           f"这台机器下不动的话手动把 .pt 放过去，或 EMBED_MASK_BG=0 关掉抠图）")
+            _logger.warning("把分割模型搬到 %s 失败，留在 CPU 上：%s", _device_used, e)
+            _device_used = "cpu"
+        _model = m
+    except Exception as e:  # noqa: BLE001
+        _load_error = (f"加载失败：{type(e).__name__}: {e}（权重 {config.SEG_WEIGHTS}；"
+                       f"这台机器下不动的话手动把 .pt 放过去，或 EMBED_MASK_BG=0 关掉抠图）")
 
 
 def available() -> bool:
@@ -74,9 +85,13 @@ def available() -> bool:
 
 
 def status() -> dict:
-    _load()
-    return {"enabled": bool(config.EMBED_MASK_BG), "available": _model is not None,
-            "weights": config.SEG_WEIGHTS, "device": _device_used, "error": _load_error}
+    """只看，不触发加载：第一次加载要下权重，status 接口要是等它，部署脚本 3 秒就超时。
+    加载在启动预热里做（app.py），或第一次用到时做。"""
+    err = _load_error
+    if _model is None and err is None and config.EMBED_MASK_BG and not _loading:
+        err = "还没加载（第一次建索引时会自动加载）"
+    return {"enabled": bool(config.EMBED_MASK_BG), "available": _model is not None, "loading": _loading,
+            "weights": config.SEG_WEIGHTS, "device": _device_used, "error": err}
 
 
 def dog_mask(frame, boxes: list[dict] | None = None, conf: float = 0.25):
