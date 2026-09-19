@@ -251,3 +251,15 @@ def test_挖掉已经标好的牙():
     assert out[30, 30] == 0 and out[80, 80] == 1
     assert out[19, 30] == 0 and out[15, 30] == 1           # 往外胀了 2 像素
     assert subtract_polygons(mask, []).sum() == 10000
+
+
+def test_框按最大那块算_不被碎点撑大():
+    from vision_service.sam import mask_to_shapes
+
+    m = np.zeros((100, 100), dtype=np.uint8)
+    m[20:40, 20:40] = 1        # 主体
+    m[80:82, 90:92] = 1        # 远处一小片碎点
+    sh = mask_to_shapes(m)
+    x, y, w, h = sh["bbox"]
+    assert abs(x - 0.2) < 0.02 and abs(y - 0.2) < 0.02 and abs(w - 0.2) < 0.02 and abs(h - 0.2) < 0.02
+    assert all(0.19 <= px <= 0.41 and 0.19 <= py <= 0.41 for px, py in sh["polygon"])
