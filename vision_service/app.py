@@ -337,7 +337,7 @@ def embed_preview(body: EmbedPreviewIn):
 
 
 @app.get("/api/v1/embed/thumb")
-def embed_thumb(path: str, t: float, crop: bool = True):
+def embed_thumb(path: str, t: float, crop: bool = True, max_side: int = 320):
     """某视频某一秒的缩略图（狗框那一块 / 整帧带框）。给平台"先看命中"那一排图用。"""
     from fastapi.responses import Response
 
@@ -346,7 +346,7 @@ def embed_thumb(path: str, t: float, crop: bool = True):
     if not st.get("available"):
         raise HTTPException(503, st.get("error") or "狗检测模型不可用")
     try:
-        data = embed.frame_thumb(full, max(0.0, t), crop=crop)
+        data = embed.frame_thumb(full, max(0.0, t), crop=crop, max_side=max(64, min(1920, max_side)))
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
