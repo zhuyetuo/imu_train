@@ -339,16 +339,28 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
 
     def on_frame(rec: dict, frame) -> None:
         rec["pose"] = pose.frame_descriptor(frame, rec["boxes"]) if use_pose else None
-        if use_mask:
-            img = segmask.masked_crop(frame, rec["boxes"], seek.crop_rect)
-            if img is not None:
-                import cv2
 
-                ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-                if ok_:
-                    rec["jpeg"] = bytes(np.asarray(buf_).tobytes())
+    n_masked = 0
 
-    samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame)
+    def on_batch(items: list) -> None:
+        # 抠狗：一批帧一起过分割模型（一张张送慢好几倍），抠到的替掉按框裁的那张 JPEG
+        nonlocal n_masked
+        import cv2
+
+        masks = segmask.dog_mask_batch([f for _r, f in items], [r["boxes"] for r, _f in items])
+        for (rec, frame), mask in zip(items, masks):
+            if mask is None:
+                continue
+            img = segmask.masked_crop(frame, rec["boxes"], seek.crop_rect, mask=mask)
+            if img is None:
+                continue
+            ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ok_:
+                rec["jpeg"] = bytes(np.asarray(buf_).tobytes())
+                n_masked += 1
+
+    samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
+                                on_batch=on_batch if use_mask else None)
     with_dog = [s for s in samples if s["jpeg"] is not None]
     if with_dog:
         emb = enc.encode_images([s["jpeg"] for s in with_dog])
@@ -363,7 +375,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     n_pose = int(sum(1 for s in with_dog if s.get("pose")))
     meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
-            "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask)}
+            "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
@@ -373,7 +385,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
-            "with_pose": n_pose, "masked": bool(use_mask)}
+            "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked}
 
 
 # ── 查询向量 ──────────────────────────────────────────────────────────

@@ -93,3 +93,67 @@ def test_建索引_抠没抠记在meta_不一致就重建(monkeypatch, tmp_path)
     assert embed.build("A.mp4", "/x/A.mp4", encoder=enc)["cached"] is True
     monkeypatch.setattr(embed.config, "EMBED_MASK_BG", False)
     assert embed.build("A.mp4", "/x/A.mp4", encoder=enc)["cached"] is False    # 关掉开关也重建
+
+
+def test_建索引_抠狗按批送_不是一张张(monkeypatch, tmp_path):
+    """sample_video 攒够一批才喊 on_batch；embed.build 用它一批算掩码、逐张替 JPEG。"""
+    from vision_service import embed, seek
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    monkeypatch.setattr(embed.config, "EMBED_MODEL", "fake/siglip")
+    monkeypatch.setattr(embed.config, "EMBED_MASK_BG", True)
+    monkeypatch.setattr(embed.pose, "available", lambda: False)
+    monkeypatch.setattr(segmask, "available", lambda: True)
+    embed._cache.clear()
+    calls = []
+
+    def fake_batch(frames, boxes_list):
+        calls.append(len(frames))
+        return [np.ones(f.shape[:2], dtype="uint8") for f in frames]
+
+    monkeypatch.setattr(segmask, "dog_mask_batch", fake_batch)
+    box = [{"bbox": [0.1, 0.1, 0.5, 0.5], "conf": 1}]
+    frames = [np.full((40, 40, 3), 77, dtype="uint8") for _ in range(5)]
+
+    def fake_sample(path, every_sec=1.0, conf=0.35, on_frame=None, on_batch=None, **kw):
+        recs = [{"t": float(i), "boxes": box, "jpeg": b"orig", "motion": None} for i in range(5)]
+        on_batch(list(zip(recs[:3], frames[:3])))
+        on_batch(list(zip(recs[3:], frames[3:])))
+        return recs
+
+    monkeypatch.setattr(seek, "sample_video", fake_sample)
+    seen = []
+
+    class Enc:
+        def encode_images(self, jpegs):
+            seen.extend(jpegs)
+            return np.ones((len(jpegs), 4), dtype="float32")
+
+    r = embed.build("A.mp4", "/x/A.mp4", encoder=Enc())
+    assert calls == [3, 2] and r["with_mask"] == 5
+    assert all(j != b"orig" for j in seen)                      # 全换成抠完的图
+
+
+def test_sample_video_攒批喊on_batch(monkeypatch):
+    from vision_service import dog, seek
+    from vision_service.tests.test_seek import _Cap
+
+    monkeypatch.setattr(dog, "_model", object())
+    monkeypatch.setattr(dog, "_load", lambda force=False: None)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.0)
+    monkeypatch.setattr(seek.config, "DECODE_FFMPEG", False)
+    box = [{"bbox": [0.1, 0.1, 0.5, 0.5], "conf": 1}]
+    monkeypatch.setattr(dog, "detect_batch", lambda frames, conf=0.35: [box for _ in frames])
+    import cv2 as real_cv2
+    import sys
+    import types
+
+    class _Proxy(types.ModuleType):
+        def __getattr__(self, name):
+            return getattr(real_cv2, name)
+    proxy = _Proxy("cv2")
+    proxy.VideoCapture = lambda p: _Cap([i * 1000 for i in range(7)])
+    monkeypatch.setitem(sys.modules, "cv2", proxy)
+    got = []
+    out = seek.sample_video("v.mp4", every_sec=1.0, batch=3, on_batch=lambda items: got.append(len(items)))
+    assert len(out) == 7 and got == [3, 3, 1]

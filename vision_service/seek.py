@@ -200,13 +200,15 @@ def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float 
 def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                  start_s: float = 0.0, end_s: float | None = None,
                  max_side: int = 512, jpeg_quality: int = 80, max_samples: int = 20000,
-                 batch: int | None = None, on_frame=None) -> list[dict]:
+                 batch: int | None = None, on_frame=None, on_batch=None) -> list[dict]:
     """过一遍视频，每 every_sec 取一帧：跑狗检测（一批批送 GPU），有狗就裁出来存成 JPEG。
 
     返回 [{t, boxes, jpeg(bytes|None), motion(float|None)}]。motion 是跟上一个
     有狗采样点比的帧差（狗那块区域，缩到 64x64 再比，跟裁框位置无关）。
     on_frame(rec, frame)：有狗的帧多做点事（建索引时算姿态关键点）——整帧不存，
     只在这一刻能拿到，算完往 rec 里塞。
+    on_batch([(rec, frame), ...])：同上，但攒够一批（batch 张）一起给——要过 GPU 模型的
+    活（抠狗）一张张送比一批送慢好几倍。
     """
     import cv2
     import numpy as np
@@ -267,9 +269,16 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                     rec["jpeg"] = bytes(np.asarray(buf).tobytes())
             if on_frame is not None:
                 on_frame(rec, frame)
+            if on_batch is not None:
+                hook_buf.append((rec, frame))
+                if len(hook_buf) >= batch:
+                    on_batch(list(hook_buf))
+                    hook_buf.clear()
         else:
             prev_small = None
         out.append(rec)
+
+    hook_buf: list[tuple[dict, object]] = []
 
     def flush(pending: list[tuple[float, object]]) -> None:
         nonlocal last_key, last_boxes
@@ -304,6 +313,9 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             break
     if pending:
         flush(pending)
+    if on_batch is not None and hook_buf:
+        on_batch(list(hook_buf))
+        hook_buf.clear()
     _logger.info("采样 %s：%d 帧，送检 %d，静止跳过 %d", os.path.basename(path), len(out), stats["detected"], stats["skipped"])
     return out
 
