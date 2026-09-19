@@ -249,9 +249,10 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             return motion_score(key_last[1], key_now[1]) < skip_thr * 2
         return key_last[1] is None and key_now[1] is None
 
-    def finish(t: float, frame, boxes: list[dict]) -> None:
+    def finish(t: float, frame, boxes: list[dict], static: bool = False) -> None:
         nonlocal prev_small
-        rec = {"t": round(t, 2), "boxes": boxes, "jpeg": None, "motion": None}
+        # static：画面跟上一次送检测的那帧没变（静止跳检沿用的框）。建索引拿它省掉抠狗 / 算向量
+        rec = {"t": round(t, 2), "boxes": boxes, "jpeg": None, "motion": None, "static": static}
         if boxes:
             h, w = frame.shape[:2]
             x1, y1, x2, y2 = crop_rect(boxes, w, h)
@@ -300,7 +301,7 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                     flush(pending)
                     pending = []
                 stats["skipped"] += 1
-                finish(t, frame, list(last_boxes))      # 画面没变，框也没变
+                finish(t, frame, list(last_boxes), static=True)      # 画面没变，框也没变
                 continue
             ref_key = k
         else:

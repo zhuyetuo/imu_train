@@ -337,30 +337,60 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     # 姿态可用就顺路算：每个有狗的帧一条姿态向量（整帧只在采样那一刻拿得到）
     use_pose = pose.available()
 
+    last = {"pose": None, "jpeg": None}     # 上一个真算过的帧：静止的帧直接沿用它的姿态 / 抠图
+
     def on_frame(rec: dict, frame) -> None:
-        rec["pose"] = pose.frame_descriptor(frame, rec["boxes"]) if use_pose else None
+        if not use_pose:
+            rec["pose"] = None
+        elif rec.get("static") and last["pose"] is not None:
+            rec["pose"] = last["pose"]
+        else:
+            rec["pose"] = pose.frame_descriptor(frame, rec["boxes"])
+            last["pose"] = rec["pose"]
 
     n_masked = 0
+    n_static = 0
 
     def on_batch(items: list) -> None:
-        # 抠狗：一批帧一起过分割模型（一张张送慢好几倍），抠到的替掉按框裁的那张 JPEG
-        nonlocal n_masked
+        # 抠狗：一批帧一起过分割模型（一张张送慢好几倍），抠到的替掉按框裁的那张 JPEG。
+        # 静止的帧（画面跟上一帧没变）不抠，直接用上一帧抠好的图——狗睡着的几十分钟一张都不用算
+        nonlocal n_masked, n_static
         import cv2
 
-        imgs = segmask.masked_crop_batch([f for _r, f in items], [r["boxes"] for r, _f in items], seek.crop_rect)
-        for (rec, _frame), img in zip(items, imgs):
-            if img is None:
-                continue
-            ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            if ok_:
-                rec["jpeg"] = bytes(np.asarray(buf_).tobytes())
-                n_masked += 1
+        # 静止的帧要沿用的是"前一帧"的图，前一帧可能就在这一批里——先算要算的，再按顺序补
+        todo = [(rec, frame) for rec, frame in items if not rec.get("static")]
+        if last["jpeg"] is None and items and items[0][0].get("static"):
+            todo.insert(0, items[0])                # 一开头就是静止的、没有可沿用的：照常算
+        imgs = segmask.masked_crop_batch([f for _r, f in todo], [r["boxes"] for r, _f in todo], seek.crop_rect) \
+            if todo else []
+        done = {}
+        for (rec, _frame), img in zip(todo, imgs):
+            if img is not None:
+                ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ok_:
+                    rec["jpeg"] = bytes(np.asarray(buf_).tobytes())
+                    n_masked += 1
+            done[id(rec)] = True
+        for rec, _frame in items:
+            if id(rec) in done:
+                last["jpeg"] = rec["jpeg"]
+            elif last["jpeg"] is not None:
+                rec["jpeg"] = last["jpeg"]
+                n_static += 1
 
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
                                 on_batch=on_batch if use_mask else None)
     with_dog = [s for s in samples if s["jpeg"] is not None]
     if with_dog:
-        emb = enc.encode_images([s["jpeg"] for s in with_dog])
+        # 同一张图（静止沿用的）只算一次向量
+        uniq: dict[bytes, int] = {}
+        order = []
+        for s_ in with_dog:
+            if s_["jpeg"] not in uniq:
+                uniq[s_["jpeg"]] = len(order)
+                order.append(s_["jpeg"])
+        emb_u = enc.encode_images(order)
+        emb = emb_u[[uniq[s_["jpeg"]] for s_ in with_dog]]
     else:
         emb = np.zeros((0, 1), dtype="float32")
     t = np.array([s["t"] for s in with_dog], dtype="float32")
@@ -372,7 +402,8 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     n_pose = int(sum(1 for s in with_dog if s.get("pose")))
     meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
-            "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked}
+            "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked,
+            "static_reused": n_static}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
@@ -382,7 +413,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
-            "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked}
+            "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static}
 
 
 # ── 查询向量 ──────────────────────────────────────────────────────────
