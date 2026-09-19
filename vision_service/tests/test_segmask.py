@@ -47,7 +47,7 @@ class _Model:
         self.res = res
 
     def predict(self, frame, **kw):
-        assert kw.get("agnostic_nms") is True and kw.get("retina_masks") is True
+        assert kw.get("agnostic_nms") is True and kw.get("retina_masks") is False   # 原图分辨率掩码太贵，自己 resize
         assert kw.get("half") is False            # half 会让分割头 dtype 对不上，直接崩
         return self.res
 
@@ -108,11 +108,11 @@ def test_建索引_抠狗按批送_不是一张张(monkeypatch, tmp_path):
     embed._cache.clear()
     calls = []
 
-    def fake_batch(frames, boxes_list):
+    def fake_batch(frames, boxes_list, crop_fn, max_side=512):
         calls.append(len(frames))
-        return [np.ones(f.shape[:2], dtype="uint8") for f in frames]
+        return [np.full((8, 8, 3), 9, dtype="uint8") for _ in frames]
 
-    monkeypatch.setattr(segmask, "dog_mask_batch", fake_batch)
+    monkeypatch.setattr(segmask, "masked_crop_batch", fake_batch)
     box = [{"bbox": [0.1, 0.1, 0.5, 0.5], "conf": 1}]
     frames = [np.full((40, 40, 3), 77, dtype="uint8") for _ in range(5)]
 
@@ -158,3 +158,26 @@ def test_sample_video_攒批喊on_batch(monkeypatch):
     got = []
     out = seek.sample_video("v.mp4", every_sec=1.0, batch=3, on_batch=lambda items: got.append(len(items)))
     assert len(out) == 7 and got == [3, 3, 1]
+
+
+def test_分割在裁剪块上跑_掩码按块给_框换算到块里(monkeypatch):
+    """整帧 100x100，狗框在右下角；分割只看裁出来的那块，掩码尺寸跟块一样，框也换算到块坐标。"""
+    seen = {}
+
+    def fake_mask_batch(crops, boxes_list, imgsz=None):
+        seen["shapes"] = [c.shape[:2] for c in crops]
+        seen["boxes"] = boxes_list
+        return [np.ones(c.shape[:2], dtype="uint8") for c in crops]
+
+    monkeypatch.setattr(segmask, "dog_mask_batch", fake_mask_batch)
+    frame = np.full((100, 100, 3), 200, dtype="uint8")
+    boxes = [{"bbox": [0.6, 0.6, 0.2, 0.2], "conf": 0.9}]
+    crop_fn = lambda b, w, h: (50, 50, 100, 100)
+    out = segmask.masked_crop_batch([frame], [boxes], crop_fn, max_side=512)
+    assert seen["shapes"] == [(50, 50)]
+    bx = seen["boxes"][0][0]["bbox"]
+    assert bx == pytest.approx([0.2, 0.2, 0.4, 0.4])      # (60-50)/50 …
+    assert out[0].shape == (50, 50, 3) and tuple(out[0][25, 25]) == (200, 200, 200)
+    # 抠不到：None，调用方用原图
+    monkeypatch.setattr(segmask, "dog_mask_batch", lambda c, b, imgsz=None: [None] * len(c))
+    assert segmask.masked_crop(frame, boxes, crop_fn) is None

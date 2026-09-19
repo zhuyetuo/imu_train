@@ -347,11 +347,8 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         nonlocal n_masked
         import cv2
 
-        masks = segmask.dog_mask_batch([f for _r, f in items], [r["boxes"] for r, _f in items])
-        for (rec, frame), mask in zip(items, masks):
-            if mask is None:
-                continue
-            img = segmask.masked_crop(frame, rec["boxes"], seek.crop_rect, mask=mask)
+        imgs = segmask.masked_crop_batch([f for _r, f in items], [r["boxes"] for r, _f in items], seek.crop_rect)
+        for (rec, _frame), img in zip(items, imgs):
             if img is None:
                 continue
             ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])

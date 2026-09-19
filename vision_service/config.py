@@ -138,8 +138,8 @@ DETECT_BATCH    = int(_env("DETECT_BATCH", "32"))
 DETECT_HALF     = _env("DETECT_HALF", "1") not in ("0", "false", "False", "")
 # 检测输入边长。默认 640 对 720p 俯拍的狗太糙（缩成一团的黑狗直接漏掉），960 在 5090 上没什么代价
 DETECT_IMGSZ    = int(_env("DETECT_IMGSZ", "960"))
-# 分割的输入尺寸 / 门槛：默认跟检测一样大（俯拍的狗很小，缩小了抠不到）；嫌慢可以 SEG_IMGSZ=640
-SEG_IMGSZ       = int(_env("SEG_IMGSZ", str(DETECT_IMGSZ)))
+# 分割的输入尺寸：分割是在**按检测框裁出来的块**上跑的（狗占大半），384 就够；不是整帧
+SEG_IMGSZ       = int(_env("SEG_IMGSZ", "384"))
 SEG_CONF        = float(_env("SEG_CONF", "0.25"))
 # 算作"狗"的类别（按权重 names 表里的名字）。COCO 模型把趴着 / 缩成一团 / 俯拍的狗经常判成
 # cat / sheep / bear / teddy bear——狗舍里出现的四条腿的东西反正都是狗，全收
