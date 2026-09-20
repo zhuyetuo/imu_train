@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import types
@@ -39,6 +40,16 @@ class _Cap:
         self.moving = moving if moving is not None else (lambda t: True)
 
     def isOpened(self):
+        return True
+
+    def set(self, _prop, ms):
+        """cv2 的 seek。落点是关键帧、可能比要的早几秒，这里按"退到不晚于它的那一帧"模拟，
+        seek 完照样按 PTS 往前找，所以取到的帧跟不 seek 是一样的——测试要盯住这一点。"""
+        self.seeked = ms
+        self.i = -1
+        for k, t in enumerate(self.pts):
+            if t <= ms:
+                self.i = k - 1
         return True
 
     def grab(self):
@@ -698,3 +709,52 @@ def test_预读_解码出错照样抛到主线程(monkeypatch):
     import pytest as _p
     with _p.raises(RuntimeError, match="ffmpeg 挂了"):
         list(seek.prefetch(boom(), size=4))
+
+
+def test_ffmpeg退出码0但一帧没给_也要退回cv2(fake_video, monkeypatch):
+    """原来只在 rc != 0 时抛。「退出码 0 但零帧」那一支既不抛也不产出，
+    iter_frames 直接 return——cv2 那条后路根本没机会跑，表现成"解码没给出那几帧"
+    而毫无线索。带 -ss 的小窗口上真会发生（2026-09-20 实测 partask 20 条全军覆没，
+    而建索引一直是好的，因为那条路不带 -ss）。"""
+    import subprocess
+
+    w, h = 4, 2
+
+    class Empty:
+        """正常退出，但一个字节都不给。"""
+
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: Empty())
+    monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+    fake_video["cap"] = _Cap([i * 1000 for i in range(5)], w=w, h=h)
+
+    got = list(seek.iter_frames("x.mp4", every_sec=1.0))
+    assert [t for t, _ in got] == [0.0, 1.0, 2.0, 3.0, 4.0]      # 退回 cv2 拿到了帧
+
+    # 单独调 ffmpeg 那一层：零帧要抛，而且把 -ss / -t 和 stderr 带出来
+    import pytest as _p
+    with _p.raises(RuntimeError, match="一帧都没解出来"):
+        list(seek.iter_frames_ffmpeg("x.mp4", 1.0, start_s=418.5, end_s=425.5))
+
+
+def test_cv2取后面的片段先seek过去_不从头读(fake_video, monkeypatch):
+    """不 seek 的话要从头 grab 到那儿：一小时的视频取 2548 秒那几帧得读四万多帧。
+    seek 的落点是关键帧、可能比要的早几秒，所以取到的帧跟不 seek 一样。"""
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    cap = _Cap([i * 1000 for i in range(60)])
+    fake_video["cap"] = cap
+    got = list(seek.iter_frames("x.mp4", every_sec=1.0, start_s=50.0, end_s=53.0))
+    assert [t for t, _ in got] == [50.0, 51.0, 52.0, 53.0]        # 结果不受 seek 影响
+    assert cap.seeked == 48000.0                                  # 提前 2 秒落点，确实 seek 了
+
+    fake_video["cap"] = _Cap([i * 1000 for i in range(5)])
+    list(seek.iter_frames("x.mp4", every_sec=1.0))                # start_s=0 不 seek
+    assert not hasattr(fake_video["cap"], "seeked")
