@@ -130,13 +130,20 @@ def spread(rows):
 def nearest(dists):
     """每帧鼻子最近的那个槽 → (slot (N,) int，没有可用的记 -1; dist (N,) float)。
 
-    距离 0 表示两头有一头没测到（descriptor 里就是这么记的），不能当"贴着"，
-    要当"不知道"排除掉——否则测不到的帧会全部冒充成最近的那个。
+    两种距离都当"不知道"排除掉，不能当"贴着"：
+
+      == 0        两头有一头没测到（descriptor 里就是这么记的）
+      < NEAR_MIN  两个关键点落在几乎同一个像素上。0.01 体长在 720p 上是一个像素，
+                  狗的鼻子和爪子不可能重合——是检测崩了
+
+    第二条一定要在**这里**拦，不能只在 match 里按槽拦：match 的近距检查是逐槽 OR 的，
+    一只后爪 0.5（合法）另一只 0.01（退化）时整帧照样通过，而 nearest 会把 0.01 那个
+    选成最近的，清单顶上就全是 0.01。2026-09-20 实测就是这样漏过去的。
     """
     import numpy as np
 
     d = np.asarray(dists, dtype="float32")
-    ok = d > 0
+    ok = d >= NEAR_MIN
     big = np.where(ok, d, np.inf)
     slot = np.argmin(big, axis=1)
     best = big[np.arange(len(d)), slot]
@@ -286,13 +293,16 @@ def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
             vals.append(d[d > 0])
     if not vals or not len(np.concatenate(vals)):
         return f"{part}：一帧都没有（这个部位在索引里从来没被判成最近的）"
-    v = np.concatenate(vals)
+    raw = np.concatenate(vals)
+    n_bad = int((raw < NEAR_MIN).sum())
+    v = raw[raw >= NEAR_MIN]                    # 分位数也要排除退化帧，否则整条分布被往下拽
+    if not len(v):
+        return f"{part}：{len(raw):,} 帧里全是退化帧（距离 < {NEAR_MIN}），一个可用的都没有"
     qs = [5, 25, 50, 75, 95]
-    n_bad = int((v < NEAR_MIN).sum())
     lines = [f"{part}：{len(v):,} 帧鼻子最近的是它（距离单位 = 体长，脖子到尾根）", ""]
     if n_bad:
-        lines.append(f"  其中 {n_bad:,}（{n_bad / len(v) * 100:.1f}%）距离 < {NEAR_MIN}，"
-                     "是 RTMPose 把点全预测到同一处的退化帧，不是「贴得最紧」——已经滤掉")
+        lines.append(f"  另有 {n_bad:,} 帧距离 < {NEAR_MIN}，是两个关键点落在同一个像素上的"
+                     "退化帧，不是「贴得最紧」——已排除，下面的分布里没有它们")
         lines.append("")
     lines.append("  分位数  " + "  ".join(f"p{q}={np.percentile(v, q):.2f}" for q in qs))
     lines.append("")
