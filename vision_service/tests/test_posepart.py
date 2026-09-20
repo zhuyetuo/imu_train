@@ -273,3 +273,35 @@ def test_一只爪退化另一只正常_不能拿退化那个当最近():
     r2 = np.stack([_row([0.9, 0.9, 0.01, 0.02, 0.9, 0.9])])
     assert pp.nearest(pp.decode(r2)[0])[0][0] != 2
     assert list(pp.match(r2, "后爪", near_max=0.6)) == [False]
+
+
+def test_联系表_拼成一张图_单帧读不出来也不白拼(tmp_path, monkeypatch):
+    """阈值调到这一步再调没意义了，缺的是"准不准"这个事实——而那只能靠看画面。
+    一条条跳视频看十几条要花半小时，等于没法验。"""
+    import cv2
+
+    from vision_service import embed, posepart
+
+    calls = []
+
+    def fake_thumb(full, t, view=None, max_side=300, **kw):
+        calls.append((full, t, view))
+        if t == 99.0:
+            raise ValueError("这一帧读不到")
+        img = np.full((max_side, max_side, 3), 120, np.uint8)
+        return bytes(cv2.imencode(".jpg", img)[1].tobytes())
+    monkeypatch.setattr(embed, "frame_thumb", fake_thumb)
+    monkeypatch.setattr(posepart.config, "VIDEO_ROOT", "/nas")
+
+    hits = [{"path": "data_raw/d/a_cam1_imu1_raw.mp4", "t": float(i), "dist": 0.1 + i / 100,
+             "slot": "后左爪"} for i in range(3)]
+    hits.append({"path": "data_raw/d/b_cam2_imu2_raw.mp4", "t": 99.0, "dist": 0.2, "slot": "后右爪"})
+    out = str(tmp_path / "sheet.png")
+    msg = pp.contact_sheet(hits, out, cols=2, cell=120)
+
+    assert os.path.isfile(out) and "3/4 帧画出来了" in msg     # 坏的那帧不拖垮整张图
+    # 画的是骨架，而且路径是拼在 VIDEO_ROOT 下面的
+    assert all(v == "pose" for _f, _t, v in calls)
+    assert calls[0][0] == "/nas/data_raw/d/a_cam1_imu1_raw.mp4"
+    sheet = cv2.imread(out)
+    assert sheet.shape[1] > 120 and sheet.shape[0] > 120       # 2 列 2 行，比单格大

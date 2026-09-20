@@ -316,6 +316,53 @@ def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
     return "\n".join(lines)
 
 
+def contact_sheet(hits: list[dict], out_path: str, cols: int = 5, cell: int = 300,
+                  video_root: str | None = None) -> str:
+    """把候选帧拼成一张图，每格画着骨架 + 距离 + 判的是哪只爪。
+
+    为什么要它：阈值调到这一步，再调没意义了——**缺的是"准不准"这个事实**，
+    而那只能靠看画面。一条条跳到视频里去看，十几条就得花半小时，等于没法验。
+    拼成一张图之后，三十秒能判完十五条，还能一眼看出误报长什么样（趴着时鼻子
+    碰巧朝后？在啃玩具？左右判反了？）——这三种误报的解法完全不同。
+
+    骨架是现画的（frame_thumb view="pose"），会重新跑一次检测和姿态：跟建索引时
+    用的是同一套模型同一个参数，所以画出来的就是判断依据本身，不是另一份东西。
+    """
+    import cv2
+    import numpy as np
+
+    from . import embed
+
+    root = video_root or config.VIDEO_ROOT
+    rows = (len(hits) + cols - 1) // cols
+    pad, bar = 6, 34
+    sheet = np.full((rows * (cell + bar + pad) + pad, cols * (cell + pad) + pad, 3), 32, np.uint8)
+    n_ok = 0
+    for i, h in enumerate(hits):
+        r, c = divmod(i, cols)
+        y0 = pad + r * (cell + bar + pad)
+        x0 = pad + c * (cell + pad)
+        try:
+            jpg = embed.frame_thumb(os.path.join(root, h["path"]), h["t"], view="pose", max_side=cell)
+            img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+        except Exception:  # noqa: BLE001 某一帧读不出来别让整张图白拼
+            img = None
+        if img is None:
+            cv2.putText(sheet, "读不到", (x0 + 8, y0 + cell // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (80, 80, 200), 2)
+        else:
+            ih, iw = img.shape[:2]
+            sheet[y0:y0 + ih, x0:x0 + iw] = img
+            n_ok += 1
+        # 标注写在格子下面而不是压在画面上：压上去正好糊住狗
+        cv2.putText(sheet, f"#{i + 1} {h['slot']} {h['dist']:.2f}", (x0 + 2, y0 + cell + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 220, 255), 1)
+        cv2.putText(sheet, f"{os.path.basename(h['path'])[9:28]} {h['t']:.0f}s",
+                    (x0 + 2, y0 + cell + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 160, 175), 1)
+    cv2.imwrite(out_path, sheet)
+    return f"{out_path}（{n_ok}/{len(hits)} 帧画出来了）"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="靠姿态几何从已建索引里捞部位候选（不跑模型）")
     ap.add_argument("--part", required=True, help="部位名，比如 后爪 / 后右爪 / 尾根")
@@ -327,6 +374,9 @@ def main() -> None:
                     help="同一段视频里两条候选至少隔多少秒（一次连续的舔爪只出一条）")
     ap.add_argument("--limit", type=int, default=50, help="最多打印几条")
     ap.add_argument("--calib", action="store_true", help="先看距离分布，定阈值用")
+    ap.add_argument("--sheet", metavar="PNG",
+                    help="把前 --limit 条拼成一张带骨架的图，看准不准（这一步才是关键）")
+    ap.add_argument("--cols", type=int, default=5, help="联系表一行几格")
     args = ap.parse_args()
 
     key = part_of(args.part) or args.part
@@ -350,6 +400,14 @@ def main() -> None:
         print(f"  {h['dist']:.2f} 体长  {h['slot']:<4}  {h['t']:>8.1f}s  {os.path.basename(h['path'])}")
     if len(r["hits"]) > args.limit:
         print(f"  …… 还有 {len(r['hits']) - args.limit:,} 个")
+    if args.sheet:
+        print()
+        print("拼图中（要重新解码这几帧并跑一次检测+姿态，十几秒）……")
+        print("  " + contact_sheet(r["hits"][:args.limit], args.sheet, cols=args.cols))
+        print("  看三件事：① 真在舔/啃后爪，还是趴着时鼻子碰巧朝后 / 在啃玩具？"
+              "② 左右判对没有？③ 骨架本身画得对不对？")
+        print("  这三种错的解法完全不同：①要调阈值或加时间一致性，②是姿态模型左右不分，"
+              "③是检测/姿态在这种视角下不行。")
 
 
 if __name__ == "__main__":

@@ -321,7 +321,19 @@ python -m vision_service.pose_coverage --by-day --worst 20
 ```bash
 python -m vision_service.posepart --part 后爪 --calib   # 先看距离分布，定阈值
 python -m vision_service.posepart --part 后右爪          # 拉候选清单
+# 关键的一步：拼成一张带骨架的图，三十秒判完准不准
+python -m vision_service.posepart --part 后爪 --near-max 0.25 --limit 15 --sheet /tmp/hou.png
 ```
+
+**阈值调到某一步就别再调了，缺的是「准不准」这个事实**，而那只能靠看画面。一条条
+跳到视频里看十几条要花半小时，等于没法验，所以 `--sheet` 把它们拼成一张图。看三件事，
+因为这三种错的解法完全不同：
+
+| 看到什么 | 说明 | 怎么办 |
+|---|---|---|
+| 趴着时鼻子碰巧朝后 / 在啃玩具 | 阈值太松，或单帧几何不够 | 收紧 `--near-max`，或改成「连续 N 秒判成同一部位」 |
+| 动作对但左右判反 | 姿态模型左右不分（四爪全可见只有 58.1%） | 降级到「后爪」这一级，不给左右 |
+| 骨架本身就画错了 | 检测/姿态在这种视角下不行 | 看 `pose_coverage --worst`，那几路单独处理 |
 
 也接在「找相似」上：`/api/v1/embed/search` 传 `part=后爪`，只留鼻子够到后爪的帧。
 它是**几何硬条件不是相似度**——SigLIP 看的是整体长相，分不清左前爪和右前爪，
