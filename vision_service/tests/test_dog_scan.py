@@ -534,3 +534,26 @@ def test_同一只狗两类都框到_只留一个():
     out = dog.dedup_boxes([half, other, whole])
     assert out == [whole, other]
     assert dog.dedup_boxes([]) == []
+
+
+def test_模型没加载时报人话_不是NoneType没有predict(monkeypatch):
+    """原来 detect/detect_batch 的约定是"调用方保证模型已加载"，靠服务启动时 warmup
+    兜着。命令行工具不走 warmup，于是撞上 'NoneType' object has no attribute 'predict'
+    ——看不出是模型没加载，更看不出为什么。2026-09-20 实测踩到（posepart --sheet 全失败）。"""
+    import numpy as np
+    import pytest
+
+    from vision_service import dog as d
+
+    monkeypatch.setattr(d, "_model", None)
+    monkeypatch.setattr(d, "_load_error", "没装 ultralytics：No module named 'ultralytics'")
+    monkeypatch.setattr(d, "_load", lambda force=False: None)     # 加载不回来
+    f = np.zeros((16, 16, 3), dtype="uint8")
+    for call in (lambda: d.detect(f), lambda: d.detect_batch([f])):
+        with pytest.raises(RuntimeError, match="狗检测模型没加载"):
+            call()
+        try:
+            call()
+        except RuntimeError as e:
+            assert "ultralytics" in str(e) and d.config.DOG_WEIGHTS in str(e)   # 原因和权重路径都要有
+    assert d.detect_batch([]) == []                               # 空批次不该去碰模型
