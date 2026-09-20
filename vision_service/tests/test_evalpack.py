@@ -126,3 +126,67 @@ def test_算分给的结论按准确率分档(tmp_path, monkeypatch):
     assert "别充" in run(2)                       # 20%，跟瞎猜差不多
     assert "别指望免掉人" in run(5)                # 50%
     assert "算一笔账再定" in run(9)                # 90%
+
+
+def test_吃模型回复原文_按顺序对位_不信序号():
+    """手抄二十几个答案是整件事里最烦也最容易错的一步。模型偶尔会把序号写错或
+    跳号，而**顺序几乎不会乱**——所以按出现顺序对位，不信序号。"""
+    reply = '''好的，逐张判断如下：
+
+1. {"see": "clear", "desc": "侧卧", "contact": true, "part": "前左爪", "moving": true, "confidence": 0.8}
+2. {"see": "clear", "desc": "趴着", "contact": false, "part": null, "moving": false, "confidence": 0.7}
+3. {"see": "unclear", "desc": "太暗", "contact": false, "part": null, "moving": true, "confidence": 0.3}
+5. {"see": "clear", "desc": "蜷着", "contact": true, "part": "后右爪", "moving": true, "confidence": 0.9}
+
+以上。'''
+    parts, why = ep.parse_reply(reply, 4)
+    assert why == ""
+    # 第 4 条模型写的序号是 5，但它就是第 4 张——按顺序对位
+    assert parts == ["前左爪", "没贴到", "看不清", "后右爪"]
+
+    # contact=true 但 part 是 null：当没贴到，别把 None 当部位塞进去
+    p2, _ = ep.parse_reply('{"see":"clear","contact":true,"part":null}', 1)
+    assert p2 == ["没贴到"]
+    # 只给了 part 没给 contact：有部位就算贴到
+    p3, _ = ep.parse_reply('{"see":"clear","part":"尾根"}', 1)
+    assert p3 == ["尾根"]
+    # 回复里夹着别的 JSON（比如它先解释了一下格式）：不认的跳过
+    p4, _ = ep.parse_reply('先说格式：{"字段":"说明"}\n{"see":"clear","contact":true,"part":"前爪"}', 1)
+    assert p4 == ["前爪"]
+
+
+def test_条数对不上就不填_别硬凑():
+    """凑出来的对位是错的，比没有还糟——从第一条错位开始，后面全错。"""
+    parts, why = ep.parse_reply('{"see":"clear","contact":true,"part":"前左爪"}', 5)
+    assert parts and "解析出 1 条" in why and "5 张图" in why
+    assert "没往里填" in why and "别硬凑" in why
+    assert "单独问一次" in why                      # 给出补救办法
+
+
+def test_填进答题卡_再填别家不会覆盖上一家(tmp_path, monkeypatch):
+    import csv as _csv
+
+    out, _ = _pack(tmp_path, monkeypatch, n=2, n_ctl=1)
+    reply = "\n".join('{"see":"clear","contact":true,"part":"%s"}' % p
+                      for p in ("前左爪", "后右爪", "尾根"))
+    f1 = tmp_path / "a.txt"
+    f1.write_text(reply, encoding="utf-8")
+    msg = ep.fill(out, "豆包1.6", str(f1))
+    assert "填好了 3 条" in msg and "豆包1.6" in msg
+    assert "人工那一列还得人自己填" in msg          # 标尺不能让机器填
+
+    rows = _read(out, "答题卡.csv")
+    assert list(rows[0]) == ["图", "人工填这一列", "豆包1.6"]   # 占位的模型A/B/C 去掉了
+    assert [r["豆包1.6"] for r in rows] == ["前左爪", "后右爪", "尾根"]
+
+    # 再填一家：上一家那一列要留着
+    f2 = tmp_path / "b.txt"
+    f2.write_text('{"see":"unclear"}\n{"see":"clear","contact":false}\n'
+                  '{"see":"clear","contact":true,"part":"前右爪"}', encoding="utf-8")
+    ep.fill(out, "GPT-5", str(f2))
+    rows = _read(out, "答题卡.csv")
+    assert list(rows[0]) == ["图", "人工填这一列", "豆包1.6", "GPT-5"]
+    assert [r["GPT-5"] for r in rows] == ["看不清", "没贴到", "前右爪"]
+    assert rows[0]["豆包1.6"] == "前左爪"
+
+    assert "读不到" in ep.fill(out, "x", str(tmp_path / "没有这个文件"))
