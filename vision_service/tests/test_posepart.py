@@ -378,3 +378,38 @@ def test_时间一致性_接进find(tmp_path):
     r = pp.find(d, "后爪", near_max=0.6, min_gap_s=0, min_run=4)
     assert r["raw_hits"] == 5 and r["min_run"] == 4               # 孤立那一帧没了
     assert min(h["t"] for h in r["hits"]) == 4.0
+
+
+def test_动作量_不动的狗不可能在舔():
+    """整条链上一直缺的那个条件。--near-max 挑"鼻子离后爪近"、--min-run 挑"几何稳定"，
+    两条叠起来正好是"蜷着睡觉的狗"的定义——2026-09-20 实测捞出来的 448 条几乎全是这个，
+    大模型如实答「1-6 帧姿势无明显变化」，它没错，是候选本身就没有舔。"""
+    ts = np.array([0, 1, 2, 3, 300, 301], dtype="float32")
+    e = np.zeros((6, 4), dtype="float32")
+    e[0] = [1, 0, 0, 0]
+    e[1] = [1, 0, 0, 0]          # 没动
+    e[2] = [0, 1, 0, 0]          # 动了（跟上一帧正交，距离 sqrt(2)/2≈0.71）
+    e[3] = [0, 1, 0, 0]
+    e[4] = [0, 0, 1, 0]          # 跟上一帧隔了 297 秒，断档
+    e[5] = [0, 0, 1, 0]
+    m = pp.motion_of(e, ts)
+    assert m[0] == 0.0                                    # 第一帧没有前一帧
+    assert m[1] == 0.0 and m[3] == 0.0                    # 没动
+    assert 0.6 < m[2] < 0.8                               # 动了
+    assert m[4] == 0.0                                    # 断档记 0（不知道，不是没动）
+    assert pp.motion_of(np.zeros((1, 4)), np.zeros(1)).tolist() == [0.0]
+
+
+def test_动作量接进find_不动的筛掉(tmp_path):
+    d = str(tmp_path)
+    rows = [_row([0.9, 0.9, 0.15, 0.9, 0.9, 0.9])] * 4        # 四帧都"鼻子够到后爪"
+    e = np.array([[1, 0], [1, 0], [0, 1], [0, 1]], dtype="float32")  # 只有第 3 帧动了
+    meta = {"path": "data_raw/d/a_cam1_imu1_raw.mp4", "sampled": 4, "with_dog": 4, "pose": True}
+    np.savez(os.path.join(d, "a.npz"), t=np.arange(4, dtype="float32"),
+             pose=np.asarray(rows, dtype="float16"), emb=e.astype("float16"),
+             meta=np.array(json.dumps(meta, ensure_ascii=False)))
+
+    assert pp.find(d, "后爪", near_max=0.6, min_gap_s=0)["raw_hits"] == 4      # 不卡动作：全进
+    r = pp.find(d, "后爪", near_max=0.6, min_gap_s=0, min_motion=0.5)
+    assert r["raw_hits"] == 1 and r["hits"][0]["t"] == 2.0                     # 只剩动了的那帧
+    assert r["hits"][0]["motion"] > 0.5 and r["min_motion"] == 0.5

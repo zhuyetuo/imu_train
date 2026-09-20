@@ -211,8 +211,40 @@ def stable(mask, ts, min_run: int, max_gap_s: float = 2.5):
     return out
 
 
+def motion_of(emb, ts, max_gap_s: float = 2.5):
+    """每帧相对前一帧的动作量 (N,)：索引里画面向量的相邻帧距离，0~1。
+
+    **这是整条链上一直缺的那个条件。** 2026-09-20 实测暴露出来的：
+
+      --near-max 0.25   鼻子离后爪近   → 睡觉蜷成一团时最满足
+      --min-run 5       几何稳定 5 秒  → **专门在挑不动的狗**
+      按距离升序排                    → 蜷得最紧的排最前
+
+    三条叠起来，等于在精确筛选"蜷着睡觉的狗"。把候选送去问大模型，模型如实答
+    「狗仰卧，1-6 帧姿势无明显变化」——它没错，是候选本身就没有舔。
+
+    尤其是 min_run：我加它是为了滤掉随机误检，但它**同时系统性地滤掉了真正在舔的狗**
+    （舔的时候头在动，几何不稳定，正好被这条规则杀掉）。
+
+    动作量用画面向量而不是像素帧差：向量是抠过狗、归一化过的，跟光照和背景无关；
+    跟 seek 走索引那条路用的是同一个量（SEEK_INDEX_MOTION_MIN，狗趴着不动约 0.02，
+    舔/抓/走 0.1 以上）。时间上断开的记 0（不知道，不是没动）。
+    """
+    import numpy as np
+
+    e = np.asarray(emb, dtype="float32")
+    t = np.asarray(ts, dtype="float32")
+    out = np.zeros(len(e), dtype="float32")
+    if len(e) < 2:
+        return out
+    d = np.linalg.norm(e[1:] - e[:-1], axis=1) / 2.0
+    ok = (t[1:] - t[:-1]) <= max_gap_s
+    out[1:] = np.where(ok, d, 0.0)
+    return out
+
+
 def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool,
-              min_run: int = 1):
+              min_run: int = 1, min_motion: float = 0.0):
     """一份索引 → (rel_path, 命中的时间点 list, 该路有狗帧数, 该路可判部位帧数)。"""
     import json
 
@@ -224,15 +256,22 @@ def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool,
                 return None
             meta = json.loads(str(z["meta"]))
             rows, ts = z["pose"], z["t"]
+            # 只有要卡动作量时才读 emb：它是索引里最大的一块（3600×768），
+            # 不需要的时候读它会让整份扫描慢好几倍
+            emb = z["emb"] if (min_motion > 0 and "emb" in z.files) else None
     except Exception:  # noqa: BLE001 单个文件坏了不该让整份扫描跑不出来
         return None
     if rows.size == 0 or len(rows) != len(ts):
         return None
     dists, _vis = decode(rows)
     slot, best = nearest(dists)
+    mot = motion_of(emb, ts) if emb is not None and len(emb) == len(ts) else None
     m = match(rows, part, near_max, require_nearest)
     m = stable(m, ts, min_run)
+    if mot is not None:
+        m = m & (mot >= min_motion)          # 不动的狗不可能在舔，不管鼻子离爪子多近
     hits = [{"t": round(float(ts[i]), 2), "dist": round(float(best[i]), 3),
+             "motion": round(float(mot[i]), 3) if mot is not None else None,
              "slot": SLOT_NAMES[int(slot[i])] if slot[i] >= 0 else "?"}
             for i in np.flatnonzero(m)]
     return str(meta.get("path") or ""), hits, int(len(rows)), int((slot >= 0).sum())
@@ -271,7 +310,7 @@ def thin(hits: list[dict], min_gap_s: float) -> list[dict]:
 
 def find(index_dir: str, part: str, near_max: float | None = None,
          require_nearest: bool = True, max_per_video: int = 20,
-         min_gap_s: float = 60.0, min_run: int = 1) -> dict:
+         min_gap_s: float = 60.0, min_run: int = 1, min_motion: float = 0.0) -> dict:
     """整份索引里所有"鼻子够到这个部位"的帧。不跑任何模型，几十秒扫完。
 
     两道抽稀，为的都是"清单里每一条是一个新场景"：min_gap_s 把一次连续的舔爪
@@ -285,7 +324,8 @@ def find(index_dir: str, part: str, near_max: float | None = None,
     for name in files:
         if not name.endswith(".npz"):
             continue
-        r = _scan_one(os.path.join(index_dir, name), part, thr, require_nearest, min_run)
+        r = _scan_one(os.path.join(index_dir, name), part, thr, require_nearest, min_run,
+                      min_motion)
         if r is None:
             continue
         path, hits, rows, part_ok = r
@@ -297,8 +337,8 @@ def find(index_dir: str, part: str, near_max: float | None = None,
     out = thin(out, min_gap_s)                 # 跨文件再去一次：imu11/imu12 是同一段视频
     out.sort(key=lambda h: h["dist"])
     return {"part": part, "known": slots is not None, "near_max": thr, "min_gap_s": min_gap_s,
-            "min_run": min_run, "hits": out, "raw_hits": n_raw, "with_dog": n_dog,
-            "part_ok": n_part, "videos": len(files)}
+            "min_run": min_run, "min_motion": min_motion, "hits": out, "raw_hits": n_raw,
+            "with_dog": n_dog, "part_ok": n_part, "videos": len(files)}
 
 
 def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
@@ -428,8 +468,13 @@ def main() -> None:
     ap.add_argument("--min-gap", type=float, default=60.0,
                     help="同一段视频里两条候选至少隔多少秒（一次连续的舔爪只出一条）")
     ap.add_argument("--min-run", type=int, default=1,
-                    help="要连着几秒都判成这个部位才算。用来滤掉随机误检——"
-                         "真在舔会连着十几秒，骨架画错则每秒跳一个地方")
+                    help="要连着几秒都判成这个部位才算。滤随机误检用，但**它同时会滤掉真在舔的狗**"
+                         "（舔的时候头在动、几何不稳），2026-09-20 实测设成 5 之后捞出来的"
+                         "全是蜷着睡觉的狗。想用就配着 --min-motion 一起用")
+    ap.add_argument("--min-motion", type=float, default=0.0, metavar="X",
+                    help=f"动作量下限（画面向量相邻帧距离）。狗趴着不动约 0.02，舔/抓/走 0.1 以上。"
+                         f"**不动的狗不可能在舔**——这是整条链上一直缺的那个条件。"
+                         f"建议 {config.SEEK_INDEX_MOTION_MIN}")
     ap.add_argument("--limit", type=int, default=50, help="最多打印几条")
     ap.add_argument("--calib", action="store_true", help="先看距离分布，定阈值用")
     ap.add_argument("--sheet", metavar="PNG",
@@ -442,14 +487,16 @@ def main() -> None:
         print(calib(args.index_dir, key))
         return
     r = find(args.index_dir, key, args.near_max, not args.any, args.per_video, args.min_gap,
-             args.min_run)
+             args.min_run, args.min_motion)
     if not r["known"]:
         print(f"不认识的部位：{args.part} → {key}（认得的：{'、'.join(PARTS)}）")
         return
     print(f"{args.part} → {key}：{r['videos']} 路索引，有狗 {r['with_dog']:,} 帧，"
           f"其中 {r['part_ok']:,} 帧判得出部位，{r['raw_hits']:,} 帧鼻子够到了它"
           f"（近到 {r['near_max']} 体长以内，骨架塌掉的已滤"
-          + (f"，且要连着 {r['min_run']} 秒都判成它" if r["min_run"] > 1 else "") + "）")
+          + (f"，且要连着 {r['min_run']} 秒都判成它" if r["min_run"] > 1 else "")
+          + (f"，动作量 ≥{r['min_motion']}" if r["min_motion"] > 0 else "，**没卡动作量——"
+             "不动的狗也会进来**") + "）")
     print(f"  抽稀后 {len(r['hits']):,} 个候选：同一段视频里相隔不足 {r['min_gap_s']:.0f} 秒的"
           f"算同一次，每路最多 {args.per_video} 条——所以**每一条都是一个新场景**")
     if not r["hits"]:
@@ -457,7 +504,8 @@ def main() -> None:
         return
     print()
     for h in r["hits"][:args.limit]:
-        print(f"  {h['dist']:.2f} 体长  {h['slot']:<4}  {h['t']:>8.1f}s  {os.path.basename(h['path'])}")
+        m = f"  动{h['motion']:.2f}" if h.get("motion") is not None else ""
+        print(f"  {h['dist']:.2f} 体长{m}  {h['slot']:<4}  {h['t']:>8.1f}s  {os.path.basename(h['path'])}")
     if len(r["hits"]) > args.limit:
         print(f"  …… 还有 {len(r['hits']) - args.limit:,} 个")
     if args.sheet:
