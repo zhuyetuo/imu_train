@@ -197,10 +197,70 @@ def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float 
     yield from iter_frames_cv2(path, every_sec, start_s, end_s)
 
 
+def prefetch(it, size: int = 0):
+    """把一个帧迭代器丢到后台线程里跑，边解码边让主线程算。
+
+    为什么有它：解码是 CPU（ffmpeg）、检测/姿态/分割/向量是 GPU，原来串在一个
+    循环里——GPU 算的时候 ffmpeg 停着，ffmpeg 解的时候 GPU 停着，一路视频白等掉
+    其中一半。队列只放 size 帧，解码跑太前面就自己停住，不会把内存吃光。
+
+    size <= 1 直接返回原迭代器（测试和排查时好对比）。
+    """
+    import queue
+    import threading
+
+    size = size or config.DECODE_PREFETCH
+    if size <= 1:
+        return it
+
+    q: "queue.Queue" = queue.Queue(maxsize=size)
+    done = object()
+    stop = threading.Event()
+    err: list[BaseException] = []
+
+    def work():
+        try:
+            for item in it:
+                if stop.is_set():
+                    break
+                q.put(item)
+        except BaseException as e:  # noqa: BLE001 解码出错要带回主线程抛，不能吞在子线程里
+            err.append(e)
+        finally:
+            it.close() if hasattr(it, "close") else None
+            q.put(done)
+
+    th = threading.Thread(target=work, name="decode-prefetch", daemon=True)
+    th.start()
+
+    def gen():
+        try:
+            while True:
+                item = q.get()
+                if item is done:
+                    break
+                yield item
+        finally:
+            # 提前 break（max_samples 到了 / 上游抛了）时，解码线程可能正卡在 q.put 上：
+            # 先把队列抽干让它动起来，它才会看到 stop 并收掉 ffmpeg
+            stop.set()
+            while th.is_alive() or not q.empty():
+                try:
+                    if q.get(timeout=0.05) is done:
+                        break
+                except queue.Empty:
+                    continue
+        if err:
+            raise err[0]
+
+    return gen()
+
+
 def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                  start_s: float = 0.0, end_s: float | None = None,
                  max_side: int = 512, jpeg_quality: int = 80, max_samples: int = 20000,
-                 batch: int | None = None, on_frame=None, on_batch=None) -> list[dict]:
+                 batch: int | None = None, on_frame=None, on_batch=None,
+                 stats_out: dict | None = None) -> list[dict]:
     """过一遍视频，每 every_sec 取一帧：跑狗检测（一批批送 GPU），有狗就裁出来存成 JPEG。
 
     返回 [{t, boxes, jpeg(bytes|None), motion(float|None)}]。motion 是跟上一个
@@ -218,8 +278,7 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     prev_small = None
     # 静止跳检：整帧缩小后跟上一次真送检测的那帧比，没变就沿用它的框。
     # 狗睡着、空房间时省掉大半检测；一动就照常送
-    last_key = None           # 上一次真送检测的小图
-    last_boxes: list[dict] = []
+    last_boxes: list[dict] = []          # 上一次真送检测的那帧的框，静止帧沿用它
     skip_thr = config.STATIC_SKIP_THR
     stats = {"detected": 0, "skipped": 0}
 
@@ -236,10 +295,6 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             if y2 > y1 and x2 > x1:
                 region = cv2.resize(g[y1:y2, x1:x2], (64, 64))
         return whole, region
-
-    def _pending_boxes_hint(boxes):
-        # 参照帧还没送检测时不知道它的框，用上一次检测的框当区域；没有就整帧比
-        return boxes
 
     def unchanged(key_now, key_last) -> bool:
         if motion_score(key_last[0], key_now[0]) >= skip_thr:
@@ -281,32 +336,40 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
 
     hook_buf: list[tuple[dict, object]] = []
 
-    def flush(pending: list[tuple[float, object]]) -> None:
-        nonlocal last_key, last_boxes
-        boxes_all = dog.detect_batch([f for _t, f in pending], conf)
-        stats["detected"] += len(pending)
-        for (t, frame), boxes in zip(pending, boxes_all):
-            last_key, last_boxes = frame_key(frame, boxes), boxes
-            finish(t, frame, boxes)
+    def flush(pending: list[tuple[float, object, bool]]) -> None:
+        """一批帧：要检测的一起送 GPU，静止的沿用它前面那个检测帧的框。
 
-    pending: list[tuple[float, object]] = []
-    # 参照帧 = 最近一个"决定要送检测"的帧（可能还在 pending 里没送）。跟它比没变就沿用它的框；
-    # 它还没送的话先把这批送掉（批偶尔小一点，换来静止时段几乎不送检测）
-    ref_key = None
-    for t, frame in iter_frames(path, every_sec, start_s, end_s):
-        if skip_thr > 0 and ref_key is not None:
-            k = frame_key(frame, last_boxes if not pending else _pending_boxes_hint(last_boxes))
-            if unchanged(k, ref_key):
-                if pending:
-                    flush(pending)
-                    pending = []
-                stats["skipped"] += 1
+        静止帧也排在这个队列里（而不是当场处理掉）：排队时它的框还不知道——它要沿用的
+        那一帧可能就在同一批里还没送检测。原来的做法是遇到静止帧就把当前批先送掉，
+        狗一会儿动一会儿停的时候，批长期只有一两帧，等于白攒。这里按顺序回填，
+        批始终是满的，送检的帧数一帧不多。
+        """
+        nonlocal last_boxes
+        todo = [f for _t, f, st in pending if not st]
+        boxes_all = iter(dog.detect_batch(todo, conf) if todo else [])
+        stats["detected"] += len(todo)
+        for t, frame, st in pending:
+            if st:
                 finish(t, frame, list(last_boxes), static=True)      # 画面没变，框也没变
-                continue
-            ref_key = k
-        else:
-            ref_key = frame_key(frame, last_boxes)
-        pending.append((t, frame))
+            else:
+                last_boxes = next(boxes_all)
+                finish(t, frame, last_boxes)
+
+    pending: list[tuple[float, object, bool]] = []
+    # 参照帧 = 最近一个"决定要送检测"的帧。跟它比没变就沿用它的框
+    ref_key = None
+    for t, frame in prefetch(iter_frames(path, every_sec, start_s, end_s)):
+        static = False
+        if skip_thr > 0:
+            # 区域比对用 last_boxes 当位置提示：一批之内它是冻住的，参照帧和当前帧裁的是
+            # 同一块，比出来的差才是真的画面变化
+            k = frame_key(frame, last_boxes)
+            if ref_key is not None and unchanged(k, ref_key):
+                static = True
+                stats["skipped"] += 1
+            else:
+                ref_key = k
+        pending.append((t, frame, static))
         if len(pending) >= batch:
             flush(pending)
             pending = []
@@ -318,6 +381,8 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
         on_batch(list(hook_buf))
         hook_buf.clear()
     _logger.info("采样 %s：%d 帧，送检 %d，静止跳过 %d", os.path.basename(path), len(out), stats["detected"], stats["skipped"])
+    if stats_out is not None:
+        stats_out.update(stats)
     return out
 
 

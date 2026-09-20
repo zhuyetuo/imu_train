@@ -338,6 +338,8 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     use_pose = pose.available()
 
     last = {"pose": None, "jpeg": None}     # 上一个真算过的帧：静止的帧直接沿用它的姿态 / 抠图
+    # 各步各花了多少秒。慢的时候不用猜是解码还是哪个模型：日志和索引 meta 里都记着
+    spent = {"pose": 0.0, "seg": 0.0, "embed": 0.0}
 
     def on_frame(rec: dict, frame) -> None:
         if not use_pose:
@@ -345,7 +347,9 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         elif rec.get("static") and last["pose"] is not None:
             rec["pose"] = last["pose"]
         else:
+            t_ = time.monotonic()
             rec["pose"] = pose.frame_descriptor(frame, rec["boxes"])
+            spent["pose"] += time.monotonic() - t_
             last["pose"] = rec["pose"]
 
     n_masked = 0
@@ -357,6 +361,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         nonlocal n_masked, n_static
         import cv2
 
+        t_seg = time.monotonic()
         # 静止的帧要沿用的是"前一帧"的图，前一帧可能就在这一批里——先算要算的，再按顺序补
         todo = [(rec, frame) for rec, frame in items if not rec.get("static")]
         if last["jpeg"] is None and items and items[0][0].get("static"):
@@ -377,9 +382,14 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
             elif last["jpeg"] is not None:
                 rec["jpeg"] = last["jpeg"]
                 n_static += 1
+        spent["seg"] += time.monotonic() - t_seg
 
+    scan_stats: dict = {}
+    t_scan = time.monotonic()
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
-                                on_batch=on_batch if use_mask else None)
+                                on_batch=on_batch if use_mask else None, stats_out=scan_stats)
+    # 过一遍视频的总时间里刨掉姿态和抠狗，剩下的是解码 + 狗检测 + 裁图
+    spent["scan"] = round(time.monotonic() - t_scan - spent["pose"] - spent["seg"], 1)
     with_dog = [s for s in samples if s["jpeg"] is not None]
     if with_dog:
         # 同一张图（静止沿用的）只算一次向量
@@ -389,7 +399,9 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
             if s_["jpeg"] not in uniq:
                 uniq[s_["jpeg"]] = len(order)
                 order.append(s_["jpeg"])
+        t_ = time.monotonic()
         emb_u = enc.encode_images(order)
+        spent["embed"] = round(time.monotonic() - t_, 1)
         emb = emb_u[[uniq[s_["jpeg"]] for s_ in with_dog]]
     else:
         emb = np.zeros((0, 1), dtype="float32")
@@ -403,7 +415,9 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
             "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked,
-            "static_reused": n_static}
+            "static_reused": n_static,
+            "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
+            "spent": {k: round(v, 1) for k, v in spent.items()}}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
@@ -413,7 +427,9 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
-            "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static}
+            "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static,
+            "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
+            "spent": {k: round(v, 1) for k, v in spent.items()}}
 
 
 # ── 查询向量 ──────────────────────────────────────────────────────────

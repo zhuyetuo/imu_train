@@ -133,6 +133,10 @@ VLLM_CONTAINER  = _env("VLLM_CONTAINER", "imu_vllm")
 # 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2
 DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
 DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
+# 解码放后台线程，预读这么多帧。解码是 CPU、检测/姿态/分割/向量是 GPU，串在一个循环里
+# 两边轮流干等；预读之后 ffmpeg 一直在解。队列满了它自己停，不会把内存吃光
+# （720p 一帧 2.7MB，16 帧约 43MB，三路并建约 130MB）。设 0/1 = 关掉，退回原来的串行
+DECODE_PREFETCH = int(_env("DECODE_PREFETCH", "16"))
 # 狗检测一批送几帧（GPU 上一批 16~32 比一张张送快好几倍；显存紧就调小）
 DETECT_BATCH    = int(_env("DETECT_BATCH", "32"))
 # 半精度推理（GPU 上快近一倍，框差别在小数点后）

@@ -478,3 +478,40 @@ def test_画骨架_只画过阈值的点():
     sc = np.zeros(17); sc[2] = 0.9
     embed.draw_pose(img, kps, sc, offset=(0, 0))
     assert img[50, 50].any() and not img[10, 10].any()
+
+
+def test_建索引记下每一步花了多少秒(monkeypatch, tmp_path):
+    """慢的时候要能一眼看出是解码/检测慢，还是姿态、抠狗、算向量慢——
+    不然只能去算法机翻日志猜。"""
+    import numpy as np
+
+    from vision_service import embed, pose, seek, segmask
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    monkeypatch.setattr(embed.config, "EMBED_MASK_BG", False)
+    monkeypatch.setattr(segmask, "available", lambda: False)
+    monkeypatch.setattr(pose, "available", lambda: True)
+    monkeypatch.setattr(pose, "frame_descriptor", lambda f, b: [0.1] * pose.DIM)
+
+    frame = np.zeros((16, 16, 3), dtype="uint8")
+
+    def fake_sample(path, every_sec=1.0, conf=0.35, on_frame=None, on_batch=None, stats_out=None, **kw):
+        recs = []
+        for i in range(3):
+            rec = {"t": float(i), "boxes": [{"bbox": [0, 0, 1, 1], "conf": 0.9}],
+                   "jpeg": b"j%d" % i, "motion": None, "static": False}
+            on_frame(rec, frame)
+            recs.append(rec)
+        if stats_out is not None:
+            stats_out.update({"detected": 3, "skipped": 1})
+        return recs
+    monkeypatch.setattr(seek, "sample_video", fake_sample)
+
+    class Enc:
+        def encode_images(self, imgs):
+            return np.ones((len(imgs), 4), dtype="float32")
+    r = embed.build("a/b.mp4", "/x/b.mp4", encoder=Enc())
+    assert set(r["spent"]) == {"pose", "seg", "embed", "scan"}
+    assert r["detected"] == 3 and r["skipped"] == 1
+    # 存进索引 meta，事后翻旧索引也能看
+    assert embed.load("a/b.mp4")["meta"]["spent"]["pose"] >= 0
