@@ -205,7 +205,7 @@ def control_hits(index_dir: str, part: str, n: int, seed: int = 0) -> list[dict]
 
 def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
             n_frames: int, span_s: float, video_root: str, step_s: float = 0.3,
-            client=None, http=None) -> dict:
+            client=None, http=None, debug: bool = False) -> dict:
     """一条候选 → 问一次。返回候选本身 + 模型的回答；拿不到帧就 skipped。"""
     full = os.path.join(video_root, hit["path"])
     if not os.path.isfile(full):
@@ -215,7 +215,8 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
     if not frames:
         return {**hit, "skipped": why or "取不到帧"}
     # 告诉模型这几帧一共跨多久：1.5 秒和 6 秒，"有没有反复"的判断标准完全不同
-    a = seek.ask(frames, labels, step_s * (len(frames) - 1), llm, client=client, http=http)
+    a = seek.ask(frames, labels, step_s * (len(frames) - 1), llm, client=client, http=http,
+                 debug=debug)
     return {**hit, "n_frames": len(frames), **{k: v for k, v in a.items() if k != "usage"},
             "usage": a.get("usage") or {}}
 
@@ -248,6 +249,35 @@ def agreement(rounds: list[list[dict]]) -> str:
                      "不是提示词不够好，是模型没在看画面；换模型或换问法（比如只问"
                      "「几帧之间狗的头有没有反复动」这种单一可判的事）再说。")
     return "\n".join(lines)
+
+
+def dump_debug(results: list[dict], out_dir: str, limit: int = 8) -> str:
+    """把真正发出去的那张拼图、完整提示词、模型原始回答存下来。
+
+    2026-09-20 为「一条都判不出来」改了五轮提示词和采样参数，**从来没看过一眼
+    真正发出去的图**。狗在 720p 俯拍里只占 100x50 像素，裁进 384px 的格子再六格
+    拼一张，舌头可能只剩几个像素——那样改什么提示词、换什么模型都没用。
+
+    同一个毛病之前在部位检索上犯过一次（调了四轮参数才去看画面）。先看输入。
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    n = 0
+    for i, r in enumerate(results[:limit]):
+        tile = r.get("_tile")
+        if not tile:
+            continue
+        base = os.path.join(out_dir, f"{i:02d}_{'ctl' if r.get('control') else 'hit'}")
+        with open(base + ".jpg", "wb") as f:
+            f.write(tile)
+        with open(base + ".txt", "w", encoding="utf-8") as f:
+            f.write(f"{r.get('path')}  t={r.get('t')}s  几何判：{r.get('slot')} {r.get('dist')} 体长\n")
+            f.write(f"发了 {r.get('n_frames')} 帧，拼图 {len(tile) / 1024:.0f}KB\n")
+            f.write(f"\n===== system =====\n{r.get('_system')}\n")
+            f.write(f"\n===== user =====\n{r.get('_user')}\n")
+            f.write(f"\n===== 模型原始回答 =====\n{r.get('_raw')}\n")
+        n += 1
+    return (f"存了 {n} 组到 {out_dir}/（*.jpg 是真正发出去的图，*.txt 是提示词和原始回答）"
+            "\n  **先看图**：狗在图上有多大？舌头看得见吗？看不见的话改提示词/换模型都没用")
 
 
 def summarize(results: list[dict], llm=None) -> str:
@@ -425,6 +455,9 @@ def main() -> None:
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
     ap.add_argument("--sheet", metavar="PNG", help="把命中的拼成一张带骨架的图")
     ap.add_argument("--dry-run", action="store_true", help="只报会问多少条、大概多少钱，不调 API")
+    ap.add_argument("--dump", metavar="DIR",
+                    help="把**真正发出去的那张拼图**、完整提示词、模型原始回答存下来。"
+                         "模型答得不对时第一件事是看这个，不是改提示词")
     ap.add_argument("--repeat", type=int, default=1, metavar="N",
                     help="每条问 N 次，报自洽率。同一批候选两次跑出 7 条和 3 条命中、"
                          "只有 2 条重合的话，再调提示词也没用——模型根本没在看画面")
@@ -503,7 +536,7 @@ def main() -> None:
     def one(h):
         try:
             return ask_one(h, key, labels, llm, n_frames=args.frames, span_s=args.span,
-                           step_s=args.step, video_root=config.VIDEO_ROOT)
+                           step_s=args.step, video_root=config.VIDEO_ROOT, debug=bool(args.dump))
         except Exception as e:  # noqa: BLE001 一条问失败不该让整批白跑，但原因要留着
             return {**h, "skipped": f"{type(e).__name__}: {str(e)[:120]}"}
 
@@ -516,6 +549,8 @@ def main() -> None:
     if len(rounds) > 1:
         print(agreement(rounds))
 
+    if args.dump:
+        print("  " + dump_debug(results, args.dump))
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             for x in results:
