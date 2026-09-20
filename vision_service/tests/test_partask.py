@@ -244,3 +244,59 @@ def test_老索引的空框_当场重跑检测而不是裁出空图(tmp_path, mo
     calls.clear()
     frames, why = partask.frames_around("/nas/a.mp4", rel, 10.5, n=2, span_s=3.0)
     assert len(frames) == 2 and not calls
+
+
+def _row2(dists):
+    """跟 _row 一样，但显式收 6 个距离——对照组要造"离所有爪子都很远"的行。"""
+    v = np.zeros(DIM, dtype="float32")
+    xy = np.stack([np.linspace(-0.4, 0.4, K), np.linspace(0.4, -0.4, K)], axis=1).astype("float32")
+    for k in (NOSE, *PAWS):
+        v[k * 2:k * 2 + 2] = xy[k]
+        v[DIM - K + k] = 1.0
+    v[posepart.D0: posepart.D0 + posepart.N_DIST] = dists
+    return v / np.linalg.norm(v)
+
+
+def _idx2(d, name, path, rows, ts):
+    meta = {"path": path, "sampled": len(rows), "with_dog": len(rows), "pose": True}
+    np.savez(os.path.join(d, name), t=np.asarray(ts, dtype="float32"),
+             pose=np.asarray(rows, dtype="float16"),
+             meta=np.array(json.dumps(meta, ensure_ascii=False)))
+
+
+def test_对照组_几何判定离爪子很远的帧(tmp_path, monkeypatch):
+    """我们告诉模型"这是舔/啃候选、部位在后爪里选"，而几何筛出来的本来就全是
+    "头靠近后爪"的画面——一个无脑总说「舔-后爪」的模型也能拿到很高的命中率。
+    对照组问同一个问题，只是鼻子离爪子很远。"""
+    d = str(tmp_path)
+    near = [_row2([0.9, 0.9, 0.15, 0.9, 0.9, 0.9])] * 3          # 够到后爪
+    far = [_row2([2.0, 2.1, 2.2, 2.3, 2.0, 2.0])] * 3            # 离所有爪子都 >1.5 体长
+    _idx2(d, "a.npz", "data_raw/d/a_cam1_imu1_raw.mp4", near + far, range(6))
+    ctl = partask.control_hits(d, "后爪", 10)
+    assert len(ctl) and all(c["control"] and c["dist"] > 1.5 for c in ctl)
+    assert all(c["t"] >= 3 for c in ctl)                          # 只挑远的那三帧
+    assert len(partask.control_hits(d, "后爪", 1)) == 1            # 要几条给几条
+
+
+def test_对照组也高时_要明说正式组那个数是假的():
+    """对照组跟正式组差不多 = 模型在顺着提示词猜。这时候命中率不是"精度低"，
+    是"这个数没有意义"——两者的下一步完全不同。"""
+    def mk(label, control=False):
+        return {"path": "a.mp4", "t": 1, "see": "clear", "label": label, "body_part": "后左爪",
+                "confidence": 0.8, "desc": "d", "note": "n", "control": control,
+                "usage": {"input": 1, "output": 1}}
+
+    # 正式 4/10 命中，对照 3/10 命中 → 假的
+    bad = [mk("舔") for _ in range(4)] + [mk(None) for _ in range(6)] \
+        + [mk("舔", True) for _ in range(3)] + [mk(None, True) for _ in range(7)]
+    txt = partask.summarize(bad)
+    assert "命中   4（40%）" in txt                                # 对照组不进正式组的分母
+    assert "对照组 10 条" in txt and "命中 3（30%）" in txt
+    assert "是假的" in txt and "顺着提示词猜" in txt
+    assert "对照组误报：d；n" in txt                                # 误报长什么样要打出来
+
+    # 正式 7/20、对照 0/10 → 可信
+    good = [mk("舔") for _ in range(7)] + [mk(None) for _ in range(13)] \
+        + [mk(None, True) for _ in range(10)]
+    txt2 = partask.summarize(good)
+    assert "✓ 对照组明显低于正式组（0% vs 35%）" in txt2 and "可信" in txt2
