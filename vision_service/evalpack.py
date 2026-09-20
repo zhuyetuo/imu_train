@@ -141,7 +141,21 @@ _HOWTO = """# 怎么试
 
 在表头把列名改成真实模型名（比如 `豆包1.6`、`GPT-5`、`Claude`），算分时会原样打出来。
 
-## 第三步：算分
+## 第三步：把答案填进去（不用手抄）
+
+把模型那一整段回复**原样**存成一个文本文件（比如 `答案_豆包.txt`），然后：
+
+```bash
+python -m vision_service.evalpack --fill <这个目录> --model 豆包1.6 --from 答案_豆包.txt
+```
+
+它会把回复里的 JSON 按顺序填进「豆包1.6」那一列。再填别家就换个 `--model` 名字，
+上一家的列不会被覆盖。
+
+> 条数对不上时它**不会填**，会告诉你解析出几条、有几张图。别硬凑——从第一条错位
+> 开始后面全错，比没有还糟。把缺的那几张单独问一次补上就行。
+
+## 第四步：算分
 
 ```bash
 python -m vision_service.evalpack --score <这个目录>
@@ -187,6 +201,75 @@ _BATCH_PROMPT = """一次拖好几张图进同一个对话，让它按序号逐�
 
 {sep}
 """
+
+
+def parse_reply(text: str, n: int) -> tuple[list[str], str]:
+    """模型一次答几张时回的那一坨 → 按顺序的部位列表。
+
+    手抄二十几个答案是整件事里最烦的一步，也最容易抄错。这里直接吃它的原文。
+
+    认两种写法：带序号的 JSON（`1. {...}`）和光秃秃的一串 JSON。**按出现顺序对位**，
+    不信序号——模型偶尔会把序号写错或跳号，而顺序几乎不会乱。数量对不上时如实说，
+    不硬凑：凑出来的对位是错的，比没有还糟。
+    """
+    import json as _json
+    import re as _re
+
+    out: list[str] = []
+    for m in _re.finditer(r"\{[^{}]*\}", text or "", _re.S):
+        try:
+            d = _json.loads(m.group(0))
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or not ({"part", "contact", "see"} & set(d)):
+            continue
+        see = str(d.get("see") or "")
+        part = d.get("part")
+        if see == "unclear":
+            out.append("看不清")
+        elif not d.get("contact", bool(part)) or not part:
+            out.append("没贴到")
+        else:
+            out.append(str(part))
+    why = ""
+    if len(out) != n:
+        why = (f"解析出 {len(out)} 条，但有 {n} 张图——**没往里填**。"
+               "常见原因：模型少答了几张、或者把几张合并成一条。"
+               "对不上就别硬凑，凑出来的对位是错的，比没有还糟。"
+               "把回复里缺的那几张补齐再来，或者那几张单独问一次。")
+    return out, why
+
+
+def fill(out_dir: str, model: str, reply_path: str) -> str:
+    """把模型回复里的答案直接写进答题卡的某一列。"""
+    try:
+        with open(reply_path, encoding="utf-8") as f:
+            text = f.read()
+        with open(os.path.join(out_dir, "答题卡.csv"), encoding="utf-8-sig") as f:
+            sheet = list(csv.DictReader(f))
+    except OSError as e:
+        return f"读不到：{e}"
+    if not sheet:
+        return "答题卡是空的"
+    parts, why = parse_reply(text, len(sheet))
+    if why:
+        return why
+    # 列名就用模型名：算分时原样打出来，一眼看得出是哪家
+    # 保留已经填过的别家那几列，只把还没用过的占位列（模型A/B/C）去掉
+    keep = [c for c in sheet[0] if c not in MODEL_COLS and c != model]
+    fields = keep + [model]
+    for r, p_ in zip(sheet, parts):
+        for c in MODEL_COLS:
+            r.pop(c, None)
+        r[model] = p_
+    with open(os.path.join(out_dir, "答题卡.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(sheet)
+    return (f"填好了 {len(parts)} 条到「{model}」这一列。\n"
+            f"  再填别家：换个 --model 名字跑一次（老的那一列不会被覆盖）\n"
+            f"  人工那一列还得人自己填——那是标尺，机器填了就没意义了\n"
+            f"  填完：python -m vision_service.evalpack --score {out_dir}")
 
 
 def score(out_dir: str) -> str:
@@ -259,6 +342,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="打一份拿去 web 上手试的包（图 + 提示词 + 答题卡）")
     ap.add_argument("--out", metavar="DIR", help="打包到哪儿")
     ap.add_argument("--score", metavar="DIR", help="读回填好的答题卡，出各家准确率对比")
+    ap.add_argument("--fill", metavar="DIR",
+                    help="把模型回复的原文直接填进答题卡，不用手抄。"
+                         "配 --model（列名）和 --from（存着回复原文的文件）")
+    ap.add_argument("--model", help="--fill 用：这一列叫什么，比如 豆包1.6")
+    ap.add_argument("--from", dest="from_file", help="--fill 用：存着模型回复原文的文件")
     ap.add_argument("--index-dir", default=config.EMBED_INDEX_DIR)
     ap.add_argument("--part", default="后爪")
     ap.add_argument("-n", type=int, default=20, help="正式组几张")
@@ -272,6 +360,11 @@ def main() -> None:
 
     import logging
     logging.basicConfig(level=logging.WARNING, format="[%(name)s] %(message)s")
+    if args.fill:
+        if not args.model or not args.from_file:
+            ap.error("--fill 要配 --model（列名）和 --from（回复原文的文件）")
+        print(fill(args.fill, args.model, args.from_file))
+        return
     if args.score:
         print(score(args.score))
         return

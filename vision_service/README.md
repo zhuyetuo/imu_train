@@ -302,10 +302,16 @@ python -m vision_service.pose_coverage --by-day --worst 20
 先接一家 API、写代码、跑一遍，成本太高——万一那家也不行呢。
 
 ```bash
-python -m vision_service.evalpack --out ./tmp/evalpack -n 20 --control 6
-# 把整个目录发给要试的人；他填完答题卡再跑：
+python -m vision_service.evalpack --out ./tmp/evalpack -n 8 --control 4   # 12 张，一个对话就够
+# 人先填「人工填这一列」（那是标尺，只能人填）
+# 各家模型的回复原样存成文件，直接灌进去，不用手抄：
+python -m vision_service.evalpack --fill ./tmp/evalpack --model 豆包1.6 --from 答案_豆包.txt
 python -m vision_service.evalpack --score ./tmp/evalpack
 ```
+
+**别把目录压缩了丢给对话框**：网页端不解压；就算解开了，几十张在同一个对话里会
+互相影响（前面的答案带着后面走），测出来的不是单张的能力。要一次搞定就把图**直接
+拖进去**，用包里那份「一次多张」的提示词——它开头就写明了跟线上不是同一个条件。
 
 包里是**跟线上一模一样**的拼图和**一字不差**的提示词，人直接在各家 web 对话框里
 粘贴拖图记答案。试哪家都行，不用接口、不用充值、不用写代码。
