@@ -16,8 +16,9 @@ web 对话框里粘贴、拖图、记答案。试哪家都行，不用接口、�
    "在舔后爪"的模型，在正式组上照样能拿高分——对照组是唯一能拆穿它的东西。
    2026-09-20 实测：正式组 15%、对照组也 15%，那个 15% 完全没有意义。
 
-2. **人先填，别看机器的答案。** 几何判的那一列单独放在密钥文件里，答题卡上
-   没有——看着机器的答案填，填出来的"真值"里就掺了机器的错。
+2. **真值跟机器的答案分开放。** 人填 `人工答案.csv`，模型的答案进 `答题卡.csv`，
+   几何判的在密钥文件里。看着机器的答案填，填出来的"真值"里就掺了机器的错——
+   而这件事不该靠"记得先填"这条纪律，用文件结构保证就不会忘。
 
 3. **「看不清」是个正经答案。** 同一份真值里 45% 的帧人也判不了（夜里低对比、
    狗蜷着、多狗同框）。逼人在看不清的帧上二选一，等于往真值里注噪声。
@@ -26,8 +27,9 @@ web 对话框里粘贴、拖图、记答案。试哪家都行，不用接口、�
 ## 用法
 
     python -m vision_service.evalpack --out ./tmp/evalpack -n 20
-    # 把 evalpack 整个目录发给要试的人
-    # 他填完 答题卡.csv，再跑：
+    # 把 发给模型.zip 丢进各家 web 对话框，回复原样存成文件，然后：
+    python -m vision_service.evalpack --fill ./tmp/evalpack --model 豆包1.6 --from 回复.txt
+    # 人填完 人工答案.csv（跟上一步谁先谁后都行），再跑：
     python -m vision_service.evalpack --score ./tmp/evalpack
 """
 
@@ -43,6 +45,12 @@ from . import config, partask, posepart, seek
 # 答题卡上给几家留的列。多写几列没坏处，空着的列不算分
 MODEL_COLS = ("模型A", "模型B", "模型C")
 ANSWER_KEY = ".答案密钥.csv"       # 点开头：发包时不显眼，人不会顺手打开看
+# 真值单独一个文件，不跟模型答案混在一张表里。
+# 这样填真值的人**先跑模型再填也不会受影响**——他打开的那张表里根本没有模型的答案。
+# 顺序不该成为一条要人记住的纪律，能用文件结构保证就别靠自觉
+TRUTH_FILE = "人工答案.csv"
+TRUTH_COL = "人工填这一列"
+ZIP_NAME = "发给模型.zip"
 
 
 def build(out_dir: str, *, index_dir: str, part: str, n: int, n_control: int,
@@ -71,7 +79,7 @@ def build(out_dir: str, *, index_dir: str, part: str, n: int, n_control: int,
         name = f"{len(sheet):02d}.jpg"
         with open(os.path.join(img_dir, name), "wb") as f:
             f.write(seek.tile_frames(frames) or frames[0])
-        sheet.append({"图": name, "人工填这一列": "", **{c: "" for c in MODEL_COLS}})
+        sheet.append({"图": name, **{c: "" for c in MODEL_COLS}})
         answer.append({"图": name, "是对照": "是" if r.get("control") else "",
                        "几何判的": r.get("slot"), "几何距离": r.get("dist"),
                        "视频": r["path"], "秒": r["t"]})
@@ -84,6 +92,7 @@ def build(out_dir: str, *, index_dir: str, part: str, n: int, n_control: int,
                 w.writerows(rows_)
 
     _w("答题卡.csv", sheet)
+    _w(TRUTH_FILE, [{"图": r["图"], TRUTH_COL: ""} for r in sheet])
     _w(ANSWER_KEY, answer)
 
     sys_, user = seek.build_contact_prompt(partask.CONTACT_PARTS, n_frames,
@@ -97,25 +106,56 @@ def build(out_dir: str, *, index_dir: str, part: str, n: int, n_control: int,
     with open(os.path.join(out_dir, "提示词_一次多张（省事但打折）.txt"), "w",
               encoding="utf-8") as f:
         f.write(_BATCH_PROMPT.format(sys=sys_, user=user, sep="=" * 60))
+    with open(os.path.join(out_dir, "提示词_压缩包.txt"), "w", encoding="utf-8") as f:
+        f.write(_ZIP_PROMPT.format(sys=sys_, user=user, sep="=" * 60, n=len(sheet)))
     with open(os.path.join(out_dir, "怎么用.md"), "w", encoding="utf-8") as f:
         f.write(_HOWTO.format(n=len(sheet), n_ctl=sum(1 for a in answer if a["是对照"]),
-                              cols="、".join(MODEL_COLS)))
+                              cols="、".join(MODEL_COLS), truth_col=TRUTH_COL))
+    # **压缩包里只放图和提示词。** 答题卡和密钥一旦进去，模型就能看到"正确答案"
+    # 和"哪几张是对照"——那这一整套验证就白做了
+    zip_path = os.path.join(out_dir, ZIP_NAME)
+    import zipfile
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(os.listdir(img_dir)):
+            z.write(os.path.join(img_dir, name), f"图/{name}")
+        z.write(os.path.join(out_dir, "提示词_压缩包.txt"), "提示词.txt")
     return (f"打好了：{out_dir}/（{len(sheet)} 张，其中对照 "
             f"{sum(1 for a in answer if a['是对照'])} 张）\n"
-            f"  图/          跟线上发给 API 的**一模一样**的拼图\n"
-            f"  提示词.txt   跟线上**一字不差**的提示词，粘进对话框就行\n"
-            f"  答题卡.csv   人先填「人工填这一列」，再把各家的答案填进模型列\n"
-            f"  怎么用.md    给要试的人看的\n"
-            f"  填完：python -m vision_service.evalpack --score {out_dir}")
+            f"  {ZIP_NAME}   **直接把这个丢给对话框**（只含图和提示词，"
+            f"不含答案和对照名单）\n"
+            f"  {TRUTH_FILE}     人填这个。**跟模型的答案分开放**，"
+            f"所以先跑模型再填也不会受影响\n"
+            f"  答题卡.csv     模型的答案填这里（用 --fill 灌，不用手抄）\n"
+            f"  图/ 提示词.txt  想一张一张来的话用这两个\n"
+            f"  怎么用.md      给要试的人看的\n\n"
+            f"  下一步：把 {ZIP_NAME} 丢给对话框 → 回复存成文件 → \n"
+            f"    python -m vision_service.evalpack --fill {out_dir} --model 豆包1.6 --from 回复.txt")
 
 
 _HOWTO = """# 怎么试
 
 一共 {n} 张图（其中 {n_ctl} 张是**对照**，混在里面，你不知道是哪几张——这是故意的）。
 
-## 第一步：人先填，别看任何模型的答案
+**人工答案和模型答案在两个文件里**（`人工答案.csv` / `答题卡.csv`），所以下面这
+两步**谁先谁后都行**——你打开填真值的那张表里，根本没有模型的答案，想被带偏
+也带不动。
 
-打开 `图/` 里的图，在 `答题卡.csv` 的**「人工填这一列」**写：这只狗的口鼻贴着
+## 一：拿模型试
+
+把 `发给模型.zip` **整个丢进对话框**。包里只有图和提示词（答题卡和答案密钥
+都不在里面——进去了模型就能看见正确答案和哪几张是对照，这套验证就白做了）。
+模型会逐张输出一行 JSON。
+
+把它那一整段回复**原样**存成文本文件，然后用第三步的 `--fill` 灌进去，不用手抄。
+
+> **代价要说清楚**：线上是一张图一次请求，模型看不到别的图。一个压缩包里 {n} 张
+> 在同一个对话里，前面的答案会带着后面走。**要给领导看的那个数，用 `图/` +
+> `提示词.txt` 一张图开一个新对话**，十几分钟。压缩包这条路用来先花五分钟
+> 摸个底：这家值不值得认真试。两种都做的话，对一下差多少，心里有个数。
+
+## 二：人填真值
+
+打开 `图/` 里的图，在 **`人工答案.csv`** 的「{truth_col}」写：这只狗的口鼻贴着
 自己的哪个部位。
 
 可填：`前左爪` `前右爪` `后左爪` `后右爪` `尾根` `没贴到` `看不清`
@@ -124,24 +164,9 @@ _HOWTO = """# 怎么试
 这些都填「看不清」。实测这种能占到四成多，逼自己二选一只会把真值搞脏。
 
 > 这一列是**标尺**。后面所有模型的分都是拿它量出来的，所以它得干净。
+> 别打开 `答题卡.csv` 照着填——那是模型的答案，照着填等于把机器的错抄进标尺。
 
-## 第二步：拿各家模型试
-
-把 `提示词.txt` 里两段粘进对话框，拖一张图进去，把模型答的 `part` 填进
-`{cols}` 里对应那一列（没贴到就填「没贴到」）。
-
-**一张图开一个新对话**——不然上一张的答案会影响这一张。{n} 张大概十几分钟。
-
-> 嫌慢的话有一份 `提示词_一次多张（省事但打折）.txt`，可以一次拖几张进同一个
-> 对话。但那跟线上不是同一个条件（线上是一张一次请求），**要给领导看的那个数
-> 还是用一张一张的**。
-
-> **别把整个目录压缩了丢给对话框**：网页端基本不会解压；就算解开了，26 张在
-> 同一个对话里也会互相影响，测出来的不是单张的能力。
-
-在表头把列名改成真实模型名（比如 `豆包1.6`、`GPT-5`、`Claude`），算分时会原样打出来。
-
-## 第三步：把答案填进去（不用手抄）
+## 三：把模型的答案填进去（不用手抄）
 
 把模型那一整段回复**原样**存成一个文本文件（比如 `答案_豆包.txt`），然后：
 
@@ -149,13 +174,13 @@ _HOWTO = """# 怎么试
 python -m vision_service.evalpack --fill <这个目录> --model 豆包1.6 --from 答案_豆包.txt
 ```
 
-它会把回复里的 JSON 按顺序填进「豆包1.6」那一列。再填别家就换个 `--model` 名字，
-上一家的列不会被覆盖。
+它会把回复里的 JSON 按顺序填进 `答题卡.csv` 的「豆包1.6」那一列。再填别家就换个
+`--model` 名字，上一家的列不会被覆盖（`{cols}` 只是占位列名，填过一家就没了）。
 
 > 条数对不上时它**不会填**，会告诉你解析出几条、有几张图。别硬凑——从第一条错位
 > 开始后面全错，比没有还糟。把缺的那几张单独问一次补上就行。
 
-## 第四步：算分
+## 四：算分
 
 ```bash
 python -m vision_service.evalpack --score <这个目录>
@@ -199,6 +224,25 @@ _BATCH_PROMPT = """一次拖好几张图进同一个对话，让它按序号逐�
 1. {{"see": "...", "desc": "...", "contact": ..., "part": ..., "moving": ..., "confidence": ...}}
 2. {{...}}
 
+{sep}
+"""
+
+
+_ZIP_PROMPT = """把这个压缩包解开，里面「图/」下有 {n} 张图（00.jpg、01.jpg …）。
+
+**逐张看，按文件名从小到大的顺序，每张输出一行 JSON，前面带上文件名。**
+像这样：
+
+00.jpg {{"see": "...", "desc": "...", "contact": ..., "part": ..., "moving": ..., "confidence": ...}}
+01.jpg {{...}}
+
+这 {n} 张是不同时刻、可能是不同的狗，**彼此无关**——请分别独立判断，
+不要因为前一张是什么就倾向于后一张也是什么。
+
+{sep}
+{sys}
+
+{user}
 {sep}
 """
 
@@ -268,12 +312,32 @@ def fill(out_dir: str, model: str, reply_path: str) -> str:
         w.writerows(sheet)
     return (f"填好了 {len(parts)} 条到「{model}」这一列。\n"
             f"  再填别家：换个 --model 名字跑一次（老的那一列不会被覆盖）\n"
-            f"  人工那一列还得人自己填——那是标尺，机器填了就没意义了\n"
+            f"  真值在 {TRUTH_FILE} 里，还得人自己填——那是标尺，机器填了就没意义了\n"
             f"  填完：python -m vision_service.evalpack --score {out_dir}")
 
 
+def _truth(out_dir: str, sheet: list[dict]) -> tuple[dict[str, str], str]:
+    """真值：优先读单独的 人工答案.csv；老包里它在答题卡上，也照样认。
+
+    老包是在"真值和模型答案同一张表"的时候打的。换文件结构不该把已经填完的
+    老包作废——那会逼人把标尺重填一遍，而标尺重填就意味着换了把尺子。
+    """
+    try:
+        with open(os.path.join(out_dir, TRUTH_FILE), encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        col = next((c for c in rows[0] if "人工" in c), None) if rows else None
+        if col:
+            return {r["图"]: (r.get(col) or "").strip() for r in rows}, ""
+    except OSError:
+        pass
+    col = next((c for c in sheet[0] if "人工" in c), None) if sheet else None
+    if col:        # 老包：真值还在答题卡上
+        return {r["图"]: (r.get(col) or "").strip() for r in sheet}, col
+    return {}, ""
+
+
 def score(out_dir: str) -> str:
-    """读答题卡 + 密钥，出各家的准确率对比。"""
+    """读答题卡 + 人工答案 + 密钥，出各家的准确率对比。"""
     try:
         with open(os.path.join(out_dir, "答题卡.csv"), encoding="utf-8-sig") as f:
             sheet = list(csv.DictReader(f))
@@ -281,14 +345,14 @@ def score(out_dir: str) -> str:
             key = {r["图"]: r for r in csv.DictReader(f)}
     except OSError as e:
         return f"读不到答题卡或密钥：{e}"
-    truth_col = next((c for c in sheet[0] if "人工" in c), None) if sheet else None
-    if not truth_col:
-        return "答题卡里没有「人工填这一列」，是不是改了表头？"
-    filled = [r for r in sheet if (r.get(truth_col) or "").strip()]
+    truth, truth_col = _truth(out_dir, sheet)
+    if not truth:
+        return f"找不到真值：{out_dir}/{TRUTH_FILE} 里要有「{TRUTH_COL}」这一列"
+    filled = [r for r in sheet if truth.get(r["图"])]
     if not filled:
-        return "「人工填这一列」还是空的——先让人填，再拿模型的答案跟它比"
+        return f"{TRUTH_FILE} 还是空的——先让人填，再拿模型的答案跟它比"
 
-    done = [r for r in filled if r[truth_col].strip() != "看不清"]
+    done = [r for r in filled if truth[r["图"]] != "看不清"]
     blur = len(filled) - len(done)
     # 模型列 = 除了「图」和人工那一列之外、填了东西的列
     cols = [c for c in sheet[0] if c not in ("图", truth_col)
@@ -307,7 +371,7 @@ def score(out_dir: str) -> str:
     def acc(rows_, c):
         if not rows_:
             return "—"
-        k = sum(1 for r in rows_ if (r.get(c) or "").strip() == r[truth_col].strip())
+        k = sum(1 for r in rows_ if (r.get(c) or "").strip() == truth[r["图"]])
         return f"{k}/{len(rows_)} ({k / len(rows_) * 100:.0f}%)"
 
     lines.append(f"  {'正式组':<12}" + "".join(f"{acc(main, c):<14}" for c in cols))
@@ -321,8 +385,8 @@ def score(out_dir: str) -> str:
     lines.append("")
     lines.append("  「对照组乱报」= 在「狗的口鼻离爪子很远」的图上还报出某只爪的张数。"
                  "这一行大的，正式组那个分就是假的——模型在顺着提示词猜，没在看画面。")
-    best = max(cols, key=lambda c: sum(1 for r in main if (r.get(c) or "").strip() == r[truth_col].strip()))
-    b = sum(1 for r in main if (r.get(best) or "").strip() == r[truth_col].strip())
+    best = max(cols, key=lambda c: sum(1 for r in main if (r.get(c) or "").strip() == truth[r["图"]]))
+    b = sum(1 for r in main if (r.get(best) or "").strip() == truth[r["图"]])
     rate = b / len(main) if main else 0
     lines.append("")
     if rate < 0.3:

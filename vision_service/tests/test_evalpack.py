@@ -35,6 +35,17 @@ def _read(out, name):
         return list(csv.DictReader(f))
 
 
+def _write(out, name, rows):
+    with open(os.path.join(out, name), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _truth(out, mapping):
+    _write(out, ep.TRUTH_FILE, [{"图": k, ep.TRUTH_COL: v} for k, v in mapping.items()])
+
+
 def test_打包_对照混在里面_答题卡上看不出哪些是(tmp_path, monkeypatch):
     """正式的排前面、对照的排后面的话，人翻到一半就看出规律了——那对照就白设了。"""
     out, msg = _pack(tmp_path, monkeypatch)
@@ -42,9 +53,13 @@ def test_打包_对照混在里面_答题卡上看不出哪些是(tmp_path, monk
     assert sorted(os.listdir(os.path.join(out, "图"))) == [f"{i:02d}.jpg" for i in range(6)]
 
     sheet = _read(out, "答题卡.csv")
-    # 答题卡上**没有**「是对照」「几何判的」这些列：看着机器的答案填，
-    # 填出来的"真值"里就掺了机器的错
-    assert set(sheet[0]) == {"图", "人工填这一列", *ep.MODEL_COLS}
+    # 答题卡上**没有**「是对照」「几何判的」这些列，也没有真值那一列：
+    # 真值单独一个文件，填真值的人打开的表里根本没有模型的答案
+    assert set(sheet[0]) == {"图", *ep.MODEL_COLS}
+    truth = _read(out, ep.TRUTH_FILE)
+    assert set(truth[0]) == {"图", ep.TRUTH_COL}
+    assert [r["图"] for r in truth] == [r["图"] for r in sheet]
+    assert all(r[ep.TRUTH_COL] == "" for r in truth)
     key = _read(out, ep.ANSWER_KEY)
     assert sum(1 for r in key if r["是对照"]) == 2
     # 打乱过：两张对照不会正好是最后两张
@@ -60,8 +75,28 @@ def test_提示词跟线上一字不差(tmp_path, monkeypatch):
     assert "一次一张" in txt and "重新开一个对话" in txt
     how = open(os.path.join(out, "怎么用.md"), encoding="utf-8").read()
     assert "看不清" in how and "别硬选" in how and "对照" in how
-    # 「把整个目录压缩了丢给对话框」是个会自然想到的做法，但测出来的不是单张的能力
-    assert "别把整个目录压缩" in how and "互相影响" in how
+    assert "{" not in how          # 占位符都填上了，别漏一个 {truth_col} 出去
+    # 真值和模型答案分开放，所以顺序不再是一条要人记住的纪律
+    assert "谁先谁后都行" in how and ep.TRUTH_FILE in how
+    # 压缩包这条路省事，但代价要写明：同一个对话里前面的答案会带着后面走
+    assert ep.ZIP_NAME in how and "一张图开一个新对话" in how
+
+
+def test_压缩包里只放图和提示词_不放答案和对照名单(tmp_path, monkeypatch):
+    """答案密钥或答题卡一旦进了包，模型就能看到"正确答案"和"哪几张是对照"——
+    那这一整套验证就白做了，而且从输出上完全看不出来。"""
+    import zipfile
+
+    out, msg = _pack(tmp_path, monkeypatch)
+    with zipfile.ZipFile(os.path.join(out, ep.ZIP_NAME)) as z:
+        names = z.namelist()
+        txt = z.read("提示词.txt").decode("utf-8")
+    assert sorted(names) == [f"图/{i:02d}.jpg" for i in range(6)] + ["提示词.txt"]
+    assert ep.ANSWER_KEY not in str(names) and "答题卡" not in str(names)
+    assert "分别独立判断" in txt and "00.jpg" in txt
+    sys_, _u = seek.build_contact_prompt(partask.CONTACT_PARTS, 6, 0.3 * 5, tiled=True)
+    assert sys_ in txt                                    # 提示词照抄线上的
+    assert ep.ZIP_NAME in msg and ep.TRUTH_FILE in msg
 
 
 def test_一次多张的版本要写明它跟线上不是同一个条件(tmp_path, monkeypatch):
@@ -82,16 +117,15 @@ def test_算分_看不清剔出分母_对照组乱报要单独点出来(tmp_path
     out, _ = _pack(tmp_path, monkeypatch, n=4, n_ctl=2)
     key = {r["图"]: r for r in _read(out, ep.ANSWER_KEY)}
     sheet = _read(out, "答题卡.csv")
+    truth = {}
     for r in sheet:
         ctl = bool(key[r["图"]]["是对照"])
-        r["人工填这一列"] = "没贴到" if ctl else "前左爪"
+        truth[r["图"]] = "没贴到" if ctl else "前左爪"
         r["模型A"] = "前左爪"          # 见什么都说前左爪：正式组全对，对照组全错
         r["模型B"] = "没贴到" if ctl else "前左爪"   # 真在看画面
-    sheet[0]["人工填这一列"] = "看不清"   # 这一张从分母里剔掉
-    with open(os.path.join(out, "答题卡.csv"), "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(sheet[0]))
-        w.writeheader()
-        w.writerows(sheet)
+    truth[sheet[0]["图"]] = "看不清"   # 这一张从分母里剔掉
+    _write(out, "答题卡.csv", sheet)
+    _truth(out, truth)
 
     txt = ep.score(out)
     assert "「看不清」1 张" in txt and "从分母里剔掉" in txt
@@ -100,12 +134,22 @@ def test_算分_看不清剔出分母_对照组乱报要单独点出来(tmp_path
     assert "顺着提示词猜" in txt
 
     # 没填真值 / 目录不对：各说各的，别报个 0%
-    with open(os.path.join(out, "答题卡.csv"), "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(sheet[0]))
-        w.writeheader()
-        w.writerows([{**r, "人工填这一列": ""} for r in sheet])
+    _truth(out, {k: "" for k in truth})
     assert "还是空的" in ep.score(out)
     assert "读不到" in ep.score(str(tmp_path / "没有这个目录"))
+
+
+def test_老包的真值还在答题卡上_照样认(tmp_path, monkeypatch):
+    """换文件结构不该把已经填完的老包作废——那会逼人把标尺重填一遍，
+    而标尺重填就意味着换了把尺子，前后两次的数对不上。"""
+    out, _ = _pack(tmp_path, monkeypatch, n=4, n_ctl=0)
+    os.remove(os.path.join(out, ep.TRUTH_FILE))
+    sheet = [{"图": r["图"], "人工填这一列": "前左爪", "模型A": "前左爪"}
+             for r in _read(out, "答题卡.csv")]
+    _write(out, "答题卡.csv", sheet)
+    txt = ep.score(out)
+    assert "4/4 (100%)" in txt
+    assert "人工填这一列" not in txt.split("\n")[2]      # 真值那一列不当成模型列
 
 
 def test_算分给的结论按准确率分档(tmp_path, monkeypatch):
@@ -113,14 +157,12 @@ def test_算分给的结论按准确率分档(tmp_path, monkeypatch):
     out, _ = _pack(tmp_path, monkeypatch, n=10, n_ctl=0)
     sheet = _read(out, "答题卡.csv")
 
+    _truth(out, {r["图"]: "前左爪" for r in sheet})
+
     def run(n_right):
         for i, r in enumerate(sheet):
-            r["人工填这一列"] = "前左爪"
             r["模型A"] = "前左爪" if i < n_right else "尾根"
-        with open(os.path.join(out, "答题卡.csv"), "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(sheet[0]))
-            w.writeheader()
-            w.writerows(sheet)
+        _write(out, "答题卡.csv", sheet)
         return ep.score(out)
 
     assert "别充" in run(2)                       # 20%，跟瞎猜差不多
@@ -173,10 +215,10 @@ def test_填进答题卡_再填别家不会覆盖上一家(tmp_path, monkeypatch
     f1.write_text(reply, encoding="utf-8")
     msg = ep.fill(out, "豆包1.6", str(f1))
     assert "填好了 3 条" in msg and "豆包1.6" in msg
-    assert "人工那一列还得人自己填" in msg          # 标尺不能让机器填
+    assert ep.TRUTH_FILE in msg and "人自己填" in msg   # 标尺不能让机器填
 
     rows = _read(out, "答题卡.csv")
-    assert list(rows[0]) == ["图", "人工填这一列", "豆包1.6"]   # 占位的模型A/B/C 去掉了
+    assert list(rows[0]) == ["图", "豆包1.6"]   # 占位的模型A/B/C 去掉了
     assert [r["豆包1.6"] for r in rows] == ["前左爪", "后右爪", "尾根"]
 
     # 再填一家：上一家那一列要留着
@@ -185,7 +227,7 @@ def test_填进答题卡_再填别家不会覆盖上一家(tmp_path, monkeypatch
                   '{"see":"clear","contact":true,"part":"前右爪"}', encoding="utf-8")
     ep.fill(out, "GPT-5", str(f2))
     rows = _read(out, "答题卡.csv")
-    assert list(rows[0]) == ["图", "人工填这一列", "豆包1.6", "GPT-5"]
+    assert list(rows[0]) == ["图", "豆包1.6", "GPT-5"]
     assert [r["GPT-5"] for r in rows] == ["看不清", "没贴到", "前右爪"]
     assert rows[0]["豆包1.6"] == "前左爪"
 
