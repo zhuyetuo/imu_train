@@ -28,7 +28,7 @@ import os
 import threading
 import time
 
-from . import config, dog, pose, seek, segmask
+from . import config, dog, pose, posepart, seek, segmask
 
 _logger = logging.getLogger("vision_service.embed")
 
@@ -585,15 +585,32 @@ def text_query(text: str, encoder: Encoder | None = None):
 
 def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, gap_s: float = 3.0,
            exclude: tuple[str, float, float] | None = None, center: bool = True,
-           pose_vec=None, pose_w: float | None = None) -> dict:
+           pose_vec=None, pose_w: float | None = None, part: str | None = None,
+           part_near_max: float | None = None) -> dict:
     """在这些视频的索引里找最像的，按视频把相邻命中合成段。
 
     返回 {hits:[{path,t,score,vis_score,pose_score?}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
     exclude=(path, t0, t1)：把样例自己那一段排掉，不然第一名永远是它自己。
 
-    center：先把所有帧的平均向量减掉再比。同一只狗、同一间房、同一块花砖地，每一帧的向量
-    里都带着这一大坨"共同背景"，原始余弦全在 0.95 以上，动作的差别被淹没——减掉均值后
-    剩下的才是"这一帧跟别的帧不一样的地方"（姿态、部位）。分数会明显变低、拉开。
+    part：只要"鼻子够到了这个部位"的帧（几何硬条件，不是相似度）。SigLIP 分不清
+    「头贴前左爪」和「头贴前右爪」——它看的是整体长相；这一条直接按关键点的距离卡，
+    所以「舔后爪」能搜出来。认不出的部位名（腰、腹股沟……）**不筛**，如实在
+    part_used 里说，免得人把空结果当成"索引里没这种数据"。
+
+    center：减掉均值再比，去掉"共同背景"。三档：
+
+      "video"（默认）每一帧减掉**它自己那一路**的平均向量，查询帧减它自己那一路的。
+              比的是"这一帧相对这只狗平时的样子有什么不同"——狗的身份、毛色、房间、
+              机位、红外色调在两边同时抵消，剩下的才是动作。**跨狗检索要用这一档。**
+      "global" 所有视频一起算一个均值（老行为）。它只去掉全局共性，去不掉"这一路里
+              这只狗长什么样"——同狗同房的帧余弦全在 0.95 以上，动作差别被淹没，
+              结果永远是同一只狗同一个场景。2026-09-20 实测就是这个毛病。
+      "none"   不减。
+
+    传 True = "video"、False = "none"（老调用方传 True 本来就是想去共同背景，
+    per-video 是更彻底的做法，不需要改调用方）。
+
+    文本查询没有"自己那一路"可减，这时退回全局均值——文本向量本来就不带狗的身份。
     """
     import numpy as np
 
@@ -609,13 +626,28 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             continue
         loaded.append((rp, d))
     searched = len(loaded)
+    mode = "video" if center is True else "none" if center is False else str(center or "none")
+    # 每一路自己的均值 + 全局均值。索引存的是 float16，求和前转 float32，
+    # 不然几百帧加起来精度全丢
+    mus: dict[str, "np.ndarray"] = {}
     mu = None
-    if center:
+    if mode in ("video", "global"):
         tot = sum(len(d["t"]) for _rp, d in loaded)
         if tot >= 20:
-            # 索引存的是 float16，求和前转 float32，不然几百帧加起来精度全丢
-            mu = sum(d["emb"].astype("float32").sum(axis=0) for _rp, d in loaded if len(d["t"])) / tot
-            q = q - mu
+            sums = [(rp, len(d["t"]), d["emb"].astype("float32").sum(axis=0))
+                    for rp, d in loaded if len(d["t"])]
+            mu = sum(s_ for _rp, _n, s_ in sums) / tot
+            if mode == "video":
+                # 一路只有几帧时它自己的均值就约等于那几帧本身，减完剩不下东西——
+                # 这种退回全局均值，别把一路好数据减成噪声
+                mus = {rp: (s_ / n if n >= 20 else mu) for rp, n, s_ in sums}
+    # 查询向量减哪一个：以图搜图时减它自己那一路的（exclude[0] 就是样例所在视频），
+    # 文本查询没有"自己那一路"，退回全局
+    q_mu = mus.get(exclude[0]) if (mus and exclude) else None
+    if q_mu is None:
+        q_mu = mu
+    if q_mu is not None:
+        q = q - q_mu
     q = q / (np.linalg.norm(q) + 1e-9)
     # 姿态那一路：样例有姿态、索引里也存了姿态的帧才混；两边缺一个就只看画面
     pw = config.POSE_W if pose_w is None else float(pose_w)
@@ -624,13 +656,17 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
         pq = np.asarray(pose_vec, dtype="float32")
         pq = pq / (np.linalg.norm(pq) + 1e-9)
     used_pose = False
+    # 部位是几何硬条件，跟相似度无关：认得出来才筛，认不出就整条不筛并如实上报
+    part_key = posepart.part_of(part) if part else None
+    n_part_kept = 0
     hits: list[dict] = []
     for rp, d in loaded:
         if not len(d["t"]):
             continue
         emb = d["emb"].astype("float32")
-        if mu is not None:
-            emb = emb - mu
+        sub = mus.get(rp, mu) if mode == "video" else mu
+        if sub is not None:
+            emb = emb - sub
             emb = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
         scores = emb @ q
         vscores = scores                                # 纯画面分，混姿态之前的
@@ -644,10 +680,16 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
                 pscores = np.where(has, pscores, scores)
                 scores = (1 - pw) * scores + pw * pscores
                 used_pose = True
+        keep = None
+        if part_key and d.get("pose") is not None and len(d["pose"]) == len(d["t"]):
+            keep = posepart.match(d["pose"], part_key, part_near_max)
+            n_part_kept += int(keep.sum())
         for i in np.argsort(-scores):
             s = float(scores[i])
             if s < min_score:
                 break
+            if keep is not None and not keep[i]:
+                continue                                 # 鼻子没够到这个部位，分再高也不是
             t = float(d["t"][i])
             if exclude and exclude[0] == rp and exclude[1] <= t <= exclude[2]:
                 continue
@@ -658,7 +700,11 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
     return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
-            "centered": mu is not None, "pose_used": used_pose, "pose_w": pw if used_pose else 0.0}
+            "centered": mu is not None, "center": mode if mu is not None else "none",
+            "pose_used": used_pose, "pose_w": pw if used_pose else 0.0,
+            # part_used=None 且 part 有值 = 这个部位判不了（腰、腹股沟……），**没筛**。
+            # 前端要照实说，不然人会把"没筛出来的一堆"当成"筛过的结果"
+            "part": part, "part_used": part_key, "part_frames": n_part_kept if part_key else None}
 
 
 def group_hits(hits: list[dict], gap_s: float = 3.0, pad_s: float = 1.0) -> list[dict]:
