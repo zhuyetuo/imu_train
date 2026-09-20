@@ -14,6 +14,15 @@
 所以真要提升，得拿**我们自己场地的帧**微调。这个模块负责那一步的前半截：
 把该标的帧挑出来。
 
+## 只标 6 个点，不是 17 个
+
+看过第一批 47 张之后砍的（2026-09-20）。肩 / 肘 / 髋 / 膝那 8 个点**在这批画面上
+根本看不见**：狗场主力是卷毛，关节全埋在毛里；眼睛和脖子同理（俯拍 + 毛）。
+标注员只能猜——而猜出来的标签只会教模型也猜。
+
+而且**判部位本来就只用到 6 个**（posepart 算的是鼻子到四爪 / 尾根的距离）。
+17 个点里有 8 个既看不见、又用不上。露在外面的爪尖和鼻子标得准，那几个才值得标。
+
 ## 但先把话说清楚：这件事的天花板
 
 同一份真值里还有一个数：**45% 的帧人也判不了**（夜里低对比、裁得只剩半只狗、
@@ -155,15 +164,18 @@ def export(picks: list[dict], out_dir: str, video_root: str, *, max_side: int = 
         if frame is None:
             continue
         h, w = frame.shape[:2]
-        b = c.get("box")
-        if b and embed.box_ok(b):
-            x1, y1, x2, y2 = b[0] * w, b[1] * h, b[2] * w, b[3] * h
-        else:
-            from . import dog
-            boxes = dog.detect(frame)
-            if not boxes:
-                continue
-            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h, margin=0.0, min_side=0)
+        # **按单只狗裁，不用索引里那个并集框。** 索引存的是所有狗框的并集（norm_box），
+        # 影棚一帧里常有两三只狗，并集裁出来是"一屋子狗"——标关键点时根本不知道该标哪只。
+        # 这里当场检测一次，取面积最大的那只；顺便记下这一帧有几只狗，多的在 manifest
+        # 里标出来让标注员跳过
+        from . import dog
+        boxes = dog.detect(frame)
+        if not boxes:
+            continue
+        big = max(boxes, key=lambda b_: b_["bbox"][2] * b_["bbox"][3])
+        bx, by, bw_, bh_ = big["bbox"]
+        x1, y1, x2, y2 = bx * w, by * h, (bx + bw_) * w, (by + bh_) * h
+        n_dogs = len(boxes)
         bw, bh = max(x2 - x1, 1.0), max(y2 - y1, 1.0)
         x1, y1 = max(0, int(x1 - bw * 0.6)), max(0, int(y1 - bh * 0.6))
         x2, y2 = min(w, int(x2 + bw * 0.6)), min(h, int(y2 + bh * 0.6))
@@ -178,7 +190,8 @@ def export(picks: list[dict], out_dir: str, video_root: str, *, max_side: int = 
         cv2.imwrite(os.path.join(out_dir, name), crop)
         rows.append({"图": name, "场地": c["bucket"][0], "机位": c["bucket"][1],
                      "昼夜": c["bucket"][2], "姿势": c["bucket"][3],
-                     "现在测到几个点": c["n_vis"], "视频": c["path"], "秒": c["t"]})
+                     "画面里几只狗": n_dogs, "现在测到几个点": c["n_vis"],
+                     "视频": c["path"], "秒": c["t"]})
     with open(os.path.join(out_dir, "manifest.csv"), "w", encoding="utf-8-sig", newline="") as f:
         if rows:
             wr = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -190,19 +203,30 @@ def export(picks: list[dict], out_dir: str, video_root: str, *, max_side: int = 
     lines = [f"导了 {len(rows)} 张到 {out_dir}/", "", "  分层（场地/昼夜/姿势）："]
     for k, v in sorted(by.items()):
         lines.append(f"    {'/'.join(k):<20} {v}")
+    multi = sum(1 for r in rows if int(r["画面里几只狗"]) > 1)
     lines += [
         "",
-        "  拿 CVAT 或 Label Studio 标 17 个点（顺序跟 pose.py 一致）：",
-        "    0 左眼 1 右眼 2 鼻子 3 脖子 4 尾根",
-        "    5 左肩 6 左肘 7 左前爪  8 右肩 9 右肘 10 右前爪",
-        "    11 左髋 12 左膝 13 左后爪  14 右髋 15 右膝 16 右后爪",
+        "  **只标 6 个点，不是 17 个**（顺序跟 pose.py 的下标一致）：",
+        "     2 鼻子   4 尾根",
+        "     7 左前爪  10 右前爪  13 左后爪  16 右后爪",
         "",
-        "  **先标 50 张就停下来评一次**：拿它们当验证集，量一下现在的 RTMPose 到底"
+        "  为什么砍掉另外 11 个：肩/肘/髋/膝那 8 个**在这批画面上根本看不见**——"
+        "狗场那几只是卷毛，关节全埋在毛里；标注员只能猜，而猜出来的标签只会教模型也猜。"
+        "眼睛和脖子同理（俯拍 + 毛）。而爪尖和鼻子是露在外面的，标得准。",
+        "  更重要的是：**判部位本来就只用到这 6 个**（posepart 算的是鼻子到四爪/尾根的"
+        "距离）。标 17 个点里有 8 个既看不见、又用不上。",
+    ]
+    if multi:
+        lines.append(f"  ⚠ 其中 {multi} 张画面里不止一只狗（manifest 的「画面里几只狗」那一列）。"
+                     "裁的时候取的是面积最大的那只，但标注时容易标串——**建议直接跳过**。")
+    lines += [
+        "",
+        "  **先标这 50 张就停下来评一次**：拿它们当验证集，量一下现在的 RTMPose 到底"
         "错在哪（是前后爪反了，还是整副骨架乱）。错法不同，要不要继续标、标多少，答案不同。",
         "  另外记着：同一份真值里 45% 的帧人也判不了，姿态模型救不了那一半——"
         "这件事的天花板在那儿。",
     ]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def main() -> None:

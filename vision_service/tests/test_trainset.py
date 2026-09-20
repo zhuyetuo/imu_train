@@ -89,6 +89,13 @@ def test_导出_留一大圈边_小目标放大_manifest带分层(tmp_path, monk
     (root / "data_raw" / "d").mkdir(parents=True)
     (root / "data_raw" / "d" / "a_cam1_imu1_raw.mp4").write_bytes(b"0")
 
+    # 两只狗：一大一小。裁的时候要取大的那只，不能用并集——影棚一帧里常有两三只，
+    # 并集裁出来是"一屋子狗"，标关键点根本不知道该标哪只
+    from vision_service import dog
+    monkeypatch.setattr(dog, "detect", lambda f, *a, **kw: [
+        {"bbox": [0.25, 0.25, 0.5, 0.5], "conf": 0.9},
+        {"bbox": [0.0, 0.0, 0.1, 0.1], "conf": 0.8}])
+
     picks = [{"path": "data_raw/d/a_cam1_imu1_raw.mp4", "t": 1.0, "n_vis": 3,
               "box": [0.25, 0.25, 0.75, 0.75], "bucket": ("gouchang", "cam1", "夜", "蜷着")},
              {"path": "data_raw/d/没有.mp4", "t": 1.0, "n_vis": 3, "box": None,
@@ -97,11 +104,16 @@ def test_导出_留一大圈边_小目标放大_manifest带分层(tmp_path, monk
     msg = ts.export(picks, out, str(root), max_side=640)
 
     assert "导了 1 张" in msg and "gouchang/夜/蜷着" in msg        # 视频不在的那条跳过
-    assert "先标 50 张就停下来评一次" in msg and "45% 的帧人也判不了" in msg
-    assert "0 左眼" in msg and "16 右后爪" in msg                  # 关键点顺序要写清楚
+    # 换行得是真换行：写文件时把 "\n" 写成 "\\n" 的话，整段会挤成一行带一堆字面 \n
+    assert "\\n" not in msg and msg.count("\n") > 5
+    assert "先标这 50 张就停下来评一次" in msg and "45% 的帧人也判不了" in msg
+    # 只标 6 个点：肩/肘/髋/膝埋在毛里看不见，标注员只能猜，而且判部位根本用不上
+    assert "只标 6 个点，不是 17 个" in msg and "2 鼻子" in msg and "16 右后爪" in msg
+    assert "左肩" not in msg and "左肘" not in msg
+    assert "1 张画面里不止一只狗" in msg and "建议直接跳过" in msg
     img = cv2.imread(os.path.join(out, "0000.jpg"))
     # 框 100x100，四周各留 60% → 200x200（被原图边界截住），再放大到 640
     assert img.shape[0] == 640 and img.shape[1] == 640
     rows = list(csv.DictReader(open(os.path.join(out, "manifest.csv"), encoding="utf-8-sig")))
     assert rows[0]["场地"] == "gouchang" and rows[0]["姿势"] == "蜷着"
-    assert rows[0]["现在测到几个点"] == "3"
+    assert rows[0]["现在测到几个点"] == "3" and rows[0]["画面里几只狗"] == "2"
