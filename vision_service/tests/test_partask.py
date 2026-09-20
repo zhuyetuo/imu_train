@@ -141,3 +141,65 @@ def test_没key时只dry_run_但钱要估出来并列出几个档位(monkeypatch
         assert m in out and "约 $" in out                # 每个档位都给价
     assert "vision_service/.env" in out and "SEEK_MODEL" in out   # 怎么配
     assert "SEEK_PROVIDER=doubao" in out                          # 非 Claude 那条路也要写出来
+
+
+def test_probe_逐层打印实际发生了什么(tmp_path, monkeypatch, capsys):
+    """取不到帧时，索引层 / ffmpeg 层 / cv2 层各有自己的失败方式，而每一层的错都被
+    上一层吞掉了——CLI 里连 logger 的 warning 都看不见。2026-09-20 为这件事猜了两轮
+    还没猜对，所以不猜了：把每一层的真实输出原样打出来。"""
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    rel = "data_raw/d/a_cam1_imu1_raw.mp4"
+    _index(tmp_path, rel, [418, 420, 422, 424], [[0.2, 0.2, 0.8, 0.8]] * 4)
+    root = tmp_path / "nas"
+    (root / "data_raw" / "d").mkdir(parents=True)
+    (root / "data_raw" / "d" / "a_cam1_imu1_raw.mp4").write_bytes(b"0" * 1000)
+
+    monkeypatch.setattr(partask.seek, "_video_size", lambda p: (640, 360))
+
+    class R:
+        returncode = 1
+        stdout = b""
+        stderr = "moov atom not found".encode()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: R())
+
+    class Cap:
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 0.0
+
+        def set(self, *a):
+            return True
+
+        def grab(self):
+            return False
+
+        def release(self):
+            pass
+    import cv2
+    monkeypatch.setattr(cv2, "VideoCapture", lambda p: Cap())
+
+    txt = partask.probe({"path": rel, "t": 421.0}, str(root))
+    assert "存在=True" in txt and "索引里 4 帧，覆盖 418~424s" in txt
+    assert "要的时刻：[418.0, 420.0, 422.0, 424.0]" in txt
+    assert "hwaccel=True" in txt and "hwaccel=False" in txt
+    assert "-ss 417.500" in txt and "退出码=1" in txt
+    assert "moov atom not found" in txt                 # ffmpeg 真正的抱怨要原样带出来
+    assert "grab 到 0 帧" in txt
+
+    # 视频不在：一句话说完，不往下跑
+    txt2 = partask.probe({"path": "没有.mp4", "t": 1.0}, str(root))
+    assert "**不存在**" in txt2 and "ffmpeg" not in txt2
+
+    # --probe 不调 API
+    monkeypatch.setattr(posepart, "find", lambda *a, **kw: {
+        "known": True, "hits": [{"path": rel, "t": 421.0, "dist": 0.1, "slot": "后左爪"}]})
+    monkeypatch.setattr(partask.config, "VIDEO_ROOT", str(root))
+    monkeypatch.setattr(sys, "argv", ["x", "--part", "后爪", "--probe", "1",
+                                      "--index-dir", str(tmp_path)])
+    partask.main()
+    assert "moov atom not found" in capsys.readouterr().out

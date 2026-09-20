@@ -179,6 +179,93 @@ def summarize(results: list[dict], llm=None) -> str:
     return "\n".join(lines)
 
 
+def probe(hit: dict, video_root: str, span_s: float = 3.0, n: int = 4) -> str:
+    """对一条候选，把每一层实际发生了什么原样打出来。
+
+    为什么要这个：取不到帧时，索引层、ffmpeg 层、cv2 层各有自己的失败方式，而每一层
+    的错都被上一层吞掉了——CLI 里连 logger 的 warning 都看不见（没配 logging）。
+    2026-09-20 为这件事猜了两轮还没猜对，所以不猜了：把 ffmpeg 的真实命令、退出码、
+    stderr，和 cv2 实际吐出来的时间戳，一条条打出来。
+    """
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    out = [f"== {hit['path']}  t={hit['t']}s =="]
+    full = os.path.join(video_root, hit["path"])
+    out.append(f"视频：{full}  存在={os.path.isfile(full)}  "
+               f"大小={os.path.getsize(full) / 1e6:.0f}MB" if os.path.isfile(full)
+               else f"视频：{full}  **不存在**")
+    if not os.path.isfile(full):
+        return "\n".join(out)
+
+    ip = embed.index_path(hit["path"])
+    out.append(f"索引：{ip}  存在={os.path.isfile(ip)}")
+    d = embed.load(hit["path"])
+    if d is None:
+        return "\n".join(out + ["索引读不出来，后面不用看了"])
+    ts = np.asarray(d["t"], dtype="float32")
+    out.append(f"索引里 {len(ts)} 帧，覆盖 {float(ts[0]):.0f}~{float(ts[-1]):.0f}s")
+    sel = np.flatnonzero((ts >= hit["t"] - span_s) & (ts <= hit["t"] + span_s))
+    if len(sel) > n:
+        sel = sel[np.linspace(0, len(sel) - 1, n).astype(int)]
+    want = [round(float(ts[i]), 2) for i in sel]
+    out.append(f"要的时刻：{want}")
+    if not want:
+        return "\n".join(out)
+    lo, hi = min(want), max(want)
+    start_s, end_s = max(0.0, lo - 0.5), hi + 0.5
+
+    out.append(f"\n-- 分辨率（cv2 读的，ffmpeg 靠它算每帧字节数）--")
+    try:
+        w, h = seek._video_size(full)
+        out.append(f"   {w}x{h}")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   读不到：{type(e).__name__}: {e}")
+        w = h = 0
+
+    for hw in (True, False):
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        if hw:
+            cmd += ["-hwaccel", "cuda"]
+        cmd += ["-ss", f"{start_s:.3f}", "-i", full, "-t", f"{end_s - start_s:.3f}",
+                "-vf", "fps=1/1.0", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+        out.append(f"\n-- ffmpeg hwaccel={hw} --")
+        out.append("   " + " ".join(cmd))
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=60)
+            nbytes = len(r.stdout)
+            out.append(f"   退出码={r.returncode}  stdout={nbytes:,} 字节"
+                       f"（每帧 {w * h * 3:,}，够 {nbytes // max(w * h * 3, 1)} 帧）")
+            err = r.stderr.decode("utf-8", "ignore").strip()
+            out.append(f"   stderr：{err[:400] or '（空）'}")
+        except Exception as e:  # noqa: BLE001
+            out.append(f"   跑不起来：{type(e).__name__}: {e}")
+
+    out.append(f"\n-- cv2（seek 到 {start_s - 2:.1f}s 再按 PTS 往前找）--")
+    cap = cv2.VideoCapture(full)
+    try:
+        out.append(f"   打开={cap.isOpened()}  总帧数={cap.get(cv2.CAP_PROP_FRAME_COUNT):.0f}"
+                   f"  fps={cap.get(cv2.CAP_PROP_FPS):.2f}")
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start_s - 2.0) * 1000.0)
+        out.append(f"   seek 后 POS_MSEC={cap.get(cv2.CAP_PROP_POS_MSEC):.0f}")
+        got = []
+        for _ in range(400):
+            if not cap.grab():
+                break
+            ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            got.append(ms / 1000.0)
+            if ms / 1000.0 > end_s:
+                break
+        out.append(f"   grab 到 {len(got)} 帧，时间戳前几个：{[round(x, 2) for x in got[:8]]}")
+        if got:
+            out.append(f"   最后一个：{got[-1]:.2f}s")
+    finally:
+        cap.release()
+    return "\n".join(out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="把姿态捞出来的部位候选送去问大模型")
     ap.add_argument("--part", required=True, help="部位名，比如 后爪")
@@ -195,7 +282,13 @@ def main() -> None:
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
     ap.add_argument("--sheet", metavar="PNG", help="把命中的拼成一张带骨架的图")
     ap.add_argument("--dry-run", action="store_true", help="只报会问多少条、大概多少钱，不调 API")
+    ap.add_argument("--probe", type=int, default=0, metavar="N",
+                    help="只对前 N 条候选逐层打印实际发生了什么（索引/ffmpeg/cv2），不调 API。"
+                         "取不到帧时用它，别猜")
     args = ap.parse_args()
+    # CLI 里不配 logging 的话，各层的 warning（比如 ffmpeg 换一种解码）一句都看不见
+    import logging
+    logging.basicConfig(level=logging.WARNING, format="[%(name)s] %(message)s")
 
     key = posepart.part_of(args.part) or args.part
     r = posepart.find(args.index_dir, key, args.near_max, True, args.per_video,
@@ -204,6 +297,11 @@ def main() -> None:
         print(f"不认识的部位：{args.part} → {key}（认得的：{'、'.join(posepart.PARTS)}）")
         return
     hits = r["hits"][:args.limit] if args.limit else r["hits"]
+    if args.probe:
+        for h in hits[:args.probe]:
+            print()
+            print(probe(h, config.VIDEO_ROOT, args.span, args.frames))
+        return
     print(f"{args.part} → {key}：几何粗筛出 {len(r['hits']):,} 条，这次问 {len(hits):,} 条"
           f"（近到 {args.near_max} 体长、连着 {args.min_run} 秒）")
 
