@@ -362,7 +362,7 @@ def test_两组都是0时_不能说成顺着提示词猜():
                 "usage": {"input": 1, "output": 1}}
 
     zero = partask.summarize([mk(None) for _ in range(15)] + [mk(None, True) for _ in range(15)])
-    assert "两组都是 0" in zero and "一条都没判出来" in zero
+    assert "两组都是 0" in zero and "对所有片段都答 none" in zero
     assert "2-4Hz" in zero and "--step 0.3" in zero      # 指向真正该查的地方
     assert "顺着提示词猜" not in zero
 
