@@ -341,3 +341,40 @@ def test_命令行也要读env_不然跟服务跑的是两套配置(tmp_path, mo
     monkeypatch.delenv("VIDEO_ROOT", raising=False)
     monkeypatch.delenv("POSE_ONNX", raising=False)
     config._load_env_file(str(tmp_path / "没有这个文件"))  # 不炸
+
+
+def test_时间一致性_随机误检滤掉_真动作留下():
+    """俯拍上 RTMPose 的误检是随机的：这一秒判后左爪，下一秒骨架换个错法就判别的。
+    真在舔后爪的狗会连着十几秒都判同一只爪。2026-09-20 的联系表显示十五格里
+    一格真的都没有，所以要靠这个把两者分开——不是为了收紧阈值。"""
+    ts = np.arange(20, dtype="float32")
+    m = np.zeros(20, bool)
+    m[2] = m[5] = m[9] = True            # 三个孤立的（随机误检）
+    m[12:18] = True                      # 连着 6 秒（真动作）
+    assert list(pp.stable(m, ts, 1)) == list(m)                  # min_run=1 等于不筛
+    out = pp.stable(m, ts, 4)
+    assert not out[2] and not out[5] and not out[9]
+    assert list(np.flatnonzero(out)) == list(range(12, 18))
+    assert not pp.stable(m, ts, 7).any()                          # 要求 7 秒，6 秒那段也不够
+
+
+def test_时间一致性_索引里断档的不算连续():
+    """索引里只有有狗的帧。中间隔了几分钟的两帧不是"连着"。"""
+    ts = np.array([0, 1, 2, 300, 301, 302], dtype="float32")
+    m = np.ones(6, bool)
+    out = pp.stable(m, ts, 4)
+    assert not out.any()                                          # 两段各 3 帧，都不够 4
+    assert pp.stable(m, ts, 3).all()                              # 各自 3 帧够了
+
+
+def test_时间一致性_接进find(tmp_path):
+    d = str(tmp_path)
+    near = [0.9, 0.9, 0.15, 0.9, 0.9, 0.9]
+    far = [0.9, 0.9, 0.95, 0.9, 0.9, 0.9]
+    # 1 帧孤立命中 + 断档 + 连着 5 帧命中
+    rows = [_row(near)] + [_row(far)] * 3 + [_row(near)] * 5
+    _idx(d, "a.npz", "data_raw/2026_9_14_gouchang/a_cam1_imu1_raw.mp4", rows, range(9))
+    assert pp.find(d, "后爪", near_max=0.6, min_gap_s=0, min_run=1)["raw_hits"] == 6
+    r = pp.find(d, "后爪", near_max=0.6, min_gap_s=0, min_run=4)
+    assert r["raw_hits"] == 5 and r["min_run"] == 4               # 孤立那一帧没了
+    assert min(h["t"] for h in r["hits"]) == 4.0
