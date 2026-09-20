@@ -205,7 +205,7 @@ def control_hits(index_dir: str, part: str, n: int, seed: int = 0) -> list[dict]
 
 def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
             n_frames: int, span_s: float, video_root: str, step_s: float = 0.3,
-            client=None, http=None, debug: bool = False) -> dict:
+            client=None, http=None, debug: bool = False, contact: bool = True) -> dict:
     """一条候选 → 问一次。返回候选本身 + 模型的回答；拿不到帧就 skipped。"""
     full = os.path.join(video_root, hit["path"])
     if not os.path.isfile(full):
@@ -215,8 +215,12 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
     if not frames:
         return {**hit, "skipped": why or "取不到帧"}
     # 告诉模型这几帧一共跨多久：1.5 秒和 6 秒，"有没有反复"的判断标准完全不同
-    a = seek.ask(frames, labels, step_s * (len(frames) - 1), llm, client=client, http=http,
-                 debug=debug)
+    clip = step_s * (len(frames) - 1)
+    if contact:
+        a = seek.ask_contact(frames, list(posepart.SLOT_NAMES), clip, llm,
+                             client=client, http=http, debug=debug)
+    else:
+        a = seek.ask(frames, labels, clip, llm, client=client, http=http, debug=debug)
     return {**hit, "n_frames": len(frames), **{k: v for k, v in a.items() if k != "usage"},
             "usage": a.get("usage") or {}}
 
@@ -278,6 +282,68 @@ def dump_debug(results: list[dict], out_dir: str, limit: int = 8) -> str:
         n += 1
     return (f"存了 {n} 组到 {out_dir}/（*.jpg 是真正发出去的图，*.txt 是提示词和原始回答）"
             "\n  **先看图**：狗在图上有多大？舌头看得见吗？看不见的话改提示词/换模型都没用")
+
+
+def summarize_contact(results: list[dict], llm=None) -> str:
+    """接触问法的三个数。**它们都是可验证的，不像"命中率"那样依赖模型会不会判行为。**
+
+      接触率（正式 vs 对照）  几何说"鼻子贴着爪"，画面同不同意。这一条直接量
+                              几何粗筛的精度，而且对照组是干净的对照（几何说
+                              离得远，画面也该说没贴）
+      部位一致率              画面说贴的是哪只爪，跟几何判的对不对得上。四爪
+                              全可见只有 58%，几何的左右本来就不牢，这个数会告诉
+                              我们该不该把左右降级成"后爪"
+      在动的比例              舔的时候狗在动。这一条给下一步（跟 IMU 取交集）打底
+    """
+    n = len(results)
+    ok = [r for r in results if not r.get("skipped")]
+    ctl = [r for r in ok if r.get("control")]
+    ok = [r for r in ok if not r.get("control")]
+    unclear = [r for r in ok if r.get("see") == "unclear"]
+
+    def rate(rows, f):
+        return (sum(1 for r in rows if f(r)) / len(rows) * 100) if rows else 0.0
+
+    c_ok, c_ctl = rate(ok, lambda r: r.get("contact")), rate(ctl, lambda r: r.get("contact"))
+    agree = [r for r in ok if r.get("contact") and r.get("part")]
+    same = sum(1 for r in agree if r.get("part") == r.get("slot"))
+    side = sum(1 for r in agree
+               if (r.get("part") or "")[:1] == (r.get("slot") or "")[:1])   # 前/后对上就算
+    lines = ["", f"问了 {len(ok) + len(ctl)}/{n} 条（{n - len(ok) - len(ctl)} 条取不到帧）"
+             + (f"，其中正式 {len(ok)} 条、对照 {len(ctl)} 条" if ctl else ""),
+             f"  看不清 {len(unclear)}（{rate(ok, lambda r: r.get('see') == 'unclear'):.0f}%）",
+             "",
+             f"  ① 口鼻贴着身体：正式 {c_ok:.0f}%" + (f"，对照 {c_ctl:.0f}%" if ctl else ""),
+             ]
+    if ctl:
+        if c_ok - c_ctl >= 20:
+            lines.append(f"     ✓ 差了 {c_ok - c_ctl:.0f} 个点 → 几何说的「鼻子贴着爪」画面认，"
+                         "这个粗筛是有效的")
+        else:
+            lines.append("     ⚠ 两组差不多 → 几何的「贴着」画面不认，粗筛本身要重做，"
+                         "不是调阈值的事")
+    if agree:
+        lines.append(f"  ② 部位跟几何对得上：{same}/{len(agree)}（{same / len(agree) * 100:.0f}%）"
+                     f"，只看前/后不看左右：{side}/{len(agree)}（{side / len(agree) * 100:.0f}%）")
+        if side and same / max(side, 1) < 0.7:
+            lines.append("     → 前后对得上但左右对不上，跟四爪全可见只有 58% 一致；"
+                         "部位标签先降级到「后爪」这一级，别给左右")
+    lines.append(f"  ③ 这几帧里在动：{rate(ok, lambda r: r.get('moving')):.0f}%"
+                 "  ← 舔的时候狗在动。下一步跟 IMU 的理毛时段取交集，这一条打底")
+    if llm is not None:
+        tin = sum(int((r.get("usage") or {}).get("input") or 0) for r in ok + ctl)
+        tout = sum(int((r.get("usage") or {}).get("output") or 0) for r in ok + ctl)
+        lines.append(f"  花费 约 ${llmmod.estimate_usd(llm, tin, tout):.2f}"
+                     f"（in {tin:,} / out {tout:,}）")
+    lines.append("")
+    lines.append("  前几条（画面说贴着 / 几何说贴着）：")
+    for r in sorted(ok, key=lambda x: -(x.get("confidence") or 0))[:8]:
+        mark = "✓" if r.get("part") == r.get("slot") else ("~" if r.get("contact") else "✗")
+        lines.append(f"    {mark} 画面：{r.get('part') or '没贴到'}"
+                     f"{'（在动）' if r.get('moving') else ''}"
+                     f"  几何：{r.get('slot')} {r.get('dist')}体长  {r['t']:.0f}s")
+        lines.append(f"       {r.get('desc') or ''}")
+    return "\n".join(lines)
 
 
 def summarize(results: list[dict], llm=None) -> str:
@@ -459,6 +525,9 @@ def main() -> None:
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
     ap.add_argument("--sheet", metavar="PNG", help="把命中的拼成一张带骨架的图")
     ap.add_argument("--dry-run", action="store_true", help="只报会问多少条、大概多少钱，不调 API")
+    ap.add_argument("--behavior", action="store_true",
+                    help="退回老问法（判舔/啃/抓挠）。默认只问「口鼻贴着哪个部位」——"
+                         "「是不是在舔」画面答不了（舌头只有几个像素），那一半交给 IMU")
     ap.add_argument("--dump", metavar="DIR",
                     help="把**真正发出去的那张拼图**、完整提示词、模型原始回答存下来。"
                          "模型答得不对时第一件事是看这个，不是改提示词")
@@ -530,8 +599,13 @@ def main() -> None:
         hits = hits + ctl
     labels = labels_for(key, [x.strip() for x in args.labels.split(",") if x.strip()],
                         wide=not args.narrow)
-    print(f"  问 {llm.label()}，类别 {'/'.join(l.name for l in labels)}，"
-          f"部位选项 {'/'.join(labels[0].parts)}")
+    if args.behavior:
+        print(f"  问 {llm.label()}，类别 {'/'.join(l.name for l in labels)}，"
+              f"部位选项 {'/'.join(labels[0].parts)}")
+    else:
+        print(f"  问 {llm.label()}：**只问口鼻贴着哪个部位**"
+              f"（{'/'.join(posepart.SLOT_NAMES)}），一个字不提舔/啃/抓挠——"
+              "「是不是在舔」画面答不了，那一半交给 IMU")
     print(f"  每条送 {args.frames} 帧、间隔 {args.step}s（窗口 {args.step * (args.frames - 1):.1f}s）"
           "——舔/啃是 2-4Hz 的反复动作，间隔太大只能采到随机相位")
     t0 = time.monotonic()
@@ -540,7 +614,8 @@ def main() -> None:
     def one(h):
         try:
             return ask_one(h, key, labels, llm, n_frames=args.frames, span_s=args.span,
-                           step_s=args.step, video_root=config.VIDEO_ROOT, debug=bool(args.dump))
+                           step_s=args.step, video_root=config.VIDEO_ROOT, debug=bool(args.dump),
+                           contact=not args.behavior)
         except Exception as e:  # noqa: BLE001 一条问失败不该让整批白跑，但原因要留着
             return {**h, "skipped": f"{type(e).__name__}: {str(e)[:120]}"}
 
@@ -558,7 +633,7 @@ def main() -> None:
     # **先打印再写文件**：写文件失败不该吃掉刚花了钱问回来的答案。
     # 2026-09-20 踩过——--dump 把图片 bytes 塞进结果，--out 写 JSON 时炸了，
     # 73 秒的问答全白跑，连一个数都没看到
-    print(summarize(results, llm))
+    print(summarize_contact(results, llm) if not args.behavior else summarize(results, llm))
     if args.out:
         try:
             with open(args.out, "w", encoding="utf-8") as f:

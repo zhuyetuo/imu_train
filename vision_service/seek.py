@@ -519,6 +519,84 @@ def build_prompt(labels: list[Label], clip_s: float, n_frames: int,
     return system, user
 
 
+def build_contact_prompt(parts: list[str], n_frames: int, clip_s: float,
+                        tiled: bool = False) -> tuple[str, str]:
+    """只问画面答得了的那个问题：**口鼻贴着身体的哪个部位**。
+
+    ## 为什么不问"是不是在舔"
+
+    2026-09-20 连着几轮都栽在这上面。问「这是舔/啃/抓挠还是 none」时：
+
+      提示词偏松 → 见什么都说"在舔"，对照组一样高，那个命中率是假的
+      提示词偏严 → 全答 none。模型明明看见了（"1-2口鼻朝后爪，3-4头低下，
+                   姿势有变化"），但我写着"看不到反复就答 none"，它照做
+
+    根子上是**这个问题画面答不了**：
+
+      1. 舔是 2-4 Hz，舌头只有几个像素，俯拍画面上根本看不见
+      2. 唯一看得见的特征是"口鼻长时间贴在某个部位"——而我为了防误报，
+         明确写了"头靠近某个部位但姿势没变 = 休息"，等于亲手禁掉了唯一的证据
+      3. 采样 0.3 秒 = 3.3 Hz，正好在奈奎斯特频率上，"反复"照样采不到
+
+    「是不是在理毛」**IMU 答得了**（label_service/grooming.py 那条规则测的就是
+    这个动作特征）。画面该答的是另一半：**贴的是哪个部位**。两者取交集才是
+    「舔-后左爪」。这是一开始定的分工，中间走丢了。
+
+    所以这里一个字都不提舔/啃/抓挠——不给任何行为上的暗示，只问接触关系。
+    """
+    system = (
+        "你在看一段狗舍俯拍监控里裁出来的狗。给你的是同一只狗连续几秒的几帧，"
+        "不是几只不同的狗。"
+        "**只回答一件事：这只狗的口鼻（嘴和鼻子那一块）有没有贴到自己身体的某个部位。**"
+        "贴到 = 接触或几乎接触（中间没有明显空隙）。头只是朝那个方向、但隔着一段距离，"
+        "不算贴到。另外说一下这几帧之间狗有没有在动。"
+        "不用判断它在做什么行为，也不要猜——看不清就说 see=unclear。"
+        "只输出一个 JSON 对象，不要别的文字。"
+    )
+    how = (f"这是 {clip_s:.1f} 秒里按顺序抽的 {n_frames} 帧，"
+           + ("拼成了一张图，从左到右、从上到下是时间顺序，每格左上角有序号。\n"
+              if tiled else "按时间先后给你。\n"))
+    user = (
+        how + "部位只能从这几个里选：" + " / ".join(parts) +
+        '\n\n输出格式（只要这个 JSON）：\n'
+        '{"see": "clear 或 unclear", '
+        '"desc": "<30字内：狗什么姿势、口鼻在哪、几帧之间变了什么>", '
+        '"contact": true 或 false, '
+        '"part": "<贴到的部位，没贴到就 null>", '
+        '"moving": true 或 false, '
+        '"confidence": <0到1>}\n'
+        "desc 写你实际看到的。contact 只看口鼻和身体部位之间有没有空隙，不用管它在干什么。"
+    )
+    return system, user
+
+
+def parse_contact(text: str, parts: list[str]) -> dict:
+    """接触问法的回答 → {contact, part, moving, see, desc, confidence}。"""
+    blank = {"contact": False, "part": None, "moving": None, "see": "unknown",
+             "desc": "", "confidence": 0.0, "note": "无法解析"}
+    m = _JSON_RE.search(text or "")
+    if not m:
+        return blank
+    try:
+        d = json.loads(m.group(0))
+    except ValueError:
+        return blank
+    see = d.get("see")
+    see = see if see in ("clear", "unclear") else "unknown"
+    part = d.get("part")
+    part = part if isinstance(part, str) and part in parts else None
+    contact = bool(d.get("contact")) and see != "unclear"
+    try:
+        conf = max(0.0, min(1.0, float(d.get("confidence"))))
+    except (TypeError, ValueError):
+        conf = 0.0
+    moving = d.get("moving")
+    return {"contact": contact, "part": part if contact else None,
+            "moving": bool(moving) if isinstance(moving, bool) else None,
+            "see": see, "desc": str(d.get("desc") or "")[:80],
+            "confidence": conf, "note": ""}
+
+
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
@@ -601,6 +679,24 @@ def tile_frames(jpegs: list[bytes], cols: int = 0, cell: int = 336) -> bytes:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
     ok, buf = cv2.imencode(".jpg", sheet, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     return bytes(np.asarray(buf).tobytes()) if ok else b""
+
+
+def ask_contact(frames: list[bytes], parts: list[str], clip_s: float, llm: llmmod.LLM,
+                client=None, http=None, tile: bool = True, debug: bool = False) -> dict:
+    """只问"口鼻贴着哪个部位"（见 build_contact_prompt）。"""
+    n = len(frames)
+    sheet = tile_frames(frames) if (tile and n > 1) else b""
+    send = [sheet] if sheet else frames
+    system, user = build_contact_prompt(parts, n, clip_s, tiled=bool(sheet))
+    t0 = time.monotonic()
+    text, usage = llmmod.chat_vision(llm, system, user, send, max_tokens=400, client=client, http=http)
+    out = parse_contact(text, parts)
+    out["usage"] = usage
+    out["latency_ms"] = int((time.monotonic() - t0) * 1000)
+    if debug:
+        out["_tile"] = sheet or (frames[0] if frames else b"")
+        out["_system"], out["_user"], out["_raw"] = system, user, text
+    return out
 
 
 def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM,
