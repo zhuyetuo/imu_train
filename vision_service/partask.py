@@ -54,23 +54,32 @@ LABEL_DESC = {
 
 
 def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
-                  span_s: float = 3.0, max_side: int = 384) -> list[bytes]:
-    """候选时刻前后几秒的几帧，按索引里存的框裁好。
+                  span_s: float = 3.0, max_side: int = 384) -> tuple[list[bytes], str]:
+    """候选时刻前后几秒的几帧，按索引里存的框裁好 → (帧, 说不清楚时的原因)。
 
     **不重跑检测**：框就在索引里（建索引时那一次检测的结果），重跑一次既慢又可能
     跟当初判断用的框不一样。拿不到索引就返回空，调用方跳过这条——宁可少问一条，
     也别拿一张跟判断依据不一致的图去问。
+
+    为什么要连原因一起返回：拿不到帧有四种完全不同的原因（索引找不到 / 索引是空的 /
+    那一段时间不在索引里 / 解码解不出来），它们的解法各不相同。2026-09-20 实测
+    20 条全军覆没，只说一句"取不到帧"，只能靠猜——这是这一轮里同一类错误的第四次。
     """
     import cv2
     import numpy as np
 
     d = embed.load(rel_path)
-    if d is None or not len(d["t"]):
-        return []
+    if d is None:
+        return [], f"索引里没有这一路：{embed.index_path(rel_path)}（rel={rel_path}）"
+    if not len(d["t"]):
+        return [], f"索引是空的（0 帧）：{rel_path}"
     ts = np.asarray(d["t"], dtype="float32")
+    if "box" not in d or len(d.get("box", ())) != len(ts):
+        return [], f"索引里没存框（老版本索引？）：{rel_path}"
     sel = np.flatnonzero((ts >= t - span_s) & (ts <= t + span_s))
     if not len(sel):
-        return []
+        return [], (f"{t:.0f}s 前后 {span_s:.0f} 秒不在索引里"
+                    f"（索引覆盖 {float(ts[0]):.0f}~{float(ts[-1]):.0f}s）")
     if len(sel) > n:                       # 均匀取 n 个，保证跨过整个时间窗
         sel = sel[np.linspace(0, len(sel) - 1, n).astype(int)]
     want = {round(float(ts[i]), 2): np.asarray(d["box"][i], dtype="float32") for i in sel}
@@ -98,7 +107,10 @@ def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
             out.append(bytes(np.asarray(buf).tobytes()))
         if not want:
             break
-    return out
+    if not out:
+        return [], (f"解码没给出 {lo:.0f}~{hi:.0f}s 那几帧（ffmpeg / cv2 都没对上时间）："
+                    f"{os.path.basename(full_path)}")
+    return out, ""
 
 
 def labels_for(part_key: str, names) -> list[seek.Label]:
@@ -121,9 +133,9 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
     full = os.path.join(video_root, hit["path"])
     if not os.path.isfile(full):
         return {**hit, "skipped": f"视频不在：{full}"}
-    frames = frames_around(full, hit["path"], hit["t"], n=n_frames, span_s=span_s)
+    frames, why = frames_around(full, hit["path"], hit["t"], n=n_frames, span_s=span_s)
     if not frames:
-        return {**hit, "skipped": "取不到帧（索引里没有这一段？）"}
+        return {**hit, "skipped": why or "取不到帧"}
     a = seek.ask(frames, labels, span_s * 2, llm, client=client, http=http)
     return {**hit, "n_frames": len(frames), **{k: v for k, v in a.items() if k != "usage"},
             "usage": a.get("usage") or {}}
@@ -250,8 +262,11 @@ def main() -> None:
 
     skipped = [x for x in results if x.get("skipped")]
     if skipped:
+        # 原因逐条不同（路径各不相同），所以按前缀归类再报，不然刷屏
         uniq = list(dict.fromkeys(x["skipped"] for x in skipped))
-        print(f"\n  {len(skipped)} 条没问成，原因：\n    " + "\n    ".join(uniq[:3]))
+        print(f"\n  {len(skipped)} 条没问成，原因（最多列 3 种）：\n    " + "\n    ".join(uniq[:3]))
+        if len(uniq) > 3:
+            print(f"    …… 还有 {len(uniq) - 3} 种")
     if args.sheet:
         good = [x for x in results if x.get("label")]
         if good:
