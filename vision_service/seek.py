@@ -144,18 +144,32 @@ def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s:
         proc.stdout.close()
         err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
         rc = proc.wait()
-    if rc != 0 and n == 0:
-        raise RuntimeError(f"ffmpeg 退出码 {rc}：{err[-300:]}")
+    if n == 0:
+        # **退出码 0 但一帧都没给，也算失败**。原来只在 rc != 0 时抛，于是这一支
+        # 既不抛也不产出，调用方那边直接 return——cv2 那条后路根本没机会跑，
+        # 表现成"解码没给出那几帧"而毫无线索。带 -ss 的小窗口上真会发生
+        # （2026-09-20 实测：partask 20 条全军覆没，建索引却一直是好的——
+        # 因为建索引那条路不带 -ss）。
+        raise RuntimeError(f"ffmpeg 退出码 {rc} 但一帧都没解出来"
+                           f"（-ss {start_s:.1f} -t {(end_s - start_s) if end_s else -1:.1f}）："
+                           f"{err[-300:] or '（stderr 是空的）'}")
 
 
 def iter_frames_cv2(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None):
-    """老路：cv2 顺序 grab，只在跨过采样点时 retrieve。时间读 PTS。"""
+    """老路：cv2 顺序 grab，只在跨过采样点时 retrieve。时间读 PTS。
+
+    start_s 大于零时先 seek 过去：不 seek 的话要从头 grab 到那儿，一小时的视频里
+    取 2548 秒那几帧得读四万多帧，几十秒。seek 的落点是关键帧、可能比要的时间早
+    几秒，所以 seek 完照样按 PTS 往前找，不影响准确性。
+    """
     import cv2
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"打不开这个视频：{path}")
     try:
+        if start_s > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start_s - 2.0) * 1000.0)
         next_t = start_s
         n_grabbed = 0
         while True:
@@ -183,16 +197,22 @@ def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float 
     """有 ffmpeg 走 ffmpeg（先试 NVDEC，不行退软解），没有走 cv2。"""
     if ffmpeg_available():
         for hw in ((True, False) if config.DECODE_HWACCEL else (False,)):
+            yielded = False
             try:
-                yielded = False
                 for item in iter_frames_ffmpeg(path, every_sec, start_s, end_s, hwaccel=hw):
                     yielded = True
                     yield item
-                return
             except RuntimeError as e:
+                # 已经吐过帧再出错：那是解到一半断了，退回 cv2 从头来会给出重复的帧，
+                # 不如让调用方看到错
                 if yielded:
                     raise
                 _logger.warning("ffmpeg 解码（hwaccel=%s）失败，换一种：%s", hw, e)
+                continue
+            if yielded:
+                return
+            # 没抛也没产出：这种在 iter_frames_ffmpeg 里已经改成抛了，留这一手兜底
+            _logger.warning("ffmpeg（hwaccel=%s）没产出帧，换一种：%s", hw, path)
         _logger.warning("ffmpeg 两种都不行，退回 cv2 解码：%s", path)
     yield from iter_frames_cv2(path, every_sec, start_s, end_s)
 
