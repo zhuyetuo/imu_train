@@ -39,10 +39,14 @@ def test_裁帧用索引里存的框_不重跑检测(tmp_path, monkeypatch):
     rel = "data_raw/2026_9_14_gouchang/a_cam1_imu1_raw.mp4"
     _index(tmp_path, rel, [10, 11, 12, 13], [[0.25, 0.25, 0.75, 0.75]] * 4)
 
+    seen = {}
+
     def fake_iter(path, every, start_s=0.0, end_s=None):
-        for t in (10.0, 11.0, 12.0, 13.0):
-            if t >= start_s - 0.6 and (end_s is None or t <= end_s + 0.6):
-                yield t, np.full((200, 200, 3), int(t) * 10, np.uint8)
+        seen.update(every=every, start_s=start_s, end_s=end_s)
+        t = start_s
+        while end_s is None or t <= end_s:
+            yield t, np.full((200, 200, 3), 100, np.uint8)
+            t += every
     monkeypatch.setattr(seek, "iter_frames", fake_iter)
     monkeypatch.setattr(partask.seek, "iter_frames", fake_iter)
 
@@ -51,8 +55,11 @@ def test_裁帧用索引里存的框_不重跑检测(tmp_path, monkeypatch):
     from vision_service import dog
     monkeypatch.setattr(dog, "detect", lambda *a, **kw: detected.append(1) or [])
 
-    frames, why = partask.frames_around("/nas/a.mp4", rel, 11.5, n=4, span_s=3.0)
-    assert len(frames) == 4 and not detected and why == ""   # 一次检测都没跑
+    frames, why = partask.frames_around("/nas/a.mp4", rel, 11.5, n=6, span_s=3.0, step_s=0.3)
+    assert len(frames) == 6 and not detected and why == ""   # 一次检测都没跑
+    # **按 0.3 秒解码，不是照着索引的 1 秒**：舔/啃是 2-4Hz，1 秒间隔只能采到随机相位
+    assert seen["every"] == 0.3
+    assert abs(seen["start_s"] - (11.5 - 0.3 * 5 / 2)) < 1e-6
     img = cv2.imdecode(np.frombuffer(frames[0], np.uint8), cv2.IMREAD_COLOR)
     # 框是 0.25~0.75（100x100），四周各留 25% → 150x150
     assert img.shape[0] == 150 and img.shape[1] == 150
@@ -344,3 +351,30 @@ def test_自洽性_自己跟自己对不上时要明说命中率没意义():
                               r(["舔", None, None, None, "舔"])])
     assert "5 条里 5 条（100%）" in good and "其中 2 条部位也一样" in good
     assert "没意义" not in good
+
+
+def test_两组都是0时_不能说成顺着提示词猜():
+    """两边都是 0 不是"模型在猜"，是**一条都没判出来**——解法完全相反：
+    前者要换问法，后者要查采样间隔/放松提示词。说错了人就往错的方向改。"""
+    def mk(label, control=False):
+        return {"path": "a.mp4", "t": 1, "see": "clear", "label": label, "body_part": None,
+                "confidence": 0.0, "desc": "d", "note": "n", "control": control,
+                "usage": {"input": 1, "output": 1}}
+
+    zero = partask.summarize([mk(None) for _ in range(15)] + [mk(None, True) for _ in range(15)])
+    assert "两组都是 0" in zero and "一条都没判出来" in zero
+    assert "2-4Hz" in zero and "--step 0.3" in zero      # 指向真正该查的地方
+    assert "顺着提示词猜" not in zero
+
+    # 两边都有命中且差不多：那才是"在猜"
+    guess = partask.summarize([mk("舔") for _ in range(6)] + [mk(None) for _ in range(9)]
+                              + [mk("舔", True) for _ in range(5)] + [mk(None, True) for _ in range(10)])
+    assert "顺着提示词猜" in guess and "两组都是 0" not in guess
+
+
+def test_全答none时_自洽率100是白送的():
+    """每轮都是 0 命中，"几轮答的类别一样"必然 100%——那说明不了稳不稳，
+    不点破的话会被当成"模型很稳定"。"""
+    rows = [[{"path": f"{i}.mp4", "t": i, "label": None, "body_part": None} for i in range(5)]] * 2
+    txt = partask.agreement(rows)
+    assert "100%" in txt and "白送的" in txt and "说明不了稳不稳" in txt
