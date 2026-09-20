@@ -117,3 +117,21 @@ def test_导出_留一大圈边_小目标放大_manifest带分层(tmp_path, monk
     rows = list(csv.DictReader(open(os.path.join(out, "manifest.csv"), encoding="utf-8-sig")))
     assert rows[0]["场地"] == "gouchang" and rows[0]["姿势"] == "蜷着"
     assert rows[0]["现在测到几个点"] == "3" and rows[0]["画面里几只狗"] == "2"
+
+
+def test_姿势按检测框的长宽比分_不按姿态关键点():
+    """原来拿 spread（从 RTMPose 的关键点算出来的）判蜷着/摊开——**等于拿要评估的
+    那个模型给数据分层**。骨架崩掉时 spread 也是噪声，分出来的"姿势"是假的。
+
+    2026-09-20 实测印证：按那个分法，摊开和蜷着两组 RTMPose 测到的点数完全没差
+    （中位数 6.5 vs 9.0，≤5 个点的都是 38%）——那根本不是姿势。
+    """
+    # 归一化框要乘回画幅宽高比：16:9 的画面里，0.1 宽 × 0.1 高不是正方形
+    assert ts.curled_from_box([0.4, 0.3, 0.5, 0.5])          # 0.1*16/9=0.178 vs 0.2 → 接近方
+    assert not ts.curled_from_box([0.1, 0.4, 0.9, 0.5])      # 很长的条
+    assert not ts.curled_from_box([0.4, 0.1, 0.5, 0.9])      # 很高的条
+    assert ts.curled_from_box(None) is False                  # 老索引没框：不炸，按摊开算
+    # 退化的框（老索引里全是 (0,0,0,0)）：说不出姿势，跟"没有框"一个待遇，
+    # 别让 1e-6 的除法替我们编一个答案出来
+    assert ts.curled_from_box([0.5, 0.5, 0.5, 0.5]) is False
+    assert ts.curled_from_box([0, 0, 0, 0]) is False

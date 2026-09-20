@@ -60,6 +60,29 @@ _CAM_RE = re.compile(r"_cam(\d+)", re.IGNORECASE)
 _HOUR_RE = re.compile(r"_\d{8}_(\d{2})\d{7}")
 
 
+def curled_from_box(box, frame_ar: float = 16 / 9) -> bool:
+    """蜷着还是摊开：看**检测框的长宽比**，不看姿态关键点。
+
+    原来是拿 `spread < 本路中位数` 判的——而 spread 就是从 RTMPose 的关键点算出来的。
+    骨架崩掉的时候 spread 也是噪声，**等于拿要评估的那个模型给数据分层**，
+    分出来的"姿势"是假的。2026-09-20 实测印证：按那个分法，摊开和蜷着两组
+    RTMPose 测到的点数完全没差（中位数 6.5 vs 9.0，≤5 个点的都是 38%）——
+    因为那根本不是姿势，是"这一帧的骨架比本路平均更散还是更挤"。
+
+    框来自狗检测，跟姿态模型无关：狗蜷成一团时框接近正方形，摊开躺着时是长条。
+    框存的是相对整帧的归一化值，所以比长宽比之前要把画幅的宽高比乘回去。
+    """
+    if not box or len(box) != 4:
+        return False
+    w = (float(box[2]) - float(box[0])) * frame_ar
+    h = float(box[3]) - float(box[1])
+    if w <= 0 or h <= 0:
+        # 退化的框（老索引里全是 (0,0,0,0)）：说不出姿势，按摊开算，
+        # 跟"没有框"一个待遇。别让 1e-6 的除法替我们编一个答案出来
+        return False
+    return max(w, h) / min(w, h) < 1.6          # 接近方的算蜷着；细长的算摊开
+
+
 def _bucket(path: str, curled: bool) -> tuple:
     """一帧属于哪一格。四个维度：场地 / 机位 / 昼夜 / 姿势。"""
     m = _SITE_RE.search("/" + path)
@@ -95,14 +118,14 @@ def scan(index_dir: str, max_per_video: int = 40) -> list[dict]:
         vis = np.asarray(rows, dtype="float32")[:, DIM - K:] > 0
         n_vis = vis.sum(axis=1)
         spread = posepart.spread(rows)
-        # 蜷着 = 关键点挤在一小块里。现在最容易崩的就是这种
-        curled = spread < np.median(spread[spread > 0]) if (spread > 0).any() else spread < 0
         idx = np.argsort(n_vis)[:max_per_video]          # 可见点最少的优先：那才是要学的
         for i in idx:
+            b = [round(float(v), 4) for v in box[i]] if box is not None else None
             out.append({"path": path, "t": round(float(ts[i]), 2),
                         "n_vis": int(n_vis[i]), "spread": round(float(spread[i]), 3),
-                        "box": [round(float(v), 4) for v in box[i]] if box is not None else None,
-                        "bucket": _bucket(path, bool(curled[i]))})
+                        "box": b,
+                        # 姿势按检测框的长宽比分，不按姿态关键点——见 curled_from_box
+                        "bucket": _bucket(path, curled_from_box(b))})
     return out
 
 
