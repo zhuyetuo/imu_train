@@ -48,6 +48,11 @@ from . import config, embed, llm as llmmod, posepart, seek
 # 问的时候给哪些类别。部位从 --part 推出来：问"是不是在舔后爪"比问"在干嘛"准得多，
 # 但**必须留 none 这个出口**——候选里大半是睡觉的狗，不给出口模型会硬选一个，比没有还糟
 DEFAULT_LABELS = ("舔", "啃", "抓挠")
+
+# 问"口鼻贴着哪个部位"时给哪些选项。**故意不给「颈部」**：狗趴着时口鼻本来就在
+# 自己胸颈一带，那是个不用看画面就能选的答案——2026-09-20 实测 70 条里 25 条
+# （36%）选了它。只留爪子和尾根：那几个要真的把头够过去才成立
+CONTACT_PARTS = [p for p in posepart.SLOT_NAMES if p != "颈部"]
 LABEL_DESC = {
     "舔": "舌头反复舔舐身体某个部位，头保持在那个部位上",
     "啃": "用门牙啃咬身体某个部位，下颌有小幅快速开合",
@@ -219,7 +224,7 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
     # 告诉模型这几帧一共跨多久：1.5 秒和 6 秒，"有没有反复"的判断标准完全不同
     clip = step_s * (len(frames) - 1)
     if contact:
-        a = seek.ask_contact(frames, list(posepart.SLOT_NAMES), clip, llm,
+        a = seek.ask_contact(frames, CONTACT_PARTS, clip, llm,
                              client=client, http=http, debug=debug)
     else:
         a = seek.ask(frames, labels, clip, llm, client=client, http=http, debug=debug)
@@ -344,8 +349,14 @@ def score_truth(csv_path: str) -> str:
     if not n:
         return f"填了 {len(rows)} 行，但全是「看不清」——那本身就是个结论：这些帧人也判不了"
 
+    def geo_says(r):
+        """对照行里几何那一列写的是「（对照：离爪子很远）」，语义上就是「没贴到」。
+        按字符串直接比会把它算成错的——那是白扣分，而且会让人以为几何比实际更差。"""
+        return "没贴到" if (r.get("对照") or "").strip() else r["几何"].strip()
+
     def acc(col):
-        return sum(1 for r in done if r[col].strip() == r["人工填这一列"].strip())
+        f = geo_says if col == "几何" else (lambda r: r[col].strip())
+        return sum(1 for r in done if f(r) == r["人工填这一列"].strip())
 
     geo, vis = acc("几何"), acc("画面")
     ctl = [r for r in done if (r.get("对照") or "").strip()]
@@ -757,7 +768,8 @@ def main() -> None:
               f"部位选项 {'/'.join(labels[0].parts)}")
     else:
         print(f"  问 {llm.label()}：**只问口鼻贴着哪个部位**"
-              f"（{'/'.join(posepart.SLOT_NAMES)}），一个字不提舔/啃/抓挠——"
+              f"（{'/'.join(CONTACT_PARTS)}；不给「颈部」——狗趴着时口鼻本来就在那儿，"
+              f"那是个不用看画面就能选的答案），一个字不提舔/啃/抓挠——"
               "「是不是在舔」画面答不了，那一半交给 IMU")
     print(f"  每条送 {args.frames} 帧、间隔 {args.step}s（窗口 {args.step * (args.frames - 1):.1f}s）"
           "——舔/啃是 2-4Hz 的反复动作，间隔太大只能采到随机相位")

@@ -588,10 +588,11 @@ def test_导人工标注单_和读回来算分(tmp_path, monkeypatch):
         w.writeheader()
         w.writerows(rows)
     txt = partask.score_truth(os.path.join(d, "labels.csv"))
-    assert "几何（姿态关键点）对 0/2（0%）" in txt      # 人工说前左爪，几何说后左爪
+    # 对照行的「几何」写的是「（对照）」，语义上就是「没贴到」——人工也说没贴到，
+    # 所以几何在那一行是对的。按字符串直接比会白扣分，让人以为几何比实际更差
+    assert "几何（姿态关键点）对 1/2（50%）" in txt
     assert "画面（大模型）  对 2/2（100%）" in txt      # 画面两条都对上了
     assert "对照组 1 条里人工也说「没贴到」的：1" in txt
-    assert "画面明显强于几何" in txt                    # 给出该怎么办
 
     # 「看不清」要从分母里剔掉：人也判不了的帧，拿来给模型打分没有意义
     for r in rows:
@@ -611,3 +612,15 @@ def test_导人工标注单_和读回来算分(tmp_path, monkeypatch):
         w.writeheader()
         w.writerows(rows)
     assert "还是空的" in partask.score_truth(os.path.join(d, "labels.csv"))
+
+
+def test_接触问法不给颈部这个选项():
+    """狗趴着/蜷着时口鼻本来就在自己胸颈一带——「颈部」是个不用看画面就能选的答案。
+    2026-09-20 实测：给了这个选项之后，70 条里 25 条（36%）选了它。
+    只留爪子和尾根：那几个要真的把头够过去才成立。"""
+    assert "颈部" not in partask.CONTACT_PARTS
+    assert set(partask.CONTACT_PARTS) == {"前左爪", "前右爪", "后左爪", "后右爪", "尾根"}
+    sys_, user = seek.build_contact_prompt(partask.CONTACT_PARTS, 6, 1.5, tiled=True)
+    assert "颈部" not in user.split("部位只能从这几个里选：")[1].split("\n")[0]
+    assert "本来就挨着自己的胸口和脖子" in sys_ and "不算" in sys_
+    assert "不止一只狗" in sys_                       # 多狗同框时说看不清，别硬选
