@@ -53,9 +53,22 @@ LABEL_DESC = {
 }
 
 
-def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
-                  span_s: float = 3.0, max_side: int = 384) -> tuple[list[bytes], str]:
-    """候选时刻前后几秒的几帧，按索引里存的框裁好 → (帧, 说不清楚时的原因)。
+def frames_around(full_path: str, rel_path: str, t: float, n: int = 6,
+                  span_s: float = 3.0, max_side: int = 384,
+                  step_s: float = 0.3) -> tuple[list[bytes], str]:
+    """候选时刻前后几帧，按索引里存的框裁好 → (帧, 说不清楚时的原因)。
+
+    ## 采样间隔为什么是 0.3 秒而不是 1 秒
+
+    索引是每秒一帧，最早这里也照着每秒取一帧、跨 6 秒取 4 张。**那是个物理上
+    不可能完成的任务**：舔和啃的定义里都有"反复"，而那是 2–4 Hz 的动作——
+    每秒采一帧，两帧之间舌头来回好几个周期，采到的永远是随机相位，
+    看不出任何"反复"。2026-09-20 实测：先是模型见什么都说"在舔"，
+    加了"看不到反复就答 none"之后又变成见什么都说 none——两次都不是模型的错，
+    是给它的四张图里本来就没有它要找的东西。
+
+    这里**直接从视频解码，采样率不受索引限制**（索引只用来拿框和判时间范围）。
+    0.3 秒 × 6 帧 = 1.5 秒窗口，2–4 Hz 的动作在相邻帧之间能看出位置差。
 
     **不重跑检测**：框就在索引里（建索引时那一次检测的结果），重跑一次既慢又可能
     跟当初判断用的框不一样。拿不到索引就返回空，调用方跳过这条——宁可少问一条，
@@ -80,17 +93,18 @@ def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
     if not len(sel):
         return [], (f"{t:.0f}s 前后 {span_s:.0f} 秒不在索引里"
                     f"（索引覆盖 {float(ts[0]):.0f}~{float(ts[-1]):.0f}s）")
-    if len(sel) > n:                       # 均匀取 n 个，保证跨过整个时间窗
-        sel = sel[np.linspace(0, len(sel) - 1, n).astype(int)]
-    want = {round(float(ts[i]), 2): np.asarray(d["box"][i], dtype="float32") for i in sel}
-    lo, hi = min(want), max(want)
+    # 框按索引里离得最近的那一帧取。狗在 1.5 秒里不会跑出框，所以一个框够用；
+    # 而且用同一个框裁，几帧之间的差别就只剩狗自己的动作，正是要让模型看的东西
+    near_i = int(sel[np.argmin(np.abs(ts[sel] - t))])
+    box0 = np.asarray(d["box"][near_i], dtype="float32")
+    half = step_s * (n - 1) / 2.0
+    lo, hi = max(0.0, t - half), t + half
     out: list[bytes] = []
     n_redetect = 0
-    for ft, frame in seek.iter_frames(full_path, 1.0, start_s=max(0.0, lo - 0.5), end_s=hi + 0.5):
-        key = min(want, key=lambda x: abs(x - ft)) if want else None
-        if key is None or abs(key - ft) > 0.6:
-            continue
-        box = want.pop(key)
+    for ft, frame in seek.iter_frames(full_path, step_s, start_s=lo, end_s=hi + step_s * 0.5):
+        if len(out) >= n:
+            break
+        box = box0
         h, w = frame.shape[:2]
         if not embed.box_ok(box):
             # 2026-09-20 之前建的索引，box 列全是 (0,0,0,0)（见 embed.norm_box）。
@@ -117,10 +131,8 @@ def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
         ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
         if ok:
             out.append(bytes(np.asarray(buf).tobytes()))
-        if not want:
-            break
     if not out:
-        return [], (f"解码没给出 {lo:.0f}~{hi:.0f}s 那几帧（ffmpeg / cv2 都没对上时间）："
+        return [], (f"解码没给出 {lo:.1f}~{hi:.1f}s 那几帧（ffmpeg / cv2 都没对上时间）："
                     f"{os.path.basename(full_path)}")
     return out, ""
 
@@ -192,15 +204,18 @@ def control_hits(index_dir: str, part: str, n: int, seed: int = 0) -> list[dict]
 
 
 def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
-            n_frames: int, span_s: float, video_root: str, client=None, http=None) -> dict:
+            n_frames: int, span_s: float, video_root: str, step_s: float = 0.3,
+            client=None, http=None) -> dict:
     """一条候选 → 问一次。返回候选本身 + 模型的回答；拿不到帧就 skipped。"""
     full = os.path.join(video_root, hit["path"])
     if not os.path.isfile(full):
         return {**hit, "skipped": f"视频不在：{full}"}
-    frames, why = frames_around(full, hit["path"], hit["t"], n=n_frames, span_s=span_s)
+    frames, why = frames_around(full, hit["path"], hit["t"], n=n_frames, span_s=span_s,
+                                step_s=step_s)
     if not frames:
         return {**hit, "skipped": why or "取不到帧"}
-    a = seek.ask(frames, labels, span_s * 2, llm, client=client, http=http)
+    # 告诉模型这几帧一共跨多久：1.5 秒和 6 秒，"有没有反复"的判断标准完全不同
+    a = seek.ask(frames, labels, step_s * (len(frames) - 1), llm, client=client, http=http)
     return {**hit, "n_frames": len(frames), **{k: v for k, v in a.items() if k != "usage"},
             "usage": a.get("usage") or {}}
 
@@ -225,7 +240,10 @@ def agreement(rounds: list[list[dict]]) -> str:
              f"    {n} 条里 {same_label} 条（{same_label / max(n, 1) * 100:.0f}%）几轮答的类别一样"]
     if same_part:
         lines.append(f"    其中 {same_part} 条部位也一样")
-    if same_label / max(n, 1) < 0.8:
+    if all(c == 0 for c in hit_counts):
+        # 全答 none 时"几轮答得一样"是白送的，不能当成稳定
+        lines.append("    （每轮都是 0 命中，所以这个 100% 是白送的，说明不了稳不稳）")
+    elif same_label / max(n, 1) < 0.8:
         lines.append("    ⚠ 自己跟自己都对不上 → **命中率是多少都没意义**。"
                      "不是提示词不够好，是模型没在看画面；换模型或换问法（比如只问"
                      "「几帧之间狗的头有没有反复动」这种单一可判的事）再说。")
@@ -266,7 +284,13 @@ def summarize(results: list[dict], llm=None) -> str:
         lines.append("")
         lines.append(f"  对照组 {len(ctl)} 条（几何判定鼻子离爪子 >1.5 体长，不可能在舔）"
                      f"命中 {c_hit}（{c_rate * 100:.0f}%）")
-        if c_rate >= rate * 0.6:
+        if not len(hits) and not c_hit:
+            # 两边都是 0：这不是"顺着提示词猜"，是**一条都没判出来**，解法完全相反
+            lines.append("  ⚠ 两组都是 0 → 模型对所有片段都答 none。这**不是**精度问题，"
+                         "是提示词太保守、或者给的几帧里根本没有它要找的东西。")
+            lines.append("    先查采样间隔：舔/啃是 2-4Hz 的反复动作，"
+                         "帧间隔 1 秒只能采到随机相位，要求它'看到反复'是不可能完成的任务（--step 0.3）。")
+        elif c_rate >= rate * 0.6:
             lines.append("  ⚠ 对照组跟正式组差不多 → **正式组那个命中率是假的**："
                          "模型在顺着提示词猜（我们已经告诉它这是舔/啃候选、部位在后爪里选）。")
             lines.append("    先换问法（比如把 none 的描述写得更具体、或者不告诉它候选来自哪个部位），"
@@ -391,8 +415,11 @@ def main() -> None:
     ap.add_argument("--min-gap", type=float, default=60.0)
     ap.add_argument("--per-video", type=int, default=20)
     ap.add_argument("--labels", default=",".join(DEFAULT_LABELS), help="问哪几个类别，逗号分隔")
-    ap.add_argument("--frames", type=int, default=4, help="每条候选送几帧（拼成一张图）")
-    ap.add_argument("--span", type=float, default=3.0, help="取候选时刻前后多少秒")
+    ap.add_argument("--frames", type=int, default=6, help="每条候选送几帧（拼成一张图）")
+    ap.add_argument("--step", type=float, default=0.3,
+                    help="相邻两帧隔多少秒。**别用 1 秒**：舔/啃是 2-4Hz 的反复动作，"
+                         "每秒一帧只能采到随机相位，看不出任何反复")
+    ap.add_argument("--span", type=float, default=3.0, help="候选时刻前后多少秒内算有效（对索引）")
     ap.add_argument("--limit", type=int, default=0, help="最多问几条（0 = 全部）。先小样本试一下再放开")
     ap.add_argument("--concurrency", type=int, default=0)
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
@@ -468,13 +495,15 @@ def main() -> None:
                         wide=not args.narrow)
     print(f"  问 {llm.label()}，类别 {'/'.join(l.name for l in labels)}，"
           f"部位选项 {'/'.join(labels[0].parts)}")
+    print(f"  每条送 {args.frames} 帧、间隔 {args.step}s（窗口 {args.step * (args.frames - 1):.1f}s）"
+          "——舔/啃是 2-4Hz 的反复动作，间隔太大只能采到随机相位")
     t0 = time.monotonic()
     from concurrent.futures import ThreadPoolExecutor
 
     def one(h):
         try:
             return ask_one(h, key, labels, llm, n_frames=args.frames, span_s=args.span,
-                           video_root=config.VIDEO_ROOT)
+                           step_s=args.step, video_root=config.VIDEO_ROOT)
         except Exception as e:  # noqa: BLE001 一条问失败不该让整批白跑，但原因要留着
             return {**h, "skipped": f"{type(e).__name__}: {str(e)[:120]}"}
 
