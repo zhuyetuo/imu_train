@@ -85,13 +85,25 @@ def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
     want = {round(float(ts[i]), 2): np.asarray(d["box"][i], dtype="float32") for i in sel}
     lo, hi = min(want), max(want)
     out: list[bytes] = []
+    n_redetect = 0
     for ft, frame in seek.iter_frames(full_path, 1.0, start_s=max(0.0, lo - 0.5), end_s=hi + 0.5):
         key = min(want, key=lambda x: abs(x - ft)) if want else None
         if key is None or abs(key - ft) > 0.6:
             continue
         box = want.pop(key)
         h, w = frame.shape[:2]
-        x1, y1, x2, y2 = box[0] * w, box[1] * h, box[2] * w, box[3] * h
+        if not embed.box_ok(box):
+            # 2026-09-20 之前建的索引，box 列全是 (0,0,0,0)（见 embed.norm_box）。
+            # 重建 444 路要一个多小时，不值得为这一列重来——当场对这一帧重跑一次检测。
+            # 比用索引里的框慢，但结果一样对
+            from . import dog
+            boxes = dog.detect(frame)
+            if not boxes:
+                continue
+            x1, y1, x2, y2 = seek.crop_rect(boxes, w, h, margin=0.0, min_side=0)
+            n_redetect += 1
+        else:
+            x1, y1, x2, y2 = box[0] * w, box[1] * h, box[2] * w, box[3] * h
         bw, bh = max(x2 - x1, 1.0), max(y2 - y1, 1.0)
         # 留一圈边：紧贴框裁出来常把爪子或尾巴切掉，而那正是要判的部位
         x1, y1 = max(0, int(x1 - bw * 0.25)), max(0, int(y1 - bh * 0.25))

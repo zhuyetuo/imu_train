@@ -203,3 +203,44 @@ def test_probe_逐层打印实际发生了什么(tmp_path, monkeypatch, capsys):
                                       "--index-dir", str(tmp_path)])
     partask.main()
     assert "moov atom not found" in capsys.readouterr().out
+
+
+def test_索引里存的框要是归一化的_不能过crop_rect():
+    """crop_rect 是给像素坐标用的，最后一步 int() 取整。传 w=1,h=1 时 0.35 砍成 0、
+    0.75 也砍成 0——每一行都存成 (0,0,0,0)。444 路索引从写进去那天起全是零，
+    而在此之前没有任何代码读过它，所以一直没人发现（2026-09-20）。"""
+    b = [{"bbox": [0.3, 0.25, 0.4, 0.5], "conf": 0.9}]
+    assert seek.crop_rect(b, 1, 1, margin=0.0, min_side=0) == (0, 0, 0, 0)   # 老做法，坏的
+    assert embed.norm_box(b) == (0.3, 0.25, 0.7, 0.75)                        # 新做法
+    # 两只狗取并集
+    b2 = b + [{"bbox": [0.1, 0.6, 0.2, 0.3], "conf": 0.8}]
+    assert embed.norm_box(b2) == (0.1, 0.25, 0.7, 0.9)
+    assert embed.box_ok((0.3, 0.25, 0.7, 0.75)) and not embed.box_ok((0, 0, 0, 0))
+    assert not embed.box_ok((0.5, 0.5, 0.5, 0.9)) and not embed.box_ok(None)
+
+
+def test_老索引的空框_当场重跑检测而不是裁出空图(tmp_path, monkeypatch):
+    """重建 444 路要一个多小时，不值得为这一列重来。读的那边认出空框就自己兜底。"""
+    monkeypatch.setattr(embed.config, "EMBED_INDEX_DIR", str(tmp_path))
+    rel = "data_raw/d/a_cam1_imu1_raw.mp4"
+    _index(tmp_path, rel, [10, 11], [[0, 0, 0, 0]] * 2)        # 老索引：框全是零
+
+    def fake_iter(path, every, start_s=0.0, end_s=None):
+        for t in (10.0, 11.0):
+            yield t, np.full((200, 200, 3), 120, np.uint8)
+    monkeypatch.setattr(partask.seek, "iter_frames", fake_iter)
+
+    from vision_service import dog
+    calls = []
+    monkeypatch.setattr(dog, "detect", lambda f, *a, **kw: calls.append(1) or
+                        [{"bbox": [0.25, 0.25, 0.5, 0.5], "conf": 0.9}])
+    frames, why = partask.frames_around("/nas/a.mp4", rel, 10.5, n=2, span_s=3.0)
+    assert len(frames) == 2 and why == "" and len(calls) == 2   # 每帧重跑一次检测
+    img = cv2.imdecode(np.frombuffer(frames[0], np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[0] == 150 and img.shape[1] == 150          # 100x100 的框 + 各 25% 边
+
+    # 框是好的就不重跑
+    _index(tmp_path, rel, [10, 11], [[0.25, 0.25, 0.75, 0.75]] * 2)
+    calls.clear()
+    frames, why = partask.frames_around("/nas/a.mp4", rel, 10.5, n=2, span_s=3.0)
+    assert len(frames) == 2 and not calls
