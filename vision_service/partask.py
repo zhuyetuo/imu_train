@@ -441,7 +441,11 @@ def main() -> None:
     ap.add_argument("--part", required=True, help="部位名，比如 后爪")
     ap.add_argument("--index-dir", default=config.EMBED_INDEX_DIR)
     ap.add_argument("--near-max", type=float, default=0.25)
-    ap.add_argument("--min-run", type=int, default=5)
+    ap.add_argument("--min-run", type=int, default=1,
+                    help="几何要连着几秒稳定。**它会滤掉真在舔的狗**（舔的时候头在动、"
+                         "几何不稳），2026-09-20 设成 5 之后捞出来的全是蜷着睡觉的狗")
+    ap.add_argument("--min-motion", type=float, default=0.0,
+                    help="动作量下限。不动的狗不可能在舔——这是整条链上一直缺的条件。建议 0.06")
     ap.add_argument("--min-gap", type=float, default=60.0)
     ap.add_argument("--per-video", type=int, default=20)
     ap.add_argument("--labels", default=",".join(DEFAULT_LABELS), help="问哪几个类别，逗号分隔")
@@ -477,7 +481,7 @@ def main() -> None:
 
     key = posepart.part_of(args.part) or args.part
     r = posepart.find(args.index_dir, key, args.near_max, True, args.per_video,
-                      args.min_gap, args.min_run)
+                      args.min_gap, args.min_run, args.min_motion)
     if not r["known"]:
         print(f"不认识的部位：{args.part} → {key}（认得的：{'、'.join(posepart.PARTS)}）")
         return
