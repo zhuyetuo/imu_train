@@ -258,3 +258,18 @@ def test_同一段视频的两份索引只算一次(tmp_path):
     # 不同机位是真的不同画面，不能合并
     _idx(d, "c.npz", f"{stem.replace('cam2', 'cam3')}_imu11_raw.mp4", rows, [878])
     assert len(pp.find(d, "后爪", near_max=0.6, min_gap_s=60)["hits"]) == 2
+
+
+def test_一只爪退化另一只正常_不能拿退化那个当最近():
+    """match 的近距检查是逐槽 OR 的：后左爪 0.5 合法就让整帧通过，
+    而 nearest 会把后右爪那个 0.01 选成最近的——清单顶上于是全是 0.01。
+    退化距离必须在 nearest 里就当"没测到"，不能只在 match 里按槽拦。"""
+    r = np.stack([_row([0.9, 0.9, 0.5, 0.01, 0.9, 0.9])])
+    slot, best = pp.nearest(pp.decode(r)[0])
+    assert pp.SLOT_NAMES[slot[0]] == "后左爪" and 0.4 < best[0] < 0.6   # 不是那个 0.01
+    assert list(pp.match(r, "后爪", near_max=0.6)) == [True]            # 靠合法的那只通过
+    assert list(pp.match(r, "后爪", near_max=0.25)) == [False]          # 0.5 超出更严的阈值
+    # 两只都退化：整帧作废
+    r2 = np.stack([_row([0.9, 0.9, 0.01, 0.02, 0.9, 0.9])])
+    assert pp.nearest(pp.decode(r2)[0])[0][0] != 2
+    assert list(pp.match(r2, "后爪", near_max=0.6)) == [False]
