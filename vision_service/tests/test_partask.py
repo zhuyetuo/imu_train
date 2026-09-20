@@ -421,3 +421,35 @@ def test_ask_debug_带回真正发出去的那张图(monkeypatch):
     dbg = seek.ask(frames, [seek.Label(name="舔")], 1.5, llm, debug=True)
     assert dbg["_tile"] == sent["jpegs"][0]                      # 存的就是发出去的那一张
     assert "序号" in dbg["_user"] and dbg["_raw"].startswith("{")
+
+
+def test_写明细不能吃掉答案_调试字段要剔掉(tmp_path, monkeypatch, capsys):
+    """--dump 把图片 bytes 塞进结果，--out 写 JSON 时炸了，73 秒的问答全白跑、
+    一个数都没看到（2026-09-20）。两条：调试字段不进 JSONL；结果先打印再写文件。"""
+    import sys
+
+    hits = [{"path": "a.mp4", "t": 1.0, "dist": 0.1, "slot": "后左爪"}]
+    monkeypatch.setattr(posepart, "find", lambda *a, **kw: {"known": True, "hits": hits})
+    monkeypatch.setattr(partask.llmmod, "from_env",
+                        lambda: partask.llmmod.LLM(provider="anthropic", api_key="k", model="m"))
+    monkeypatch.setattr(partask, "ask_one", lambda h, *a, **kw: {
+        **h, "see": "clear", "label": "舔", "body_part": "后左爪", "confidence": 0.8,
+        "desc": "d", "note": "n", "usage": {"input": 1, "output": 1},
+        "_tile": b"\xff\xd8bytes", "_system": "s", "_user": "u", "_raw": "r"})
+    out = tmp_path / "v.jsonl"
+    monkeypatch.setattr(sys, "argv", ["x", "--part", "后爪", "--index-dir", str(tmp_path),
+                                      "--out", str(out)])
+    partask.main()
+
+    printed = capsys.readouterr().out
+    assert "命中   1（100%）" in printed and "明细写到" in printed
+    row = json.loads(out.read_text(encoding="utf-8").strip())
+    assert row["label"] == "舔" and row["t"] == 1.0
+    assert not [k for k in row if k.startswith("_")]        # 调试字段不进 JSONL
+
+    # 写文件失败也不能吞掉结果
+    monkeypatch.setattr(sys, "argv", ["x", "--part", "后爪", "--index-dir", str(tmp_path),
+                                      "--out", str(tmp_path / "没有这个目录" / "v.jsonl")])
+    partask.main()
+    printed = capsys.readouterr().out
+    assert "命中   1（100%）" in printed and "明细没写成" in printed and "照样有效" in printed
