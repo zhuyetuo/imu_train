@@ -117,14 +117,23 @@ def test_统计_看不清和没命中是两回事():
     assert partask.summarize([])                                   # 空的不炸
 
 
-def test_没配key时只能dry_run(monkeypatch, capsys, tmp_path):
-    """没 key 就别假装问了一圈什么都没命中——那会让人以为是数据的问题。"""
+def test_没key时只dry_run_但钱要估出来并列出几个档位(monkeypatch, capsys, tmp_path):
+    """两件事：
+
+    1. 没 key 就别假装问了一圈什么都没命中——那会让人以为是数据的问题。
+    2. 但「值不值得花这个钱」这个决定，缺了数字根本没法做。原来没 key 时只说
+       "只能 dry-run"，一个数都不给，等于把决定权还给人却不给依据。
+    """
     import sys
 
     monkeypatch.setattr(posepart, "find", lambda *a, **kw: {
-        "known": True, "hits": [{"path": "a.mp4", "t": 1.0, "dist": 0.1, "slot": "后左爪"}]})
+        "known": True, "hits": [{"path": "a.mp4", "t": 1.0, "dist": 0.1, "slot": "后左爪"}] * 448})
     monkeypatch.setattr(partask.llmmod, "from_env", lambda: None)
     monkeypatch.setattr(sys, "argv", ["x", "--part", "后爪", "--index-dir", str(tmp_path)])
     partask.main()
     out = capsys.readouterr().out
-    assert "没配 ANTHROPIC_API_KEY" in out and "预估" in out
+    assert "672,000" in out                              # 448 × 1500
+    for m in partask.config.SEEK_PRICE_PER_M:
+        assert m in out and "约 $" in out                # 每个档位都给价
+    assert "← 当前" in out
+    assert "vision_service/.env" in out and "SEEK_MODEL" in out   # 怎么配、怎么换便宜的

@@ -199,13 +199,19 @@ def main() -> None:
     if args.dry_run or llm is None:
         # 一张 4 格拼图约 1.5k token（384px 的格子），输出约 120 token；数量级用的，不当账
         est_in, est_out = len(hits) * 1500, len(hits) * 120
-        cost = llmmod.estimate_usd(llm, est_in, est_out) if llm else 0.0
-        print(f"  预估 in {est_in:,} / out {est_out:,} token"
-              + (f"，约 ${cost:.2f}（{llm.label()}）" if llm else ""))
+        # 没 key 也要把钱估出来：「值不值得花这个钱」这个决定，缺了数字根本没法做。
+        # 按 config.SEEK_PRICE_PER_M 的价目表算，顺便把几个档位都列出来好挑
+        print(f"  预估 in {est_in:,} / out {est_out:,} token")
+        for m, (pin, pout) in config.SEEK_PRICE_PER_M.items():
+            cost = est_in / 1e6 * pin + est_out / 1e6 * pout
+            cur = "  ← 当前" if m == config.SEEK_MODEL else ""
+            print(f"    {m:<20} 约 ${cost:.2f}{cur}")
         if llm is None:
-            print("  没配 ANTHROPIC_API_KEY，只能 dry-run。写进 vision_service/.env 再跑。")
+            print("\n  没配 key，只能 dry-run。写进 vision_service/.env 再跑：")
+            print("    echo 'ANTHROPIC_API_KEY=sk-ant-...' >> vision_service/.env")
+            print("  换模型：再加一行 SEEK_MODEL=claude-haiku-4-5（便宜五倍，先拿它探路也行）")
         else:
-            print("  确认了去掉 --dry-run 再跑。建议先 --limit 20 看看准不准，再放开。")
+            print("\n  确认了去掉 --dry-run 再跑。建议先 --limit 20 看看准不准，再放开。")
         return
 
     labels = labels_for(key, [x.strip() for x in args.labels.split(",") if x.strip()])
