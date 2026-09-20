@@ -120,6 +120,16 @@ LOG_DIR        = _env("VISION_LOG_DIR", os.path.join(HERE, "logs"))
 ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY", "")
 SEEK_MODEL        = _env("SEEK_MODEL", "claude-opus-5")
 SEEK_CONCURRENCY  = int(_env("SEEK_CONCURRENCY", "4"))
+# 命令行工具（partask 等）用哪一家。平台那边的 key 存在平台数据库里、随请求带过来，
+# 命令行不经过平台只能读环境——不给这几个变量的话，平台上配好了豆包命令行却用不了。
+# 留空 = 走下面的 ANTHROPIC_API_KEY（老部署方式）
+SEEK_PROVIDER     = _env("SEEK_PROVIDER", "")
+SEEK_API_KEY      = _env("SEEK_API_KEY", "")
+SEEK_BASE_URL     = _env("SEEK_BASE_URL", "")
+# $/百万 token。各家价目表会变，所以不写死在代码里；不填就估不出钱（显示 0），
+# 估不出来也比写一个过期的数好——后者会让人按错的数做决定
+SEEK_PRICE_IN     = float(_env("SEEK_PRICE_IN", "0") or 0)
+SEEK_PRICE_OUT    = float(_env("SEEK_PRICE_OUT", "0") or 0)
 # 估算花费用，$/百万 token（输入, 输出）。只是给人看个数量级，账以 Anthropic 后台为准
 SEEK_PRICE_PER_M  = {
     "claude-opus-5": (5.0, 25.0),

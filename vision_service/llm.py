@@ -61,7 +61,31 @@ class LLM:
 
 
 def from_env() -> LLM | None:
-    """老部署方式：只配了 ANTHROPIC_API_KEY 环境变量。"""
+    """环境变量（含 vision_service/.env）里配的那一家。
+
+    两种写法，后者是给豆包 / 智谱 / 本地服务这些用的：
+
+        ANTHROPIC_API_KEY=sk-ant-...            只配 Claude（老部署方式，保留）
+
+        SEEK_PROVIDER=doubao                    任意一家
+        SEEK_API_KEY=...
+        SEEK_MODEL=doubao-seed-1-6-vision-250815
+        SEEK_BASE_URL=...                       不填用这家的默认地址
+        SEEK_PRICE_IN=... / SEEK_PRICE_OUT=...  $/百万 token，不填就估不出钱（显示 0）
+
+    为什么要这条路：平台那边的 key 存在平台数据库里，随请求带过来；而命令行工具
+    （partask、seek 的离线跑法）不经过平台，只能读环境。原来只认 ANTHROPIC_API_KEY，
+    等于"平台上配好了豆包，命令行却用不了"——同一台机器两套配置。
+    """
+    p = (config.SEEK_PROVIDER or "").strip().lower()
+    if p:
+        if p not in PROVIDERS:
+            raise ValueError(f"不认识的模型提供方：{p}（可选 {', '.join(PROVIDERS)}）")
+        if not config.SEEK_API_KEY and p not in _KEY_OPTIONAL:
+            return None
+        return LLM(provider=p, model=config.SEEK_MODEL, api_key=config.SEEK_API_KEY,
+                   base_url=config.SEEK_BASE_URL or None,
+                   price_in=config.SEEK_PRICE_IN, price_out=config.SEEK_PRICE_OUT)
     if not config.ANTHROPIC_API_KEY:
         return None
     pin, pout = config.SEEK_PRICE_PER_M.get(config.SEEK_MODEL, (0.0, 0.0))

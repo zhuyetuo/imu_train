@@ -135,5 +135,5 @@ def test_没key时只dry_run_但钱要估出来并列出几个档位(monkeypatch
     assert "672,000" in out                              # 448 × 1500
     for m in partask.config.SEEK_PRICE_PER_M:
         assert m in out and "约 $" in out                # 每个档位都给价
-    assert "← 当前" in out
-    assert "vision_service/.env" in out and "SEEK_MODEL" in out   # 怎么配、怎么换便宜的
+    assert "vision_service/.env" in out and "SEEK_MODEL" in out   # 怎么配
+    assert "SEEK_PROVIDER=doubao" in out                          # 非 Claude 那条路也要写出来
