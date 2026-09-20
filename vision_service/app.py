@@ -191,7 +191,10 @@ def dog_scan(body: DogScanIn):
 class SeekLabelIn(BaseModel):
     name: str = Field(..., max_length=50)
     description: str = Field("", max_length=300)
-    parts: list[str] = Field(default_factory=list, max_length=12)
+    # 部位上限 60：平台上了解剖学层级标签之后，「啃」一类的子孙能到 37 条（区域 → 部位 → 左右）。
+    # 原来卡 12，平台一送 24 条整批 422，一个任务都跑不了。送多少由平台决定（它有粒度选项），
+    # 这里只兜一个不会让 prompt 长到离谱的上限
+    parts: list[str] = Field(default_factory=list, max_length=60)
 
 
 class LlmIn(BaseModel):
@@ -207,7 +210,7 @@ class LlmIn(BaseModel):
 class SeekIn(BaseModel):
     path: str = Field(..., description="相对 VIDEO_ROOT 的视频路径")
     llm: LlmIn | None = Field(None, description="不带 = 用环境变量里的 Claude key")
-    labels: list[SeekLabelIn] = Field(..., min_length=1, max_length=12)
+    labels: list[SeekLabelIn] = Field(..., min_length=1, max_length=24)
     every_sec: float = Field(1.0, ge=0.5, le=5.0)
     clip_s: float = Field(6.0, ge=2.0, le=20.0)
     stride_s: float = Field(3.0, ge=1.0, le=20.0)
