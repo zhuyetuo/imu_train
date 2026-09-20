@@ -51,13 +51,17 @@ def test_裁帧用索引里存的框_不重跑检测(tmp_path, monkeypatch):
     from vision_service import dog
     monkeypatch.setattr(dog, "detect", lambda *a, **kw: detected.append(1) or [])
 
-    frames = partask.frames_around("/nas/a.mp4", rel, 11.5, n=4, span_s=3.0)
-    assert len(frames) == 4 and not detected              # 一次检测都没跑
+    frames, why = partask.frames_around("/nas/a.mp4", rel, 11.5, n=4, span_s=3.0)
+    assert len(frames) == 4 and not detected and why == ""   # 一次检测都没跑
     img = cv2.imdecode(np.frombuffer(frames[0], np.uint8), cv2.IMREAD_COLOR)
     # 框是 0.25~0.75（100x100），四周各留 25% → 150x150
     assert img.shape[0] == 150 and img.shape[1] == 150
 
-    assert partask.frames_around("/nas/a.mp4", "没建过索引.mp4", 11.5) == []
+    # 拿不到帧的四种原因要分得开——解法完全不同
+    _f, why = partask.frames_around("/nas/a.mp4", "没建过索引.mp4", 11.5)
+    assert _f == [] and "索引里没有这一路" in why
+    _f, why = partask.frames_around("/nas/a.mp4", rel, 9999.0)
+    assert _f == [] and "不在索引里" in why and "索引覆盖 10~13s" in why
 
 
 def test_部位选项只给相关的_不给全表():
@@ -84,7 +88,7 @@ def test_问一条_取不到帧就跳过而不是硬问(tmp_path, monkeypatch):
 
     monkeypatch.setattr(partask.seek, "iter_frames", lambda *a, **kw: iter(()))
     r = partask.ask_one(hit, "后爪", [], None, n_frames=4, span_s=3.0, video_root=str(root))
-    assert "取不到帧" in r["skipped"]
+    assert "解码没给出" in r["skipped"]        # 解码问题，跟索引问题分得开
 
     # 正常问：候选本身的字段要跟着回答一起带出来，否则结果对不回是哪一条
     def fake_iter(path, every, start_s=0.0, end_s=None):
