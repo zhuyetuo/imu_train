@@ -64,13 +64,21 @@ def test_裁帧用索引里存的框_不重跑检测(tmp_path, monkeypatch):
     assert _f == [] and "不在索引里" in why and "索引覆盖 10~13s" in why
 
 
-def test_部位选项只给相关的_不给全表():
-    """候选本来就是"鼻子够到后爪"筛出来的，再让模型从 37 个部位里选等于把粗筛的
-    信息扔了。左右两个都给：四爪全可见只有 58%，几何判的左右本来就不牢。"""
+def test_部位选项默认给全六个_只给两个的话乱猜也能蒙对一半():
+    """原来只给"后左爪/后右爪"，理由是别把粗筛的信息扔了。2026-09-20 的对照组
+    推翻了这个理由：只给两个选项时，乱猜有一半概率蒙对部位，于是正式组和对照组
+    的命中率都是 15%——那个数完全没有意义。
+
+    给六个之后蒙对概率降到 1/6，而且模型选的部位跟几何判的对不对得上，
+    本身就成了一个可验证的信号。
+    """
     ls = partask.labels_for("后爪", ["舔", "啃"])
-    assert [l.name for l in ls] == ["舔", "啃"]
-    assert ls[0].parts == ["后左爪", "后右爪"] and ls[0].description
-    assert partask.labels_for("后右爪", ["舔"])[0].parts == ["后右爪"]
+    assert [l.name for l in ls] == ["舔", "啃"] and ls[0].description
+    assert ls[0].parts == list(posepart.SLOT_NAMES)              # 四爪 + 尾根 + 颈部
+    assert len(ls[0].parts) == 6 and "前左爪" in ls[0].parts
+    # 想对比两种问法时还能退回去
+    assert partask.labels_for("后爪", ["舔"], wide=False)[0].parts == ["后左爪", "后右爪"]
+    assert partask.labels_for("后右爪", ["舔"], wide=False)[0].parts == ["后右爪"]
 
 
 def test_问一条_取不到帧就跳过而不是硬问(tmp_path, monkeypatch):
@@ -300,3 +308,39 @@ def test_对照组也高时_要明说正式组那个数是假的():
         + [mk(None, True) for _ in range(10)]
     txt2 = partask.summarize(good)
     assert "✓ 对照组明显低于正式组（0% vs 35%）" in txt2 and "可信" in txt2
+
+
+def test_统计里对照组不进分母_但也要算进问了几条():
+    """把对照组从分母剔掉之后忘了同步改分子，于是 40 条全问了却报成
+    "问了 20/40（20 条取不到帧）"——凭空多出 20 条失败，人会去查根本不存在的问题。"""
+    def mk(control=False, skipped=None):
+        r = {"path": "a.mp4", "t": 1, "see": "clear", "label": None, "confidence": 0.0,
+             "desc": "d", "note": "n", "control": control, "usage": {"input": 1, "output": 1}}
+        if skipped:
+            r["skipped"] = skipped
+        return r
+
+    txt = partask.summarize([mk() for _ in range(20)] + [mk(True) for _ in range(20)])
+    assert "问了 40/40 条（0 条取不到帧）" in txt
+    assert "正式 20 条、对照 20 条" in txt
+    txt2 = partask.summarize([mk() for _ in range(3)] + [mk(skipped="视频不在")])
+    assert "问了 3/4 条（1 条取不到帧）" in txt2 and "对照" not in txt2.split("\n")[1]
+
+
+def test_自洽性_自己跟自己对不上时要明说命中率没意义():
+    """2026-09-20 同样 20 条问了两次，一次 7 条命中、一次 3 条，只有 2 条重合。
+    判断不稳到这个程度时，命中率是多少都没意义，调提示词也没用。"""
+    def r(labels):
+        return [{"path": f"{i}.mp4", "t": i, "label": l, "body_part": "后左爪" if l else None}
+                for i, l in enumerate(labels)]
+
+    # 五条里三条两轮答得不一样
+    bad = partask.agreement([r(["舔", "舔", None, None, "舔"]),
+                             r([None, "舔", "舔", None, None])])
+    assert "每轮命中数：[3, 2]" in bad and "5 条里 2 条（40%）" in bad
+    assert "命中率是多少都没意义" in bad and "没在看画面" in bad
+
+    good = partask.agreement([r(["舔", None, None, None, "舔"]),
+                              r(["舔", None, None, None, "舔"])])
+    assert "5 条里 5 条（100%）" in good and "其中 2 条部位也一样" in good
+    assert "没意义" not in good

@@ -125,17 +125,22 @@ def frames_around(full_path: str, rel_path: str, t: float, n: int = 4,
     return out, ""
 
 
-def labels_for(part_key: str, names) -> list[seek.Label]:
-    """问的时候带上部位选项：只给这个部位和它的左右两边，不给全表。
+def labels_for(part_key: str, names, wide: bool = True) -> list[seek.Label]:
+    """问的时候带上部位选项。
 
-    为什么不给全表：候选本来就是"鼻子够到后爪"筛出来的，再让模型从 37 个部位里选
-    等于把粗筛的信息扔了，而且选项越多越容易乱选。左右两个也给，是因为四爪全可见
-    只有 58%，几何判的左右本来就不牢——让模型自己看。
+    **默认给全部六个部位（四爪 + 尾根 + 颈部），不只给筛出来的那一两个。**
+
+    原来只给"后左爪 / 后右爪"，理由是"候选本来就是鼻子够到后爪筛出来的，让模型从
+    全表选等于把粗筛的信息扔了"。2026-09-20 的对照组把这个理由推翻了：只给两个选项时，
+    一个乱猜的模型有一半概率蒙对部位，于是正式组和对照组的命中率都是 15%——那个数
+    完全没有意义。给六个选项之后，蒙对的概率从 1/2 降到 1/6，而且**模型选的部位跟
+    几何判的对不对得上，本身就成了一个可验证的信号**。
+
+    wide=False 退回只给相关的那一两个（想对比两种问法时用）。
     """
     slots = posepart.PARTS.get(part_key) or ()
-    parts = [posepart.SLOT_NAMES[i] for i in slots] or [part_key]
-    if len(parts) == 1 and parts[0] in posepart.SLOT_NAMES:
-        parts = [parts[0]]
+    narrow = [posepart.SLOT_NAMES[i] for i in slots] or [part_key]
+    parts = list(posepart.SLOT_NAMES) if wide else narrow
     return [seek.Label(name=n, description=LABEL_DESC.get(n, ""), parts=list(parts)) for n in names]
 
 
@@ -200,6 +205,33 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
             "usage": a.get("usage") or {}}
 
 
+def agreement(rounds: list[list[dict]]) -> str:
+    """同一批候选问几轮，看模型自己跟自己合不合得上。
+
+    为什么这个比命中率更该先看：2026-09-20 同样 20 条问了两次，一次 7 条命中、
+    一次 3 条，**只有 2 条重合**。判断不稳到这个程度时，命中率是多少都没意义，
+    调提示词也没用——那说明模型压根没在看画面，在别的地方找答案。
+    """
+    n = min(len(r) for r in rounds)
+    same_label = same_part = 0
+    for i in range(n):
+        labs = {r[i].get("label") for r in rounds}
+        same_label += len(labs) == 1
+        if len(labs) == 1 and next(iter(labs)):
+            same_part += len({r[i].get("body_part") for r in rounds}) == 1
+    hit_counts = [sum(1 for x in r if x.get("label")) for r in rounds]
+    lines = ["", f"  自洽性（同一批问了 {len(rounds)} 轮）：",
+             f"    每轮命中数：{hit_counts}",
+             f"    {n} 条里 {same_label} 条（{same_label / max(n, 1) * 100:.0f}%）几轮答的类别一样"]
+    if same_part:
+        lines.append(f"    其中 {same_part} 条部位也一样")
+    if same_label / max(n, 1) < 0.8:
+        lines.append("    ⚠ 自己跟自己都对不上 → **命中率是多少都没意义**。"
+                     "不是提示词不够好，是模型没在看画面；换模型或换问法（比如只问"
+                     "「几帧之间狗的头有没有反复动」这种单一可判的事）再说。")
+    return "\n".join(lines)
+
+
 def summarize(results: list[dict], llm=None) -> str:
     """跑完之后看什么：unclear 说的是候选好不好，命中说的是这条路值不值。
 
@@ -216,7 +248,9 @@ def summarize(results: list[dict], llm=None) -> str:
     tout = sum(int((r.get("usage") or {}).get("output") or 0) for r in ok)
     lines = [
         "",
-        f"问了 {len(ok)}/{n} 条（{n - len(ok)} 条取不到帧）",
+        f"问了 {len(ok) + len(ctl)}/{n} 条"
+        f"（{n - len(ok) - len(ctl)} 条取不到帧）"
+        + (f"，其中正式 {len(ok)} 条、对照 {len(ctl)} 条" if ctl else ""),
         f"  看不清 {len(unclear)}（{len(unclear) / max(len(ok), 1) * 100:.0f}%）"
         "  ← 这个数说的**不是模型好不好，是送进去的候选好不好**。"
         "高了就回头修裁图 / 夜间亮度，不是调提示词",
@@ -364,6 +398,12 @@ def main() -> None:
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
     ap.add_argument("--sheet", metavar="PNG", help="把命中的拼成一张带骨架的图")
     ap.add_argument("--dry-run", action="store_true", help="只报会问多少条、大概多少钱，不调 API")
+    ap.add_argument("--repeat", type=int, default=1, metavar="N",
+                    help="每条问 N 次，报自洽率。同一批候选两次跑出 7 条和 3 条命中、"
+                         "只有 2 条重合的话，再调提示词也没用——模型根本没在看画面")
+    ap.add_argument("--narrow", action="store_true",
+                    help="部位选项只给筛出来的那一两个（默认给全部六个）。"
+                         "只给两个时乱猜有一半概率蒙对，命中率会虚高")
     ap.add_argument("--control", type=int, default=0, metavar="N",
                     help="混进 N 条对照（几何判定鼻子离爪子很远的帧），问同样的问题。"
                          "对照组也高就说明模型在顺着提示词猜，正式组的命中率是假的")
@@ -424,7 +464,8 @@ def main() -> None:
         print(f"  另外混进 {len(ctl)} 条对照（鼻子离爪子 >1.5 体长，不可能在舔）"
               "——它们跟正式的问同一个问题，用来验命中率是不是模型顺着提示词猜出来的")
         hits = hits + ctl
-    labels = labels_for(key, [x.strip() for x in args.labels.split(",") if x.strip()])
+    labels = labels_for(key, [x.strip() for x in args.labels.split(",") if x.strip()],
+                        wide=not args.narrow)
     print(f"  问 {llm.label()}，类别 {'/'.join(l.name for l in labels)}，"
           f"部位选项 {'/'.join(labels[0].parts)}")
     t0 = time.monotonic()
@@ -439,7 +480,12 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.concurrency or config.SEEK_CONCURRENCY) as ex:
         results = list(ex.map(one, hits))
+        rounds = [results]
+        for _ in range(max(0, args.repeat - 1)):
+            rounds.append(list(ex.map(one, hits)))
     print(f"  用时 {time.monotonic() - t0:.0f}s")
+    if len(rounds) > 1:
+        print(agreement(rounds))
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
