@@ -604,10 +604,15 @@ def tile_frames(jpegs: list[bytes], cols: int = 0, cell: int = 336) -> bytes:
 
 
 def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM,
-        client=None, http=None, tile: bool = True) -> dict:
+        client=None, http=None, tile: bool = True, debug: bool = False) -> dict:
     """把一段的几帧送去问。返回 parse_answer 的结果 + usage。
 
     tile=True 把几帧拼成一张带序号的图再发（见 tile_frames）；拼不出来就退回分开发。
+
+    debug=True 多带回 _tile（真正发出去的那张图）/ _system / _user / _raw（原始回答）。
+    **模型答得不对时，第一件事是看这四样，不是改提示词**——2026-09-20 为「一条都判不出来」
+    改了五轮提示词和采样参数，从来没看过一眼真正发出去的图；狗在 720p 俯拍里只占
+    100x50 像素，裁进 384px 的格子再六格拼一张，舌头可能只剩几个像素，那样改什么都没用。
     """
     n = len(frames)
     sheet = tile_frames(frames) if (tile and n > 1) else b""
@@ -618,6 +623,9 @@ def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM
     out = parse_answer(text, labels)
     out["usage"] = usage
     out["latency_ms"] = int((time.monotonic() - t0) * 1000)
+    if debug:
+        out["_tile"] = sheet or (frames[0] if frames else b"")
+        out["_system"], out["_user"], out["_raw"] = system, user, text
     return out
 
 

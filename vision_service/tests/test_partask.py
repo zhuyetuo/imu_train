@@ -378,3 +378,46 @@ def test_全答none时_自洽率100是白送的():
     rows = [[{"path": f"{i}.mp4", "t": i, "label": None, "body_part": None} for i in range(5)]] * 2
     txt = partask.agreement(rows)
     assert "100%" in txt and "白送的" in txt and "说明不了稳不稳" in txt
+
+
+def test_dump_把真正发出去的图和提示词存下来(tmp_path):
+    """2026-09-20 为「一条都判不出来」改了五轮提示词和采样参数，**从来没看过一眼
+    真正发出去的图**。狗在 720p 俯拍里只占 100x50 像素，裁进 384px 的格子再六格
+    拼一张，舌头可能只剩几个像素——那样改什么提示词、换什么模型都没用。"""
+    res = [
+        {"path": "d/a.mp4", "t": 422.0, "slot": "后左爪", "dist": 0.1, "n_frames": 6,
+         "_tile": b"\xff\xd8fake-jpeg", "_system": "系统提示", "_user": "用户提示",
+         "_raw": '{"label":"none"}'},
+        {"path": "d/b.mp4", "t": 10.0, "slot": "（对照）", "dist": 2.0, "n_frames": 6,
+         "control": True, "_tile": b"\xff\xd8x", "_system": "s", "_user": "u", "_raw": "r"},
+        {"path": "d/c.mp4", "t": 1.0, "skipped": "视频不在"},      # 没图的跳过
+    ]
+    msg = partask.dump_debug(res, str(tmp_path / "dbg"))
+    names = sorted(os.listdir(tmp_path / "dbg"))
+    assert names == ["00_hit.jpg", "00_hit.txt", "01_ctl.jpg", "01_ctl.txt"]
+    assert (tmp_path / "dbg" / "00_hit.jpg").read_bytes() == b"\xff\xd8fake-jpeg"
+    txt = (tmp_path / "dbg" / "00_hit.txt").read_text(encoding="utf-8")
+    assert "d/a.mp4" in txt and "422.0s" in txt and "后左爪" in txt
+    assert "系统提示" in txt and "用户提示" in txt and '{"label":"none"}' in txt
+    assert "存了 2 组" in msg and "先看图" in msg
+
+
+def test_ask_debug_带回真正发出去的那张图(monkeypatch):
+    from vision_service import llm as llmmod
+
+    frames = [bytes(cv2.imencode(".jpg", np.full((60, 60, 3), c, np.uint8))[1].tobytes())
+              for c in (50, 150, 250)]
+    sent = {}
+
+    def fake(llm, system, user, jpegs, max_tokens=300, client=None, http=None):
+        sent["jpegs"] = jpegs
+        return '{"see":"clear","desc":"d","label":"none","confidence":0,"note":"n"}', {"input": 1, "output": 1}
+    monkeypatch.setattr(llmmod, "chat_vision", fake)
+
+    llm = llmmod.LLM(provider="anthropic", api_key="k", model="m")
+    plain = seek.ask(frames, [seek.Label(name="舔")], 1.5, llm)
+    assert "_tile" not in plain                                  # 不开 debug 不多带东西
+
+    dbg = seek.ask(frames, [seek.Label(name="舔")], 1.5, llm, debug=True)
+    assert dbg["_tile"] == sent["jpegs"][0]                      # 存的就是发出去的那一张
+    assert "序号" in dbg["_user"] and dbg["_raw"].startswith("{")
