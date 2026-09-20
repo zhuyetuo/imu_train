@@ -60,6 +60,22 @@ def test_提示词跟线上一字不差(tmp_path, monkeypatch):
     assert "一次一张" in txt and "重新开一个对话" in txt
     how = open(os.path.join(out, "怎么用.md"), encoding="utf-8").read()
     assert "看不清" in how and "别硬选" in how and "对照" in how
+    # 「把整个目录压缩了丢给对话框」是个会自然想到的做法，但测出来的不是单张的能力
+    assert "别把整个目录压缩" in how and "互相影响" in how
+
+
+def test_一次多张的版本要写明它跟线上不是同一个条件(tmp_path, monkeypatch):
+    """26 个对话确实烦，所以给一份省事的。但拿它的数去跟线上比就错了——
+    线上是一张图一次请求，一次给好几张时前面的答案会带着后面走。"""
+    out, _ = _pack(tmp_path, monkeypatch)
+    f = os.path.join(out, "提示词_一次多张（省事但打折）.txt")
+    txt = open(f, encoding="utf-8").read()
+    assert "不是同一个条件" in txt or "不等于线上" in txt
+    assert "分别独立判断" in txt and "不要因为前一张" in txt      # 提示词里也要压一句
+    assert "给领导看的那个数" in txt and "一张一张" in txt        # 该用哪份说清楚
+    # 系统提示那一段照抄线上的，别另写一份
+    sys_, _u = seek.build_contact_prompt(partask.CONTACT_PARTS, 6, 0.3 * 5, tiled=True)
+    assert sys_ in txt
 
 
 def test_算分_看不清剔出分母_对照组乱报要单独点出来(tmp_path, monkeypatch):
