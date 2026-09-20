@@ -583,3 +583,32 @@ def test_seek_走索引_真跑时只抽选中窗的帧(tmp_path, monkeypatch, fa
         imgs = [b for b in kw["messages"][0]["content"] if b["type"] == "image"]
         assert 1 <= len(imgs) <= 6
     assert r["segments"] and r["segments"][0]["label"] == "舔身体"
+
+
+def test_接口_部位条数放宽到60(monkeypatch, tmp_path):
+    """平台上了层级标签后「啃」有 37 条子孙部位。原来卡 12，整批 422，一个任务都跑不了。"""
+    from fastapi.testclient import TestClient
+
+    from vision_service import app as appmod
+
+    (tmp_path / "a.mp4").write_bytes(b"0")
+    monkeypatch.setattr(appmod.config, "VIDEO_ROOT", str(tmp_path))
+    with TestClient(appmod.app) as tc:
+        seen = {}
+
+        def fake_seek(full, labels, **kw):
+            seen["n_parts"] = len(labels[0].parts)
+            seen["n_labels"] = len(labels)
+            return {"segments": [], "windows": 0, "sampled": 0}
+
+        monkeypatch.setattr(appmod.dog, "status", lambda: {"available": True, "error": None})
+        monkeypatch.setattr(appmod.seek, "seek_video", fake_seek)
+        body = {"path": "a.mp4", "dry_run": True,
+                "labels": [{"name": "啃", "parts": [f"部位{i}" for i in range(37)]}]}
+        assert tc.post("/api/v1/seek", json=body).status_code == 200
+        assert seen["n_parts"] == 37
+        body["labels"][0]["parts"] = [f"部位{i}" for i in range(61)]     # 再多就拦下
+        assert tc.post("/api/v1/seek", json=body).status_code == 422
+        body["labels"] = [{"name": f"类{i}", "parts": []} for i in range(24)]
+        body["labels"][0]["parts"] = []
+        assert tc.post("/api/v1/seek", json=body).status_code == 200 and seen["n_labels"] == 24
