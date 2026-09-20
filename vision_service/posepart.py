@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections import defaultdict
 
 from . import config
@@ -45,6 +46,20 @@ PARTS: dict[str, tuple[int, ...]] = {
 # 0.6 是个起点不是结论：跑 `python -m vision_service.posepart --part 后爪 --calib`
 # 看真实分布再定，每个场地/机位可能不一样
 NEAR_MAX = float(os.environ.get("POSE_PART_NEAR_MAX", "0.6"))
+
+# ── 退化姿态：距离 0.00 不是"贴得最紧"，是 RTMPose 崩了 ──────────────────
+#
+# 狗太小 / 被挡 / 蜷成一团时，RTMPose 会把 17 个点全预测到几乎同一个位置。这时
+# 鼻子到爪的距离算出来接近 0——**按距离升序排的话，最烂的帧全排在最前面**。
+# 2026-09-20 实测：--part 后爪 的前 50 条清一色 0.00 体长，全是这种。
+#
+# 两道闸：
+#   1. 距离要大于 NEAR_MIN。真在舔爪时鼻子和爪在画面上仍是两个分开的点
+#   2. 整副骨架要「摊得开」：可见关键点坐标的标准差（按框长边归一过）。
+#      塌成一个点时它接近 0，正常的狗在 0.2 上下。这一条跟是哪个部位无关，
+#      所以比单看某一个距离可靠——蜷着舔后爪时 nose→tail 本来就近，不能拿它判
+NEAR_MIN = float(os.environ.get("POSE_PART_NEAR_MIN", "0.03"))
+MIN_SPREAD = float(os.environ.get("POSE_PART_MIN_SPREAD", "0.06"))
 
 
 def part_of(name: str) -> str | None:
@@ -90,6 +105,28 @@ def decode(rows):
     return dists, vis_raw > 0
 
 
+def spread(rows):
+    """整副骨架摊得开不开：可见关键点坐标的标准差 (N,)。塌成一个点时接近 0。
+
+    坐标存的时候按狗框长边归一过（见 pose.descriptor），所以这个数跟狗在画面里
+    多大无关，正常的狗在 0.2 上下。看不见的点坐标记的是 0，不能进方差，否则
+    可见点越少方差越被 0 拉大——那正好是退化帧，会被放过去。
+    """
+    import numpy as np
+
+    r = np.asarray(rows, dtype="float32").reshape(-1, DIM)
+    vis_raw = r[:, DIM - K:]
+    mx = vis_raw.max(axis=1)
+    scale = np.where(mx > 0, 1.0 / np.maximum(mx, 1e-9), 0.0)
+    xy = r[:, : K * 2].reshape(-1, K, 2) * scale[:, None, None]
+    vis = (vis_raw > 0).astype("float32")
+    n = np.maximum(vis.sum(axis=1), 1.0)
+    mean = (xy * vis[:, :, None]).sum(axis=1) / n[:, None]
+    var = (((xy - mean[:, None, :]) ** 2).sum(axis=2) * vis).sum(axis=1) / n
+    # 只剩一两个可见点时方差没有意义，直接判退化
+    return np.where(vis.sum(axis=1) >= 4, np.sqrt(var), 0.0)
+
+
 def nearest(dists):
     """每帧鼻子最近的那个槽 → (slot (N,) int，没有可用的记 -1; dist (N,) float)。
 
@@ -122,11 +159,11 @@ def match(rows, part: str, near_max: float | None = None, require_nearest: bool 
     dists, _vis = decode(r)
     want = np.zeros(len(r), dtype=bool)
     for s in slots:
-        want |= (dists[:, s] > 0) & (dists[:, s] <= thr)
+        want |= (dists[:, s] >= NEAR_MIN) & (dists[:, s] <= thr)
     if require_nearest:
         slot, _best = nearest(dists)
         want &= np.isin(slot, slots)
-    return want
+    return want & (spread(r) >= MIN_SPREAD)      # 骨架塌成一个点的帧一律不要
 
 
 # ── 从整份索引里捞候选 ────────────────────────────────────────────────
@@ -156,17 +193,49 @@ def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool):
     return str(meta.get("path") or ""), hits, int(len(rows)), int((slot >= 0).sum())
 
 
+_IMU_RE = re.compile(r"_imu\d+", re.IGNORECASE)
+
+
+def clip_key(path: str) -> str:
+    """同一段视频的不同挂名算同一个。
+
+    同一台机器同一时刻录的那段视频，会按每只狗的 imu 编号各存一份索引
+    （..._cam2_imu11_raw.mp4 和 ..._cam2_imu12_raw.mp4 内容一样）。不合并的话
+    清单里每个场景都出现两遍——2026-09-20 实测 imu11/imu12 的时间戳一模一样。
+    """
+    return _IMU_RE.sub("", os.path.basename(path))
+
+
+def thin(hits: list[dict], min_gap_s: float) -> list[dict]:
+    """同一段视频里离得太近的命中只留最好的那个。
+
+    一只狗舔一次后爪能连出几十上百帧，每帧都是一条候选——人翻半天看到的还是
+    同一个场景。按"相隔至少 min_gap_s 秒"抽稀，一次舔爪只出一条，清单里
+    每一条都是一个**新场景**。
+    """
+    out: list[dict] = []
+    kept: dict[str, list[float]] = defaultdict(list)
+    for h in sorted(hits, key=lambda x: x["dist"]):        # 先好后差，好的先占坑
+        k = clip_key(h["path"])
+        if any(abs(h["t"] - t0) < min_gap_s for t0 in kept[k]):
+            continue
+        kept[k].append(h["t"])
+        out.append(h)
+    return out
+
+
 def find(index_dir: str, part: str, near_max: float | None = None,
-         require_nearest: bool = True, max_per_video: int = 20) -> dict:
+         require_nearest: bool = True, max_per_video: int = 20,
+         min_gap_s: float = 60.0) -> dict:
     """整份索引里所有"鼻子够到这个部位"的帧。不跑任何模型，几十秒扫完。
 
-    每路最多留 max_per_video 个（按最近的排）：一只狗舔一次后爪能连出几百帧，
-    全塞进去的话一路就把清单占满了，人看到的还是同一个场景。
+    两道抽稀，为的都是"清单里每一条是一个新场景"：min_gap_s 把一次连续的舔爪
+    收成一条，max_per_video 再限制一路最多出几条。
     """
     slots = PARTS.get(part)
     thr = NEAR_MAX if near_max is None else float(near_max)
     out: list[dict] = []
-    n_dog = n_part = 0
+    n_dog = n_part = n_raw = 0
     files = sorted(os.listdir(index_dir)) if os.path.isdir(index_dir) else []
     for name in files:
         if not name.endswith(".npz"):
@@ -177,12 +246,14 @@ def find(index_dir: str, part: str, near_max: float | None = None,
         path, hits, rows, part_ok = r
         n_dog += rows
         n_part += part_ok
-        hits.sort(key=lambda h: h["dist"])
-        for h in hits[:max_per_video]:
-            out.append({"path": path, **h})
+        n_raw += len(hits)
+        # 先挂上 path：thin 要按视频分组，没 path 分不了组
+        out.extend(thin([{"path": path, **h} for h in hits], min_gap_s)[:max_per_video])
+    out = thin(out, min_gap_s)                 # 跨文件再去一次：imu11/imu12 是同一段视频
     out.sort(key=lambda h: h["dist"])
-    return {"part": part, "known": slots is not None, "near_max": thr,
-            "hits": out, "with_dog": n_dog, "part_ok": n_part, "videos": len(files)}
+    return {"part": part, "known": slots is not None, "near_max": thr, "min_gap_s": min_gap_s,
+            "hits": out, "raw_hits": n_raw, "with_dog": n_dog, "part_ok": n_part,
+            "videos": len(files)}
 
 
 def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
@@ -217,7 +288,12 @@ def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
         return f"{part}：一帧都没有（这个部位在索引里从来没被判成最近的）"
     v = np.concatenate(vals)
     qs = [5, 25, 50, 75, 95]
+    n_bad = int((v < NEAR_MIN).sum())
     lines = [f"{part}：{len(v):,} 帧鼻子最近的是它（距离单位 = 体长，脖子到尾根）", ""]
+    if n_bad:
+        lines.append(f"  其中 {n_bad:,}（{n_bad / len(v) * 100:.1f}%）距离 < {NEAR_MIN}，"
+                     "是 RTMPose 把点全预测到同一处的退化帧，不是「贴得最紧」——已经滤掉")
+        lines.append("")
     lines.append("  分位数  " + "  ".join(f"p{q}={np.percentile(v, q):.2f}" for q in qs))
     lines.append("")
     lines.append("  阈值   能捞到的帧数")
@@ -237,6 +313,8 @@ def main() -> None:
     ap.add_argument("--near-max", type=float, default=None, help=f"多近算够到（体长倍数，默认 {NEAR_MAX}）")
     ap.add_argument("--any", action="store_true", help="只要够近就算，不要求是最近的那个")
     ap.add_argument("--per-video", type=int, default=20, help="每路最多留几个")
+    ap.add_argument("--min-gap", type=float, default=60.0,
+                    help="同一段视频里两条候选至少隔多少秒（一次连续的舔爪只出一条）")
     ap.add_argument("--limit", type=int, default=50, help="最多打印几条")
     ap.add_argument("--calib", action="store_true", help="先看距离分布，定阈值用")
     args = ap.parse_args()
@@ -245,19 +323,21 @@ def main() -> None:
     if args.calib:
         print(calib(args.index_dir, key))
         return
-    r = find(args.index_dir, key, args.near_max, not args.any, args.per_video)
+    r = find(args.index_dir, key, args.near_max, not args.any, args.per_video, args.min_gap)
     if not r["known"]:
         print(f"不认识的部位：{args.part} → {key}（认得的：{'、'.join(PARTS)}）")
         return
     print(f"{args.part} → {key}：{r['videos']} 路索引，有狗 {r['with_dog']:,} 帧，"
-          f"其中 {r['part_ok']:,} 帧判得出部位，捞到 {len(r['hits']):,} 个候选"
-          f"（近到 {r['near_max']} 体长以内，每路最多 {args.per_video} 个）")
+          f"其中 {r['part_ok']:,} 帧判得出部位，{r['raw_hits']:,} 帧鼻子够到了它"
+          f"（近到 {r['near_max']} 体长以内，骨架塌掉的已滤）")
+    print(f"  抽稀后 {len(r['hits']):,} 个候选：同一段视频里相隔不足 {r['min_gap_s']:.0f} 秒的"
+          f"算同一次，每路最多 {args.per_video} 条——所以**每一条都是一个新场景**")
     if not r["hits"]:
         print("一个都没有。先跑 --calib 看看这个部位的距离分布，阈值可能定得太严。")
         return
     print()
     for h in r["hits"][:args.limit]:
-        print(f"  {h['dist']:.2f} 体长  {h['t']:>8.1f}s  {os.path.basename(h['path'])}")
+        print(f"  {h['dist']:.2f} 体长  {h['slot']:<4}  {h['t']:>8.1f}s  {os.path.basename(h['path'])}")
     if len(r["hits"]) > args.limit:
         print(f"  …… 还有 {len(r['hits']) - args.limit:,} 个")
 

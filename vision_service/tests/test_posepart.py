@@ -12,10 +12,17 @@ from vision_service import posepart as pp
 from vision_service.pose import DIM, K, NOSE, PAWS
 
 
-def _row(dists, visible=(NOSE, *PAWS), coords=0.3):
-    """造一行"存进索引的样子"：拼好再整条 L2 归一化（真索引就是这么存的）。"""
+def _row(dists, visible=(NOSE, *PAWS), collapsed=False):
+    """造一行"存进索引的样子"：拼好再整条 L2 归一化（真索引就是这么存的）。
+
+    默认给一副摊得开的骨架（17 个点铺在 ±0.4 上，跟真狗一个量级）。collapsed=True
+    时所有点挤在同一处——这就是 RTMPose 崩掉时的样子，match 要把它滤掉。
+    """
     v = np.zeros(DIM, dtype="float32")
-    v[: K * 2] = coords
+    xy = np.zeros((K, 2), dtype="float32") if collapsed else \
+        np.stack([np.linspace(-0.4, 0.4, K), np.linspace(0.4, -0.4, K)], axis=1).astype("float32")
+    for k in visible:
+        v[k * 2:k * 2 + 2] = xy[k]
     v[pp.D0: pp.D0 + pp.N_DIST] = dists
     for k in visible:
         v[DIM - K + k] = 1.0
@@ -88,7 +95,7 @@ def test_扫整份索引_按距离排_每路限量(tmp_path):
     _idx(d, "a.npz", "data_raw/2026_9_14_gouchang/a_cam1_imu1_raw.mp4", near + far, range(6))
     _idx(d, "b.npz", "data_raw/2026_9_14_gouchang/b_cam2_imu2_raw.mp4",
          [_row([0.9, 0.9, 0.05, 0.9, 0.9, 0.9])], [42])
-    r = pp.find(d, "后爪", near_max=0.6, max_per_video=2)
+    r = pp.find(d, "后爪", near_max=0.6, max_per_video=2, min_gap_s=0)
     assert r["known"] and r["with_dog"] == 7
     # b 那一路最近（0.05），排第一；a 那一路只留 2 个
     assert r["hits"][0]["t"] == 42.0 and len(r["hits"]) == 3
@@ -208,3 +215,46 @@ def test_帧太少的那一路退回全局均值_不被减成噪声(tmp_path, mo
     embed._cache.clear()
     r = embed.search([1.0, 0, 0], [big, tiny], center="video", top_k=50)
     assert r["center"] == "video" and any(h["path"] == tiny for h in r["hits"])
+
+
+def test_骨架塌成一个点的帧要滤掉_不能当成贴得最紧(tmp_path):
+    """RTMPose 在狗太小/被挡时会把 17 个点全预测到同一处，鼻子到爪的距离算出来
+    接近 0。按距离升序排的话，最烂的帧全排在最前面——2026-09-20 实测前 50 条
+    清一色 0.00 体长，全是这种。"""
+    good = _row([0.9, 0.9, 0.18, 0.9, 0.9, 0.9])
+    bad = _row([0.001, 0.001, 0.001, 0.001, 0.001, 0.001], collapsed=True)
+    assert pp.spread(good)[0] > pp.MIN_SPREAD and pp.spread(bad)[0] < pp.MIN_SPREAD
+    assert list(pp.match(np.stack([good, bad]), "后爪", near_max=0.6)) == [True, False]
+    # 摊得开但距离小得离谱的也不要（两个点重合，整副骨架没塌）
+    tiny = _row([0.9, 0.9, 0.001, 0.9, 0.9, 0.9])
+    assert pp.spread(tiny)[0] > pp.MIN_SPREAD                       # 骨架是好的
+    assert list(pp.match(np.stack([tiny]), "后爪", near_max=0.6)) == [False]
+
+
+def test_一次舔爪只出一条候选_不是几十条(tmp_path):
+    """连续几十秒都在舔，每秒一帧就是几十条候选，人翻半天看到的还是同一个场景。"""
+    d = str(tmp_path)
+    rows = [_row([0.9, 0.9, 0.2 - i * 0.001, 0.9, 0.9, 0.9]) for i in range(30)]
+    rows += [_row([0.9, 0.9, 0.15, 0.9, 0.9, 0.9])]                 # 半小时后另一次
+    _idx(d, "a.npz", "data_raw/2026_9_14_gouchang/a_cam1_imu1_raw.mp4", rows,
+         list(range(878, 908)) + [3000])
+    r = pp.find(d, "后爪", near_max=0.6, min_gap_s=60)
+    assert r["raw_hits"] == 31 and len(r["hits"]) == 2               # 两个场景，两条
+    # 一次动作里留下的是**最好的那一帧**（桩里距离越往后越小），不是第一帧
+    assert sorted(h["t"] for h in r["hits"]) == [907.0, 3000.0]
+
+
+def test_同一段视频的两份索引只算一次(tmp_path):
+    """同一时刻录的那段视频按每只狗的 imu 编号各存一份，内容一样。不合并的话
+    清单里每个场景都出现两遍——2026-09-20 实测 imu11/imu12 时间戳一模一样。"""
+    d = str(tmp_path)
+    rows = [_row([0.9, 0.9, 0.2, 0.9, 0.9, 0.9])]
+    stem = "data_raw/2026_9_18_gouchang/multicam_20260918_060015855_cam2"
+    _idx(d, "a.npz", f"{stem}_imu11_raw.mp4", rows, [878])
+    _idx(d, "b.npz", f"{stem}_imu12_raw.mp4", rows, [878])
+    assert pp.clip_key(f"{stem}_imu11_raw.mp4") == pp.clip_key(f"{stem}_imu12_raw.mp4")
+    r = pp.find(d, "后爪", near_max=0.6, min_gap_s=60)
+    assert r["raw_hits"] == 2 and len(r["hits"]) == 1                # 同一个场景只出一条
+    # 不同机位是真的不同画面，不能合并
+    _idx(d, "c.npz", f"{stem.replace('cam2', 'cam3')}_imu11_raw.mp4", rows, [878])
+    assert len(pp.find(d, "后爪", near_max=0.6, min_gap_s=60)["hits"]) == 2
