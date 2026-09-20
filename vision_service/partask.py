@@ -555,12 +555,21 @@ def main() -> None:
 
     if args.dump:
         print("  " + dump_debug(results, args.dump))
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as f:
-            for x in results:
-                f.write(json.dumps(x, ensure_ascii=False) + "\n")
-        print(f"  明细写到 {args.out}")
+    # **先打印再写文件**：写文件失败不该吃掉刚花了钱问回来的答案。
+    # 2026-09-20 踩过——--dump 把图片 bytes 塞进结果，--out 写 JSON 时炸了，
+    # 73 秒的问答全白跑，连一个数都没看到
     print(summarize(results, llm))
+    if args.out:
+        try:
+            with open(args.out, "w", encoding="utf-8") as f:
+                for x in results:
+                    # _ 开头的是调试字段（_tile 是图片 bytes，json 序列化不了），
+                    # 它们已经由 --dump 单独落盘了
+                    f.write(json.dumps({k: v for k, v in x.items() if not k.startswith("_")},
+                                       ensure_ascii=False) + "\n")
+            print(f"  明细写到 {args.out}")
+        except Exception as e:  # noqa: BLE001 写不出来说一声就行，别把结果一起带走
+            print(f"  明细没写成（{type(e).__name__}: {e}），上面的结果照样有效")
 
     skipped = [x for x in results if x.get("skipped")]
     if skipped:
