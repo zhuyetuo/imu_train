@@ -319,6 +319,34 @@ def load(rel_path: str) -> dict | None:
     return d
 
 
+def norm_box(boxes: list[dict]) -> tuple[float, float, float, float]:
+    """几个狗框的并集，归一化的 (x1, y1, x2, y2)。
+
+    **不要拿 seek.crop_rect 传 w=1,h=1 来算这个**：那个函数是给像素坐标用的，
+    最后一步 `int()` 取整会把 0.35 砍成 0、0.75 也砍成 0——于是每一行都存成
+    (0,0,0,0)。2026-09-20 才发现：444 路索引里的 box 列从写进去那天起全是零，
+    而在此之前没有任何代码读过它，所以一直没人发现。
+
+    读它的两条路（partask 按框裁帧、seek 走索引那条路）都表现成"裁出来是空图"，
+    离真正的原因隔了好几层——为这件事猜了三轮。
+    """
+    xs1 = [b["bbox"][0] for b in boxes]
+    ys1 = [b["bbox"][1] for b in boxes]
+    xs2 = [b["bbox"][0] + b["bbox"][2] for b in boxes]
+    ys2 = [b["bbox"][1] + b["bbox"][3] for b in boxes]
+    return (round(min(xs1), 4), round(min(ys1), 4), round(max(xs2), 4), round(max(ys2), 4))
+
+
+def box_ok(box) -> bool:
+    """存下来的框能不能用。老索引里全是 (0,0,0,0)，读的那边要认得出来并自己兜底
+    ——重建 444 路要一个多小时，不值得为这一列重来。"""
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return False
+    return x2 > x1 and y2 > y1
+
+
 def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = False,
           conf: float = 0.35, encoder: Encoder | None = None) -> dict:
     """给一路视频建索引。已有且模型一致就直接返回（force 重建）。"""
@@ -406,7 +434,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     else:
         emb = np.zeros((0, 1), dtype="float32")
     t = np.array([s["t"] for s in with_dog], dtype="float32")
-    box = np.array([seek.crop_rect(s["boxes"], 1, 1, margin=0.0, min_side=0) for s in with_dog], dtype="float32") \
+    box = np.array([norm_box(s["boxes"]) for s in with_dog], dtype="float32") \
         if with_dog else np.zeros((0, 4), dtype="float32")
     # 没测到点的帧记全 0（搜索时当"没姿态"，只用画面）
     pose_rows = np.array([s.get("pose") or [0.0] * pose.DIM for s in with_dog], dtype="float32") \

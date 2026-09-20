@@ -666,17 +666,32 @@ def samples_from_index(rel_path: str, start_s: float = 0.0, end_s: float | None 
     ts, emb, boxes = d["t"], d["emb"], d["box"]
     out: list[dict] = []
     prev = None
+    n_bad_box = 0
     for i in range(len(ts)):
         t = float(ts[i])
         if t < start_s or (end_s is not None and t > end_s):
             continue
         x1, y1, x2, y2 = (float(v) for v in boxes[i])
+        # 2026-09-20 之前建的索引 box 列全是 (0,0,0,0)（见 embed.norm_box）。
+        # 给个空框让 frames_for_window 自己去检测，别把 (0,0,0,0) 传下去——
+        # 那样裁出来是空图，整段被静默跳过，而原因离这里隔着好几层
+        if not (x2 > x1 and y2 > y1):
+            n_bad_box += 1
+            rec = {"t": round(t, 2), "boxes": [], "jpeg": b"", "motion": None, "_i": i}
+            if prev is not None and t - float(ts[prev]) <= 2.5:
+                rec["motion"] = float(np.linalg.norm(emb[i] - emb[prev]) / 2.0)
+            prev = i
+            out.append(rec)
+            continue
         rec = {"t": round(t, 2), "boxes": [{"bbox": [round(x1, 4), round(y1, 4), round(x2 - x1, 4), round(y2 - y1, 4)], "conf": 1.0}],
                "jpeg": b"", "motion": None, "_i": i}
         if prev is not None and t - float(ts[prev]) <= 2.5:
             rec["motion"] = float(np.linalg.norm(emb[i] - emb[prev]) / 2.0)
         prev = i
         out.append(rec)
+    if n_bad_box:
+        _logger.warning("%s：%d/%d 帧的框是老索引里的空框，这几帧会当场重跑检测（重建索引可以省掉）",
+                        os.path.basename(rel_path), n_bad_box, len(out))
     return out
 
 
@@ -700,6 +715,10 @@ def frames_for_window(full_path: str, w: Window, samples: list[dict], n_frames: 
             continue
         boxes = want.pop(near)
         h, wd = frame.shape[:2]
+        if not boxes:
+            boxes = dog.detect(frame)        # 老索引里没有可用的框，当场检测一次
+            if not boxes:
+                continue
         x1, y1, x2, y2 = crop_rect(boxes, wd, h)
         crop = frame[y1:y2, x1:x2]
         if not crop.size:
