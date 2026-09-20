@@ -297,6 +297,10 @@ class EmbedSearchIn(BaseModel):
     exclude_self_s: float = Field(10.0, ge=0, le=600, description="以图搜图时把样例前后这么多秒排掉")
     center: bool = Field(True, description="减掉所有帧的平均向量再比（去掉同狗同房同地板的共同背景）")
     pose_w: float | None = Field(None, ge=0, le=1, description="姿态相似占多少（0 只看画面，1 只看姿态）；不传用 POSE_W")
+    # 部位是几何硬条件（鼻子够到哪只爪），不是相似度。SigLIP 分不清左前爪和右前爪——
+    # 它看整体长相；这一条按关键点距离直接卡。认不出的部位名不筛，结果里 part_used 会说
+    part: str | None = Field(None, max_length=40, description="只要鼻子够到这个部位的帧，比如 后爪 / 后右爪 / 尾根")
+    part_near_max: float | None = Field(None, gt=0, le=3, description="多近算够到（体长倍数）；不传用 POSE_PART_NEAR_MAX")
 
 
 def _embed_ready():
@@ -385,11 +389,13 @@ def embed_search(body: EmbedSearchIn):
             exclude = (body.ref.path, body.ref.t - body.exclude_self_s, body.ref.t + body.exclude_self_s)
             r = embed.search(q["vec"], body.paths, top_k=body.top_k, min_score=body.min_score,
                              gap_s=body.gap_s, exclude=exclude, center=body.center,
-                             pose_vec=q.get("pose"), pose_w=body.pose_w)
+                             pose_vec=q.get("pose"), pose_w=body.pose_w,
+                             part=body.part, part_near_max=body.part_near_max)
             r["query"] = {"kind": "frame", "has_dog": q["has_dog"], "t": q["t"], "has_pose": q.get("pose") is not None}
         else:
             r = embed.search(embed.text_query(body.text), body.paths, top_k=body.top_k,
-                             min_score=body.min_score, gap_s=body.gap_s, center=body.center)
+                             min_score=body.min_score, gap_s=body.gap_s, center=body.center,
+                             part=body.part, part_near_max=body.part_near_max)
             r["query"] = {"kind": "text", "text": body.text}
         return r
     except ValueError as e:
