@@ -60,6 +60,12 @@ _CAM_RE = re.compile(r"_cam(\d+)", re.IGNORECASE)
 _HOUR_RE = re.compile(r"_\d{8}_(\d{2})\d{7}")
 
 
+def box_usable(box) -> bool:
+    """这个框能不能拿来判姿势。2026-09-20 之前建的索引里 box 列全是 (0,0,0,0)。"""
+    return bool(box) and len(box) == 4 and float(box[2]) > float(box[0]) \
+        and float(box[3]) > float(box[1])
+
+
 def curled_from_box(box, frame_ar: float = 16 / 9) -> bool:
     """蜷着还是摊开：看**检测框的长宽比**，不看姿态关键点。
 
@@ -72,18 +78,14 @@ def curled_from_box(box, frame_ar: float = 16 / 9) -> bool:
     框来自狗检测，跟姿态模型无关：狗蜷成一团时框接近正方形，摊开躺着时是长条。
     框存的是相对整帧的归一化值，所以比长宽比之前要把画幅的宽高比乘回去。
     """
-    if not box or len(box) != 4:
+    if not box_usable(box):
         return False
     w = (float(box[2]) - float(box[0])) * frame_ar
     h = float(box[3]) - float(box[1])
-    if w <= 0 or h <= 0:
-        # 退化的框（老索引里全是 (0,0,0,0)）：说不出姿势，按摊开算，
-        # 跟"没有框"一个待遇。别让 1e-6 的除法替我们编一个答案出来
-        return False
     return max(w, h) / min(w, h) < 1.6          # 接近方的算蜷着；细长的算摊开
 
 
-def _bucket(path: str, curled: bool) -> tuple:
+def _bucket(path: str, curled: bool, box_ok: bool = True) -> tuple:
     """一帧属于哪一格。四个维度：场地 / 机位 / 昼夜 / 姿势。"""
     m = _SITE_RE.search("/" + path)
     cam = _CAM_RE.search(os.path.basename(path))
@@ -92,7 +94,7 @@ def _bucket(path: str, curled: bool) -> tuple:
     return (m.group(2).lower() if m else "?",
             f"cam{cam.group(1)}" if cam else "?",
             "夜" if (hour >= 19 or hour < 7) else "昼",
-            "蜷着" if curled else "摊开")
+            ("蜷着" if curled else "摊开") if box_ok else "姿势未知")
 
 
 def scan(index_dir: str, max_per_video: int = 40) -> list[dict]:
@@ -124,8 +126,11 @@ def scan(index_dir: str, max_per_video: int = 40) -> list[dict]:
             out.append({"path": path, "t": round(float(ts[i]), 2),
                         "n_vis": int(n_vis[i]), "spread": round(float(spread[i]), 3),
                         "box": b,
-                        # 姿势按检测框的长宽比分，不按姿态关键点——见 curled_from_box
-                        "bucket": _bucket(path, curled_from_box(b))})
+                        # 姿势按检测框的长宽比分，不按姿态关键点——见 curled_from_box。
+                        # 框不可用时记成"姿势未知"而不是默默算作摊开：默默算的话，
+                        # 整个维度会悄悄塌成一格，而输出看起来完全正常
+                        "box_ok": box_usable(b),
+                        "bucket": _bucket(path, curled_from_box(b), box_usable(b))})
     return out
 
 
@@ -263,7 +268,17 @@ def main() -> None:
     import logging
     logging.basicConfig(level=logging.WARNING, format="[%(name)s] %(message)s")
     cands = scan(args.index_dir)
-    print(f"索引里 {len(cands):,} 条可选（每路取可见点最少的几十条），分 {len({c['bucket'] for c in cands})} 格")
+    n_ok = sum(1 for c in cands if c.get("box_ok"))
+    print(f"索引里 {len(cands):,} 条可选（每路取可见点最少的几十条），"
+          f"分 {len({c['bucket'] for c in cands})} 格")
+    if cands and n_ok < len(cands) * 0.5:
+        # 默默降级最要命：整个维度塌成一格，而输出看起来完全正常。
+        # 2026-09-20 实测撞上——47 张全被分成"摊开"，一张"蜷着"都没有
+        print(f"  ⚠ {len(cands) - n_ok:,}/{len(cands):,} 条的框是空的（2026-09-20 之前建的索引，"
+              f"box 列全是 0，见 embed.norm_box）。**这些条判不出姿势**，"
+              f"分层里记成「姿势未知」——不是「它们都摊开着」。")
+        print(f"    想要姿势这一维，得把索引重建一遍（平台项目页「建画面索引」勾上强制重建）。"
+              f"不重建也能标，只是抽样在姿势上没分层。")
     picks = pick(cands, args.n, args.seed)
     print(export(picks, args.out, config.VIDEO_ROOT))
 

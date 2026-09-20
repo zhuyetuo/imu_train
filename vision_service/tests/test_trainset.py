@@ -135,3 +135,35 @@ def test_姿势按检测框的长宽比分_不按姿态关键点():
     # 别让 1e-6 的除法替我们编一个答案出来
     assert ts.curled_from_box([0.5, 0.5, 0.5, 0.5]) is False
     assert ts.curled_from_box([0, 0, 0, 0]) is False
+
+
+def test_框不可用时记成姿势未知_不默默算作摊开(tmp_path, capsys, monkeypatch):
+    """默默降级最要命：整个维度塌成一格，而输出看起来完全正常。
+
+    2026-09-20 实测撞上——索引是修 box 之前建的（那一列全是 0），47 张全被分成
+    「摊开」，一张「蜷着」都没有，分层从 34 格塌成 17 格，而我盯着输出看不出问题。
+    """
+    import sys
+
+    d = str(tmp_path)
+    rows = [_row((NOSE, PAWS[0]))] * 2
+    meta = {"path": "data_raw/2026_9_14_gouchang/a_cam1_imu1_raw.mp4", "pose": True}
+    # 老索引：box 列全是 0
+    np.savez(os.path.join(d, "a.npz"), t=np.array([1.0, 2.0], dtype="float32"),
+             pose=np.asarray(rows, dtype="float16"),
+             box=np.zeros((2, 4), dtype="float32"),
+             meta=np.array(json.dumps(meta, ensure_ascii=False)))
+    got = ts.scan(d)
+    assert all(not c["box_ok"] for c in got)
+    assert {c["bucket"][3] for c in got} == {"姿势未知"}      # 不是"摊开"
+
+    assert ts.box_usable([0.2, 0.2, 0.8, 0.8]) and not ts.box_usable([0, 0, 0, 0])
+    assert not ts.box_usable(None) and not ts.box_usable([0.5, 0.5, 0.4, 0.6])
+
+    # 大面积不可用时要在命令行上喊出来，并说清楚怎么修
+    monkeypatch.setattr(sys, "argv", ["x", "--index-dir", d, "--out", str(tmp_path / "o"), "-n", "1"])
+    monkeypatch.setattr(ts, "export", lambda *a, **kw: "（跳过导出）")
+    ts.main()
+    out = capsys.readouterr().out
+    assert "框是空的" in out and "姿势未知" in out and "不是「它们都摊开着」" in out
+    assert "重建" in out
