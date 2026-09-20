@@ -199,17 +199,27 @@ def main() -> None:
     if args.dry_run or llm is None:
         # 一张 4 格拼图约 1.5k token（384px 的格子），输出约 120 token；数量级用的，不当账
         est_in, est_out = len(hits) * 1500, len(hits) * 120
-        # 没 key 也要把钱估出来：「值不值得花这个钱」这个决定，缺了数字根本没法做。
-        # 按 config.SEEK_PRICE_PER_M 的价目表算，顺便把几个档位都列出来好挑
+        # 没 key 也要把钱估出来：「值不值得花这个钱」这个决定，缺了数字根本没法做
         print(f"  预估 in {est_in:,} / out {est_out:,} token")
+        if llm is not None and (llm.price_in or llm.price_out):
+            print(f"    {llm.label():<34} 约 ${llmmod.estimate_usd(llm, est_in, est_out):.2f}  ← 当前")
+        elif llm is not None:
+            print(f"    {llm.label():<34} 估不出钱——这家的价目表没配，"
+                  "填 SEEK_PRICE_IN / SEEK_PRICE_OUT（$/百万 token）就能算")
+        # Claude 那几档写死在代码里当参照：换一家值不值，得有个数能比
         for m, (pin, pout) in config.SEEK_PRICE_PER_M.items():
             cost = est_in / 1e6 * pin + est_out / 1e6 * pout
-            cur = "  ← 当前" if m == config.SEEK_MODEL else ""
-            print(f"    {m:<20} 约 ${cost:.2f}{cur}")
+            cur = "  ← 当前" if (llm is not None and llm.provider == "anthropic"
+                                and m == llm.model) else ""
+            print(f"    {m:<34} 约 ${cost:.2f}{cur}")
         if llm is None:
-            print("\n  没配 key，只能 dry-run。写进 vision_service/.env 再跑：")
-            print("    echo 'ANTHROPIC_API_KEY=sk-ant-...' >> vision_service/.env")
-            print("  换模型：再加一行 SEEK_MODEL=claude-haiku-4-5（便宜五倍，先拿它探路也行）")
+            print("\n  没配 key，只能 dry-run。写进 vision_service/.env 再跑，两种写法：")
+            print("    ANTHROPIC_API_KEY=sk-ant-...                   # 只用 Claude")
+            print("  或者用平台上已经配好的那一家（豆包 / 智谱 / 本地服务都行）：")
+            print("    SEEK_PROVIDER=doubao")
+            print("    SEEK_API_KEY=...")
+            print("    SEEK_MODEL=doubao-seed-1-6-vision-250815")
+            print("    SEEK_PRICE_IN=... / SEEK_PRICE_OUT=...         # 可选，$/百万 token")
         else:
             print("\n  确认了去掉 --dry-run 再跑。建议先 --limit 20 看看准不准，再放开。")
         return

@@ -242,3 +242,46 @@ def test_ask_默认拼图_提示词里说清楚序号是时间顺序(monkeypatch
     seek.ask(frames, [seek.Label(name="舔")], 6.0,
              llmmod.LLM(provider="anthropic", api_key="k", model="m"), tile=False)
     assert seen["n"] == 3                                        # 关掉拼图就分开发
+
+
+def test_命令行也能用豆包等非Claude的一家(monkeypatch):
+    """平台那边的 key 存在平台数据库里、随请求带过来；命令行工具不经过平台只能读环境。
+    原来 from_env 只认 ANTHROPIC_API_KEY，等于"平台上配好了豆包，命令行却用不了"
+    ——同一台机器两套配置。"""
+    import pytest
+
+    from vision_service import config
+    from vision_service import llm as llmmod
+
+    monkeypatch.setattr(config, "SEEK_PROVIDER", "doubao")
+    monkeypatch.setattr(config, "SEEK_API_KEY", "d3e2")
+    monkeypatch.setattr(config, "SEEK_MODEL", "doubao-seed-1-6-vision-250815")
+    monkeypatch.setattr(config, "SEEK_BASE_URL", "")
+    monkeypatch.setattr(config, "SEEK_PRICE_IN", 0.0)
+    monkeypatch.setattr(config, "SEEK_PRICE_OUT", 0.0)
+    l = llmmod.from_env()
+    assert l.provider == "doubao" and l.api_key == "d3e2"
+    assert l.model == "doubao-seed-1-6-vision-250815" and l.base_url is None
+    # base_url 不填时走这家的默认地址（跟界面上那个一样）
+    assert llmmod.DEFAULT_BASE_URL["doubao"] == "https://ark.cn-beijing.volces.com/api/v3"
+
+    monkeypatch.setattr(config, "SEEK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    assert llmmod.from_env().base_url == "https://ark.cn-beijing.volces.com/api/v3"
+
+    # 没填 key：返回 None 而不是拿空 key 去撞 401
+    monkeypatch.setattr(config, "SEEK_API_KEY", "")
+    assert llmmod.from_env() is None
+    # 本地服务不需要 key
+    monkeypatch.setattr(config, "SEEK_PROVIDER", "local")
+    assert llmmod.from_env().provider == "local"
+    # 写错提供方：当场报，别等到发请求
+    monkeypatch.setattr(config, "SEEK_PROVIDER", "doubaoo")
+    with pytest.raises(ValueError, match="不认识的模型提供方"):
+        llmmod.from_env()
+
+    # 不填 SEEK_PROVIDER 时还是老路（ANTHROPIC_API_KEY）
+    monkeypatch.setattr(config, "SEEK_PROVIDER", "")
+    monkeypatch.setattr(config, "SEEK_MODEL", "claude-opus-5")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-x")
+    a = llmmod.from_env()
+    assert a.provider == "anthropic" and a.price_in == 5.0
