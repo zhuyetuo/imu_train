@@ -291,7 +291,11 @@ def test_联系表_拼成一张图_单帧读不出来也不白拼(tmp_path, monk
         img = np.full((max_side, max_side, 3), 120, np.uint8)
         return bytes(cv2.imencode(".jpg", img)[1].tobytes())
     monkeypatch.setattr(embed, "frame_thumb", fake_thumb)
-    monkeypatch.setattr(posepart.config, "VIDEO_ROOT", "/nas")
+    root = tmp_path / "nas"
+    (root / "data_raw" / "d").mkdir(parents=True)
+    for n in ("a_cam1_imu1_raw.mp4", "b_cam2_imu2_raw.mp4"):
+        (root / "data_raw" / "d" / n).write_bytes(b"0")
+    monkeypatch.setattr(posepart.config, "VIDEO_ROOT", str(root))
 
     hits = [{"path": "data_raw/d/a_cam1_imu1_raw.mp4", "t": float(i), "dist": 0.1 + i / 100,
              "slot": "后左爪"} for i in range(3)]
@@ -300,8 +304,40 @@ def test_联系表_拼成一张图_单帧读不出来也不白拼(tmp_path, monk
     msg = pp.contact_sheet(hits, out, cols=2, cell=120)
 
     assert os.path.isfile(out) and "3/4 帧画出来了" in msg     # 坏的那帧不拖垮整张图
+    assert "这一帧读不到" in msg                                # 原因要带出来，不能吞掉
     # 画的是骨架，而且路径是拼在 VIDEO_ROOT 下面的
     assert all(v == "pose" for _f, _t, v in calls)
-    assert calls[0][0] == "/nas/data_raw/d/a_cam1_imu1_raw.mp4"
+    assert calls[0][0] == str(root / "data_raw/d/a_cam1_imu1_raw.mp4")
     sheet = cv2.imread(out)
     assert sheet.shape[1] > 120 and sheet.shape[0] > 120       # 2 列 2 行，比单格大
+
+
+def test_联系表_全失败时要说清楚为什么_不能只报0比15(tmp_path, monkeypatch):
+    """只报一句「0/15」等于什么都没说——真正的原因被 except 吞掉了，人还得自己猜。
+    2026-09-20 实测就撞上这个：15 帧全失败，一句有用的信息都没有。"""
+    from vision_service import posepart
+
+    monkeypatch.setattr(posepart.config, "VIDEO_ROOT", "/nas")
+    hits = [{"path": "data_raw/d/a_cam1_imu1_raw.mp4", "t": 1.0, "dist": 0.1, "slot": "后左爪"}]
+    msg = pp.contact_sheet(hits, str(tmp_path / "s.png"), cols=2, cell=60)
+    assert "0/1" in msg and "FileNotFoundError" in msg
+    assert "VIDEO_ROOT=/nas" in msg and "找不到视频文件" in msg
+
+
+def test_命令行也要读env_不然跟服务跑的是两套配置(tmp_path, monkeypatch):
+    """run.sh 起服务时 source vision_service/.env，但 python -m 直接跑命令行工具不会。
+    2026-09-20 撞上过：posepart --sheet 十五帧全失败，VIDEO_ROOT 用的是默认值。"""
+    from vision_service import config
+
+    env = tmp_path / ".env"
+    env.write_text('# 注释\nVIDEO_ROOT=/mnt/nas\nexport POSE_ONNX="/w/p.onnx"\n'
+                   "空行下面还有\n\nALREADY=新的\n坏行没有等号\n", encoding="utf-8")
+    monkeypatch.delenv("VIDEO_ROOT", raising=False)
+    monkeypatch.setenv("ALREADY", "命令行上设的")
+    config._load_env_file(str(env))
+    assert os.environ["VIDEO_ROOT"] == "/mnt/nas"
+    assert os.environ["POSE_ONNX"] == "/w/p.onnx"       # export 前缀和引号都去掉
+    assert os.environ["ALREADY"] == "命令行上设的"        # 已经设了的不覆盖
+    monkeypatch.delenv("VIDEO_ROOT", raising=False)
+    monkeypatch.delenv("POSE_ONNX", raising=False)
+    config._load_env_file(str(tmp_path / "没有这个文件"))  # 不炸

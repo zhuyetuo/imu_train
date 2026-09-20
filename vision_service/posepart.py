@@ -338,15 +338,24 @@ def contact_sheet(hits: list[dict], out_path: str, cols: int = 5, cell: int = 30
     pad, bar = 6, 34
     sheet = np.full((rows * (cell + bar + pad) + pad, cols * (cell + pad) + pad, 3), 32, np.uint8)
     n_ok = 0
+    # 为什么要把错误攒起来带出去：15 帧全失败时只报一句「0/15」，等于什么都没说——
+    # 真正的原因（路径不对？模型没加载？）被 except 吞掉了，人还得自己去猜
+    errs: list[str] = []
     for i, h in enumerate(hits):
         r, c = divmod(i, cols)
         y0 = pad + r * (cell + bar + pad)
         x0 = pad + c * (cell + pad)
+        full = os.path.join(root, h["path"])
         try:
-            jpg = embed.frame_thumb(os.path.join(root, h["path"]), h["t"], view="pose", max_side=cell)
+            if not os.path.isfile(full):
+                raise FileNotFoundError(full)
+            jpg = embed.frame_thumb(full, h["t"], view="pose", max_side=cell)
             img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
-        except Exception:  # noqa: BLE001 某一帧读不出来别让整张图白拼
+            if img is None:
+                raise ValueError("JPEG 解不开")
+        except Exception as e:  # noqa: BLE001 某一帧读不出来别让整张图白拼，但原因要带出去
             img = None
+            errs.append(f"{type(e).__name__}: {e}")
         if img is None:
             cv2.putText(sheet, "读不到", (x0 + 8, y0 + cell // 2), cv2.FONT_HERSHEY_SIMPLEX,
                         0.7, (80, 80, 200), 2)
@@ -360,7 +369,15 @@ def contact_sheet(hits: list[dict], out_path: str, cols: int = 5, cell: int = 30
         cv2.putText(sheet, f"{os.path.basename(h['path'])[9:28]} {h['t']:.0f}s",
                     (x0 + 2, y0 + cell + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 160, 175), 1)
     cv2.imwrite(out_path, sheet)
-    return f"{out_path}（{n_ok}/{len(hits)} 帧画出来了）"
+    msg = f"{out_path}（{n_ok}/{len(hits)} 帧画出来了）"
+    if errs:
+        uniq = list(dict.fromkeys(errs))                 # 同一个原因说一次就够
+        msg += f"\n  {len(errs)} 帧没画出来，原因：\n    " + "\n    ".join(uniq[:3])
+        if any("FileNotFoundError" in e for e in uniq):
+            msg += (f"\n  找不到视频文件。索引里存的是相对路径，要拼在 VIDEO_ROOT 下面，"
+                    f"现在 VIDEO_ROOT={root}"
+                    f"\n  如果视频其实在别处，设环境变量再跑：VIDEO_ROOT=/你的路径 python -m ...")
+    return msg
 
 
 def main() -> None:
@@ -402,7 +419,10 @@ def main() -> None:
         print(f"  …… 还有 {len(r['hits']) - args.limit:,} 个")
     if args.sheet:
         print()
-        print("拼图中（要重新解码这几帧并跑一次检测+姿态，十几秒）……")
+        from . import pose as _pose
+        print(f"拼图中（要重新解码这几帧并跑一次检测+姿态，十几秒）……"
+              f"\n  VIDEO_ROOT={config.VIDEO_ROOT}"
+              f"  姿态模型={'有' if _pose.onnx_path() else '没有，画不出骨架'}")
         print("  " + contact_sheet(r["hits"][:args.limit], args.sheet, cols=args.cols))
         print("  看三件事：① 真在舔/啃后爪，还是趴着时鼻子碰巧朝后 / 在啃玩具？"
               "② 左右判对没有？③ 骨架本身画得对不对？")

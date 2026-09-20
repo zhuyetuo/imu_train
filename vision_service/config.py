@@ -28,6 +28,42 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+ENV_FILE = os.path.join(HERE, ".env")
+
+
+def _load_env_file(path: str = ENV_FILE) -> None:
+    """把 vision_service/.env 读进 os.environ（已经设了的不覆盖）。
+
+    run.sh 起服务时会 source 这个文件，但 `python -m vision_service.xxx` 直接跑
+    命令行工具时不会——于是同一台机器上，服务和命令行跑的是两套配置。2026-09-20
+    撞上过：posepart --sheet 十五帧全失败，因为 VIDEO_ROOT 用的是默认值；而且
+    POSE_ONNX 也来自默认路径（真正的路径是 get_pose_weights.sh 写进 .env 的），
+    就算帧读出来了也画不出骨架，整张图白拼。
+
+    自己解析不引 python-dotenv：这个文件就是 shell 的 KEY=VALUE，格式简单，
+    多一个依赖不值得。已经在环境里的不覆盖——命令行上临时 export 的要优先。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().removeprefix("export ").strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_env_file()
+
+
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
