@@ -139,6 +139,53 @@ def labels_for(part_key: str, names) -> list[seek.Label]:
     return [seek.Label(name=n, description=LABEL_DESC.get(n, ""), parts=list(parts)) for n in names]
 
 
+def control_hits(index_dir: str, part: str, n: int, seed: int = 0) -> list[dict]:
+    """对照组：几何明确判定「鼻子离任何爪子都很远」的帧。
+
+    **为什么必须有这一组**：我们告诉模型"这几帧是舔/啃/抓挠的候选，部位在后左爪/
+    后右爪之间选"，而几何筛出来的本来就全是"头靠近后爪"的画面。一个无脑总说
+    「舔-后爪」的模型也能拿到很高的命中率——那个数就完全没有意义。
+
+    对照组问的是**同一个问题、同样的选项**，只是画面里狗的鼻子离爪子很远。
+    对照组命中率接近 0，正式那组的命中率才可信；两组差不多，说明模型在顺着
+    提示词猜，得换问法。
+
+    挑的是 nearest 距离 > 1.5 体长的帧（鼻子离最近的爪子还有一个半身长，
+    不可能在舔），每路最多取几帧，跨视频均匀撒开。
+    """
+    import random
+
+    import numpy as np
+
+    rng = random.Random(seed)
+    pool: list[dict] = []
+    for name in sorted(os.listdir(index_dir)) if os.path.isdir(index_dir) else []:
+        if not name.endswith(".npz"):
+            continue
+        try:
+            with np.load(os.path.join(index_dir, name), allow_pickle=False) as z:
+                if "meta" not in z.files or "pose" not in z.files:
+                    continue
+                meta = json.loads(str(z["meta"]))
+                rows, ts = z["pose"], z["t"]
+        except Exception:  # noqa: BLE001
+            continue
+        if rows.size == 0 or len(rows) != len(ts):
+            continue
+        dists, _ = posepart.decode(rows)
+        slot, best = posepart.nearest(dists)
+        far = np.flatnonzero((slot >= 0) & (best > 1.5) & (posepart.spread(rows) >= posepart.MIN_SPREAD))
+        if not len(far):
+            continue
+        path = str(meta.get("path") or "")
+        for i in rng.sample(list(far), min(2, len(far))):
+            pool.append({"path": path, "t": round(float(ts[i]), 2),
+                         "dist": round(float(best[i]), 3), "slot": "（对照：离爪子很远）",
+                         "control": True})
+    rng.shuffle(pool)
+    return pool[:n]
+
+
 def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
             n_frames: int, span_s: float, video_root: str, client=None, http=None) -> dict:
     """一条候选 → 问一次。返回候选本身 + 模型的回答；拿不到帧就 skipped。"""
@@ -154,9 +201,15 @@ def ask_one(hit: dict, part_key: str, labels: list[seek.Label], llm, *,
 
 
 def summarize(results: list[dict], llm=None) -> str:
-    """跑完之后看什么：unclear 说的是候选好不好，命中说的是这条路值不值。"""
+    """跑完之后看什么：unclear 说的是候选好不好，命中说的是这条路值不值。
+
+    有对照组时先看对照组：对照组也高的话，正式那组的命中率是假的（模型在顺着
+    提示词猜），后面几个数都不用看了。
+    """
     n = len(results)
     ok = [r for r in results if not r.get("skipped")]
+    ctl = [r for r in ok if r.get("control")]
+    ok = [r for r in ok if not r.get("control")]
     unclear = [r for r in ok if r.get("see") == "unclear"]
     hits = [r for r in ok if r.get("label")]
     tin = sum(int((r.get("usage") or {}).get("input") or 0) for r in ok)
@@ -173,6 +226,23 @@ def summarize(results: list[dict], llm=None) -> str:
     if llm is not None:
         lines.append(f"  花费   约 ${llmmod.estimate_usd(llm, tin, tout):.2f}"
                      f"（in {tin:,} / out {tout:,} token）")
+    if ctl:
+        c_hit = sum(1 for r in ctl if r.get("label"))
+        rate, c_rate = len(hits) / max(len(ok), 1), c_hit / len(ctl)
+        lines.append("")
+        lines.append(f"  对照组 {len(ctl)} 条（几何判定鼻子离爪子 >1.5 体长，不可能在舔）"
+                     f"命中 {c_hit}（{c_rate * 100:.0f}%）")
+        if c_rate >= rate * 0.6:
+            lines.append("  ⚠ 对照组跟正式组差不多 → **正式组那个命中率是假的**："
+                         "模型在顺着提示词猜（我们已经告诉它这是舔/啃候选、部位在后爪里选）。")
+            lines.append("    先换问法（比如把 none 的描述写得更具体、或者不告诉它候选来自哪个部位），"
+                         "再谈命中率。")
+        else:
+            lines.append(f"  ✓ 对照组明显低于正式组（{c_rate * 100:.0f}% vs {rate * 100:.0f}%）"
+                         "→ 模型是真在看画面，正式组那个数可信。")
+        for r in sorted([x for x in ctl if x.get("label")],
+                        key=lambda x: -(x.get("confidence") or 0))[:3]:
+            lines.append(f"    对照组误报：{r.get('desc') or ''}；{r.get('note') or ''}")
     by = {}
     for r in hits:
         by[(r.get("label"), r.get("body_part"))] = by.get((r.get("label"), r.get("body_part")), 0) + 1
@@ -294,6 +364,9 @@ def main() -> None:
     ap.add_argument("--out", help="每条一行 JSON 写到这里，之后能反复分析不用重问")
     ap.add_argument("--sheet", metavar="PNG", help="把命中的拼成一张带骨架的图")
     ap.add_argument("--dry-run", action="store_true", help="只报会问多少条、大概多少钱，不调 API")
+    ap.add_argument("--control", type=int, default=0, metavar="N",
+                    help="混进 N 条对照（几何判定鼻子离爪子很远的帧），问同样的问题。"
+                         "对照组也高就说明模型在顺着提示词猜，正式组的命中率是假的")
     ap.add_argument("--probe", type=int, default=0, metavar="N",
                     help="只对前 N 条候选逐层打印实际发生了什么（索引/ffmpeg/cv2），不调 API。"
                          "取不到帧时用它，别猜")
@@ -346,6 +419,11 @@ def main() -> None:
             print("\n  确认了去掉 --dry-run 再跑。建议先 --limit 20 看看准不准，再放开。")
         return
 
+    if args.control:
+        ctl = control_hits(args.index_dir, key, args.control)
+        print(f"  另外混进 {len(ctl)} 条对照（鼻子离爪子 >1.5 体长，不可能在舔）"
+              "——它们跟正式的问同一个问题，用来验命中率是不是模型顺着提示词猜出来的")
+        hits = hits + ctl
     labels = labels_for(key, [x.strip() for x in args.labels.split(",") if x.strip()])
     print(f"  问 {llm.label()}，类别 {'/'.join(l.name for l in labels)}，"
           f"部位选项 {'/'.join(labels[0].parts)}")
