@@ -218,10 +218,28 @@ def warmup() -> dict:
     return {"warm": True, "error": None}
 
 
+def _ready() -> None:
+    """要用模型之前叫一声：没加载就加载，加载不了就说人话。
+
+    原来 detect / detect_batch 的约定是"调用方保证模型已加载"，靠服务启动时的
+    warmup() 兜着。**这个约定是静默的**：命令行工具（posepart --sheet、
+    pose_coverage）不走 warmup，于是直接撞上 `'NoneType' object has no attribute
+    'predict'`——看不出是模型没加载，更看不出为什么没加载。服务里预热失败时也一样，
+    后面每一次调用都报这句。2026-09-20 实测踩到。
+
+    一次 `is not None` 的代价可以忽略，换掉一个静默的约定值。
+    """
+    _load()
+    if _model is None:
+        raise RuntimeError(f"狗检测模型没加载：{_load_error or '原因不明'}"
+                           f"（权重 {config.DOG_WEIGHTS}）")
+
+
 def detect_batch(frames: list, conf: float = 0.35) -> list[list[dict]]:
     """一批帧一起过模型（GPU 上一批 16~32 张比一张张送快好几倍）。返回每帧的框。"""
     if not frames:
         return []
+    _ready()
     # 半精度：5090 上 x 模型快近一倍，框的差别在小数点后。CPU 上 half 不支持，自动不用
     half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
     from . import meter
@@ -271,9 +289,11 @@ def dedup_boxes(boxes: list[dict], thr: float = 0.6) -> list[dict]:
 def detect(frame, conf: float = 0.35) -> list[dict]:
     """一帧里的狗框，归一化 [x, y, w, h]。scan_video 和 seek（找片段）共用。
 
-    调用方保证模型已加载（先 _load()）。锁在这里拿：一张卡上并发只会买到
-    显存峰值翻倍。
+    模型没加载会自己加载（_ready），加载不了报人话。锁在这里拿：一张卡上并发
+    只会买到显存峰值翻倍。
     """
+    _ready()
+
     from . import meter
 
     with _lock, meter.timed("dog"):
