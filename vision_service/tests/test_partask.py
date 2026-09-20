@@ -112,7 +112,8 @@ def test_问一条_取不到帧就跳过而不是硬问(tmp_path, monkeypatch):
     monkeypatch.setattr(partask.seek, "ask", lambda *a, **kw: {
         "label": "舔", "body_part": "后左爪", "confidence": 0.8, "see": "clear",
         "desc": "侧卧口鼻接触左后肢", "note": "有往复", "usage": {"input": 9, "output": 3}})
-    r = partask.ask_one(hit, "后爪", [], None, n_frames=4, span_s=3.0, video_root=str(root))
+    r = partask.ask_one(hit, "后爪", [], None, n_frames=4, span_s=3.0, video_root=str(root),
+                        contact=False)
     assert r["path"] == rel and r["t"] == 10.0 and r["label"] == "舔"
     assert r["n_frames"] == 1 and r["usage"]["input"] == 9
 
@@ -433,8 +434,8 @@ def test_写明细不能吃掉答案_调试字段要剔掉(tmp_path, monkeypatch
     monkeypatch.setattr(partask.llmmod, "from_env",
                         lambda: partask.llmmod.LLM(provider="anthropic", api_key="k", model="m"))
     monkeypatch.setattr(partask, "ask_one", lambda h, *a, **kw: {
-        **h, "see": "clear", "label": "舔", "body_part": "后左爪", "confidence": 0.8,
-        "desc": "d", "note": "n", "usage": {"input": 1, "output": 1},
+        **h, "see": "clear", "contact": True, "part": "后左爪", "moving": True,
+        "confidence": 0.8, "desc": "d", "usage": {"input": 1, "output": 1},
         "_tile": b"\xff\xd8bytes", "_system": "s", "_user": "u", "_raw": "r"})
     out = tmp_path / "v.jsonl"
     monkeypatch.setattr(sys, "argv", ["x", "--part", "后爪", "--index-dir", str(tmp_path),
@@ -442,9 +443,9 @@ def test_写明细不能吃掉答案_调试字段要剔掉(tmp_path, monkeypatch
     partask.main()
 
     printed = capsys.readouterr().out
-    assert "命中   1（100%）" in printed and "明细写到" in printed
+    assert "口鼻贴着身体：正式 100%" in printed and "明细写到" in printed
     row = json.loads(out.read_text(encoding="utf-8").strip())
-    assert row["label"] == "舔" and row["t"] == 1.0
+    assert row["part"] == "后左爪" and row["t"] == 1.0
     assert not [k for k in row if k.startswith("_")]        # 调试字段不进 JSONL
 
     # 写文件失败也不能吞掉结果
@@ -452,4 +453,67 @@ def test_写明细不能吃掉答案_调试字段要剔掉(tmp_path, monkeypatch
                                       "--out", str(tmp_path / "没有这个目录" / "v.jsonl")])
     partask.main()
     printed = capsys.readouterr().out
-    assert "命中   1（100%）" in printed and "明细没写成" in printed and "照样有效" in printed
+    assert "口鼻贴着身体：正式 100%" in printed and "明细没写成" in printed and "照样有效" in printed
+
+
+def test_接触问法_一个字不提舔啃抓挠(monkeypatch):
+    """「是不是在舔」画面答不了：舔是 2-4Hz、舌头只有几个像素，俯拍上看不见。
+    唯一看得见的是"口鼻贴在某个部位"——而老提示词把那个明确判成"休息"，
+    等于禁掉了唯一的证据。所以只问接触关系，行为那一半交给 IMU。"""
+    from vision_service import llm as llmmod
+
+    frames = [bytes(cv2.imencode(".jpg", np.full((60, 60, 3), c, np.uint8))[1].tobytes())
+              for c in (50, 150)]
+    seen = {}
+
+    def fake(llm, system, user, jpegs, max_tokens=300, client=None, http=None):
+        seen.update(system=system, user=user)
+        return ('{"see":"clear","desc":"侧卧口鼻贴左后肢","contact":true,'
+                '"part":"后左爪","moving":true,"confidence":0.8}'), {"input": 1, "output": 1}
+    monkeypatch.setattr(llmmod, "chat_vision", fake)
+
+    parts = list(posepart.SLOT_NAMES)
+    r = seek.ask_contact(frames, parts, 1.5,
+                         llmmod.LLM(provider="anthropic", api_key="k", model="m"))
+    assert r["contact"] and r["part"] == "后左爪" and r["moving"] is True
+    for word in ("舔", "啃", "抓挠"):
+        assert word not in seen["system"] and word not in seen["user"]   # 不给行为上的暗示
+    assert "口鼻" in seen["system"] and "接触" in seen["system"]
+
+
+def test_接触问法_看不清时不采信接触():
+    parts = list(posepart.SLOT_NAMES)
+    r = seek.parse_contact('{"see":"unclear","desc":"太暗","contact":true,'
+                           '"part":"后左爪","moving":true,"confidence":0.9}', parts)
+    assert r["contact"] is False and r["part"] is None and r["see"] == "unclear"
+    # 部位不在清单里：当没贴到处理，不硬塞
+    r2 = seek.parse_contact('{"see":"clear","contact":true,"part":"肚子","moving":false,'
+                            '"confidence":0.5}', parts)
+    assert r2["contact"] is True and r2["part"] is None and r2["moving"] is False
+    assert seek.parse_contact("不是 JSON", parts)["see"] == "unknown"
+
+
+def test_接触问法的统计_三个数都可验证():
+    """跟"命中率"不同，这三个数不依赖模型会不会判行为：接触率有干净的对照、
+    部位一致率有几何当参照、在动的比例是下一步跟 IMU 取交集的底。"""
+    def mk(contact, part, slot, moving=True, control=False):
+        return {"path": "a.mp4", "t": 1, "see": "clear", "contact": contact, "part": part,
+                "slot": slot, "dist": 0.1, "moving": moving, "confidence": 0.8, "desc": "d",
+                "control": control, "usage": {"input": 1, "output": 1}}
+
+    res = ([mk(True, "后左爪", "后左爪") for _ in range(6)]        # 部位全对
+           + [mk(True, "后右爪", "后左爪") for _ in range(3)]      # 前后对、左右反
+           + [mk(False, None, "后左爪") for _ in range(1)]
+           + [mk(False, None, "（对照）", control=True) for _ in range(9)]
+           + [mk(True, "后左爪", "（对照）", control=True)])
+    txt = partask.summarize_contact(res)
+    assert "正式 90%" in txt and "对照 10%" in txt and "✓ 差了 80 个点" in txt
+    assert "部位跟几何对得上：6/9（67%）" in txt
+    assert "只看前/后不看左右：9/9（100%）" in txt
+    assert "左右对不上" in txt and "降级到「后爪」" in txt          # 给出该怎么办
+    assert "这几帧里在动：100%" in txt
+
+    # 两组差不多：粗筛本身要重做
+    bad = [mk(True, "后左爪", "后左爪") for _ in range(5)] + \
+          [mk(True, "后左爪", "（对照）", control=True) for _ in range(5)]
+    assert "⚠ 两组差不多" in partask.summarize_contact(bad)
