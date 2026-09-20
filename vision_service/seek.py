@@ -444,8 +444,22 @@ def status() -> dict:
     }
 
 
-def build_prompt(labels: list[Label], clip_s: float, n_frames: int) -> tuple[str, str]:
-    """(system, user_text)。类别和部位写进去，让模型只在这几个里选。"""
+def build_prompt(labels: list[Label], clip_s: float, n_frames: int,
+                 tiled: bool = False) -> tuple[str, str]:
+    """(system, user_text)。类别和部位写进去，让模型只在这几个里选。
+
+    三件事是 2026-09-20 那轮调试逼出来的：
+
+    1. **see 跟 label 分开**。原来"不是这些行为"和"根本看不清"都答 none，混成一个数。
+       这两种的含义天差地别：前者是模型正常工作、正确拒绝；后者说明送进来的候选本身
+       是垃圾（画面太小/太暗/狗被挡），要回头修出候选的那一层。混着的话，一批 none
+       回来我完全不知道该改哪边。
+    2. **note 要写看到了什么，不是只写结论**。20 字的「像在舔」没有任何调试价值；
+       「侧卧，头转向身后，口鼻接触左后肢，四帧里口鼻位置有小幅往复」一眼就能判断
+       模型是看懂了还是在猜。之前部位检索踩的坑就是——只有结论、没有依据，
+       错了只能反复猜。
+    3. **拼成一张带序号的图**时要告诉它序号就是时间顺序，否则它会当成几只不同的狗。
+    """
     lines = []
     for lb in labels:
         line = f"- {lb.name}"
@@ -456,14 +470,23 @@ def build_prompt(labels: list[Label], clip_s: float, n_frames: int) -> tuple[str
         lines.append(line)
     system = (
         "你在看一段狗舍俯拍监控里裁出来的狗。给你的是同一段视频按时间顺序抽的几帧，"
+        "**是同一只狗的连续几秒**，不是几只不同的狗。"
         "任务是判断这几秒里狗在做下面哪一种行为。只能从给定类别里选，都不像就答 none。"
-        "要保守：拿不准就 none，宁可漏也别把普通的趴着、走动、张望判成这些行为。"
+        "要保守：拿不准就 none，宁可漏也别把普通的趴着、睡觉、走动、张望判成这些行为。"
+        "看不清就照实说 see=unclear，别硬猜——画面太小、太暗、狗被挡住、只拍到局部，都算看不清。"
         "只输出一个 JSON 对象，不要别的文字。"
     )
+    how = (f"这是 {clip_s:.0f} 秒里按顺序抽的 {n_frames} 帧，"
+           + ("拼成了一张图，从左到右、从上到下是时间顺序，每格左上角有序号。\n"
+              if tiled else "按时间先后给你。\n"))
     user = (
-        f"这是 {clip_s:.0f} 秒里按顺序抽的 {n_frames} 帧。\n候选行为：\n" + "\n".join(lines) +
-        '\n\n输出格式：{"label": "<类别名或 none>", "body_part": "<该类别的部位之一，没有就 null>", '
-        '"confidence": <0到1>, "note": "<不超过20字的依据>"}'
+        how + "候选行为：\n" + "\n".join(lines) +
+        '\n\n输出格式（只要这个 JSON）：\n'
+        '{"see": "clear 或 unclear", '
+        '"desc": "<30字内：狗什么姿势、口鼻朝哪、几帧之间有没有变化>", '
+        '"label": "<类别名或 none>", "body_part": "<该类别的部位之一，没有就 null>", '
+        '"confidence": <0到1>, "note": "<30字内：为什么判成这个>"}\n'
+        "desc 写你实际看到的，不要写结论；note 写判断依据。看不清时 label 一律 none。"
     )
     return system, user
 
@@ -472,18 +495,31 @@ _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
 def parse_answer(text: str, labels: list[Label]) -> dict:
-    """模型的回答 → {label, body_part, confidence, note}。答非所问一律当 none。"""
+    """模型的回答 → {label, body_part, confidence, note, desc, see}。答非所问一律当 none。
+
+    see 和 label 是两件事，不能合并：label=None 可能是"不是这些行为"（模型正常工作、
+    正确拒绝），也可能是"根本看不清"（送进来的候选本身是垃圾）。混成一个数的话，
+    一批 none 回来完全不知道该改哪边——是调提示词，还是回头修出候选的那一层。
+    """
+    blank = {"label": None, "body_part": None, "confidence": 0.0,
+             "note": "无法解析", "desc": "", "see": "unknown"}
     m = _JSON_RE.search(text or "")
     if not m:
-        return {"label": None, "body_part": None, "confidence": 0.0, "note": "无法解析"}
+        return blank
     try:
         d = json.loads(m.group(0))
     except ValueError:
-        return {"label": None, "body_part": None, "confidence": 0.0, "note": "无法解析"}
+        return blank
+    see = d.get("see")
+    see = see if see in ("clear", "unclear") else "unknown"
+    desc = str(d.get("desc") or "")[:80]
+    note = str(d.get("note") or "")[:80]
     names = {lb.name: lb for lb in labels}
     label = d.get("label")
-    if not isinstance(label, str) or label not in names:
-        return {"label": None, "body_part": None, "confidence": 0.0, "note": str(d.get("note") or "")[:40]}
+    if see == "unclear" or not isinstance(label, str) or label not in names:
+        # 看不清时即使给了标签也不采信：提示词里写明了看不清一律 none
+        return {"label": None, "body_part": None, "confidence": 0.0,
+                "note": note, "desc": desc, "see": see}
     part = d.get("body_part")
     if not isinstance(part, str) or part not in names[label].parts:
         part = None
@@ -491,15 +527,66 @@ def parse_answer(text: str, labels: list[Label]) -> dict:
         conf = max(0.0, min(1.0, float(d.get("confidence"))))
     except (TypeError, ValueError):
         conf = 0.0
-    return {"label": label, "body_part": part, "confidence": conf, "note": str(d.get("note") or "")[:40]}
+    return {"label": label, "body_part": part, "confidence": conf,
+            "note": note, "desc": desc, "see": see}
+
+
+def tile_frames(jpegs: list[bytes], cols: int = 0, cell: int = 336) -> bytes:
+    """几帧拼成一张带序号的图。
+
+    为什么拼而不是分开发几张：分开发时模型容易把它们当成几只不同的狗（俯拍裁出来的
+    狗本来就难认），而舔和啃在单帧上几乎一样、差别全在几帧之间的变化。拼成一张、
+    标上序号，"这是同一只狗的连续几秒"就写在图里，不用指望模型自己记住顺序。
+    顺带省钱：一张图比 N 张图的 token 少。
+    """
+    import cv2
+    import numpy as np
+
+    if len(jpegs) <= 1:
+        return jpegs[0] if jpegs else b""
+    imgs = []
+    for b in jpegs:
+        im = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+        if im is None:
+            continue                      # 解不开的那张跳过，不要因为一张坏图整段不问
+        sc = cell / max(im.shape[:2])
+        if sc < 1:
+            im = cv2.resize(im, (int(im.shape[1] * sc), int(im.shape[0] * sc)))
+        imgs.append((b, im))
+    if not imgs:
+        return b""
+    if len(imgs) == 1:
+        return imgs[0][0]                 # 只剩一张：原样发，标个"1"没有意义
+    imgs = [im for _b, im in imgs]
+    cols = cols or min(len(imgs), 3)
+    rows = (len(imgs) + cols - 1) // cols
+    ch = max(i.shape[0] for i in imgs)
+    cw = max(i.shape[1] for i in imgs)
+    sheet = np.full((rows * ch, cols * cw, 3), 32, np.uint8)
+    for i, im in enumerate(imgs):
+        r, c = divmod(i, cols)
+        sheet[r * ch:r * ch + im.shape[0], c * cw:c * cw + im.shape[1]] = im
+        # 序号画在格子里：拼图上没有别的地方能放，而模型要靠它知道时间顺序
+        cv2.putText(sheet, str(i + 1), (c * cw + 6, r * ch + 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+        cv2.putText(sheet, str(i + 1), (c * cw + 6, r * ch + 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    ok, buf = cv2.imencode(".jpg", sheet, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    return bytes(np.asarray(buf).tobytes()) if ok else b""
 
 
 def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM,
-        client=None, http=None) -> dict:
-    """把一段的几帧送去问。返回 parse_answer 的结果 + usage。"""
-    system, user = build_prompt(labels, clip_s, len(frames))
+        client=None, http=None, tile: bool = True) -> dict:
+    """把一段的几帧送去问。返回 parse_answer 的结果 + usage。
+
+    tile=True 把几帧拼成一张带序号的图再发（见 tile_frames）；拼不出来就退回分开发。
+    """
+    n = len(frames)
+    sheet = tile_frames(frames) if (tile and n > 1) else b""
+    send = [sheet] if sheet else frames
+    system, user = build_prompt(labels, clip_s, n, tiled=bool(sheet))
     t0 = time.monotonic()
-    text, usage = llmmod.chat_vision(llm, system, user, frames, max_tokens=300, client=client, http=http)
+    text, usage = llmmod.chat_vision(llm, system, user, send, max_tokens=400, client=client, http=http)
     out = parse_answer(text, labels)
     out["usage"] = usage
     out["latency_ms"] = int((time.monotonic() - t0) * 1000)
@@ -509,7 +596,12 @@ def ask(frames: list[bytes], labels: list[Label], clip_s: float, llm: llmmod.LLM
 # ── 合并 ──────────────────────────────────────────────────────────────
 
 def merge_segments(wins: list[Window], answers: list[dict], min_conf: float = 0.5) -> list[dict]:
-    """相邻/重叠、同类别的窗合成一段。置信度取最大，部位取多数。"""
+    """相邻/重叠、同类别的窗合成一段。置信度取最大，部位取多数。
+
+    desc（模型看到了什么）跟着置信度最高的那个窗走，不是第一个窗：一段里几个窗，
+    最有把握的那个窗的描述才最值得给人看。它是人复核时的第一眼信息——不对的话
+    不用点开视频就能排掉。
+    """
     segs: list[dict] = []
     for w, a in zip(wins, answers):
         if not a.get("label") or a.get("confidence", 0.0) < min_conf:
@@ -517,13 +609,17 @@ def merge_segments(wins: list[Window], answers: list[dict], min_conf: float = 0.
         last = segs[-1] if segs else None
         if last and last["label"] == a["label"] and w.start <= last["end_s"] + 1e-6:
             last["end_s"] = max(last["end_s"], w.end)
-            last["confidence"] = max(last["confidence"], a["confidence"])
+            if a["confidence"] > last["confidence"]:
+                last["confidence"] = a["confidence"]
+                last["note"] = a.get("note") or ""
+                last["desc"] = a.get("desc") or ""
             last["_parts"].append(a.get("body_part"))
             last["n_clips"] += 1
         else:
             segs.append({"start_s": w.start, "end_s": w.end, "label": a["label"],
                          "confidence": a["confidence"], "_parts": [a.get("body_part")],
-                         "note": a.get("note") or "", "n_clips": 1})
+                         "note": a.get("note") or "", "desc": a.get("desc") or "",
+                         "n_clips": 1})
     for s in segs:
         parts = [p for p in s.pop("_parts") if p]
         s["body_part"] = Counter(parts).most_common(1)[0][0] if parts else None
@@ -649,6 +745,7 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
         except Exception as e:  # noqa: BLE001 一段问失败不该让整个视频白跑
             _logger.warning("问模型失败 %.1f-%.1f：%s", w.start, w.end, e)
             return {"label": None, "body_part": None, "confidence": 0.0, "note": f"失败:{type(e).__name__}",
+                    "desc": "", "see": "unknown",
                     "usage": {"input": 0, "output": 0}, "error": str(e)[:200],
                     "latency_ms": int((time.monotonic() - t1) * 1000)}
 
@@ -661,6 +758,11 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
     stats["usage"]["output"] = sum(a["usage"]["output"] for a in answers)
     stats["usage"]["est_usd"] = llmmod.estimate_usd(llm, stats["usage"]["input"], stats["usage"]["output"])
     stats["hits"] = sum(1 for a in answers if a.get("label"))
+    # 看不清有多少：这个数说的不是模型好不好，是**送进来的候选好不好**。
+    # 居高不下就该回头修出候选的那一层（裁得太小 / 夜里太暗 / 狗被挡），
+    # 而不是调提示词——「不是这些行为」和「根本看不清」混成一个 none 的话，
+    # 这两条路分不开
+    stats["unclear"] = sum(1 for a in answers if a.get("see") == "unclear")
     stats["seconds"] = round(time.monotonic() - t0, 1)
     # 每一次调用单独记一条：平台那边存表做统计（次数 / token / 耗时）
     stats["calls"] = [{"latency_ms": int(a.get("latency_ms") or 0), "input": int(a["usage"].get("input") or 0),

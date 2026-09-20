@@ -165,3 +165,80 @@ def test_local_不要_key_也不发鉴权头():
     # 给了 key（vLLM 开了 --api-key）就带上
     L.chat_vision(L.LLM("local", "m", "tok", base_url="http://gpu:8000/v1"), "s", "u", [], http=_http(handler))
     assert seen["auth"] == "Bearer tok" and seen["url"].startswith("http://gpu:8000/v1/")
+
+
+def test_看不清和不是这些行为要分开(monkeypatch):
+    """label=None 有两种：模型正常工作、正确拒绝（不是这些行为），和根本看不清
+    （送进来的候选本身是垃圾）。混成一个 none 的话，一批 none 回来完全不知道
+    该调提示词还是回头修出候选的那一层。"""
+    from vision_service import seek
+
+    labels = [seek.Label(name="舔", parts=["后爪", "前爪"])]
+
+    clear_no = seek.parse_answer('{"see":"clear","desc":"侧卧不动，口鼻朝前","label":"none",'
+                                 '"confidence":0,"note":"没有理毛动作"}', labels)
+    assert clear_no["label"] is None and clear_no["see"] == "clear"
+    assert "侧卧" in clear_no["desc"]
+
+    # 看不清时即使给了标签也不采信——提示词里写明了看不清一律 none
+    unclear = seek.parse_answer('{"see":"unclear","desc":"画面太暗，只看到一团",'
+                                '"label":"舔","body_part":"后爪","confidence":0.8,"note":"猜的"}', labels)
+    assert unclear["label"] is None and unclear["body_part"] is None
+    assert unclear["confidence"] == 0.0 and unclear["see"] == "unclear"
+
+    hit = seek.parse_answer('{"see":"clear","desc":"侧卧，头转向身后，口鼻接触左后肢",'
+                            '"label":"舔","body_part":"后爪","confidence":0.7,"note":"口鼻贴着后爪"}', labels)
+    assert hit["label"] == "舔" and hit["body_part"] == "后爪" and hit["confidence"] == 0.7
+    assert hit["see"] == "clear" and "口鼻接触左后肢" in hit["desc"]
+
+    # 老模型不给 see 字段：不能当成看不清而把结果丢掉
+    old = seek.parse_answer('{"label":"舔","body_part":"后爪","confidence":0.6,"note":"x"}', labels)
+    assert old["label"] == "舔" and old["see"] == "unknown"
+    assert seek.parse_answer("不是 JSON", labels)["see"] == "unknown"
+
+
+def test_多帧拼成一张带序号的图(monkeypatch):
+    """分开发几张时模型容易当成几只不同的狗（俯拍裁出来的狗本来就难认），
+    而舔和啃在单帧上几乎一样、差别全在几帧之间的变化。"""
+    import cv2
+    import numpy as np
+
+    from vision_service import seek
+
+    def jpg(color):
+        return bytes(cv2.imencode(".jpg", np.full((80, 120, 3), color, np.uint8))[1].tobytes())
+
+    frames = [jpg(c) for c in (60, 120, 180, 200)]
+    sheet = seek.tile_frames(frames, cols=2, cell=120)
+    img = cv2.imdecode(np.frombuffer(sheet, np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[0] == 160 and img.shape[1] == 240          # 2x2 格
+    assert seek.tile_frames([frames[0]]) == frames[0]           # 一帧不用拼
+    assert seek.tile_frames([]) == b""
+    assert seek.tile_frames(["不是图片".encode(), frames[0]]) == frames[0]   # 坏的跳过
+
+
+def test_ask_默认拼图_提示词里说清楚序号是时间顺序(monkeypatch):
+    from vision_service import llm as llmmod
+    from vision_service import seek
+
+    import cv2
+    import numpy as np
+
+    frames = [bytes(cv2.imencode(".jpg", np.full((60, 60, 3), c, np.uint8))[1].tobytes())
+              for c in (50, 150, 250)]
+    seen = {}
+
+    def fake(llm, system, user, jpegs, max_tokens=300, client=None, http=None):
+        seen.update(system=system, user=user, n=len(jpegs))
+        return '{"see":"clear","desc":"d","label":"none","confidence":0,"note":"n"}', {"input": 1, "output": 1}
+    monkeypatch.setattr(llmmod, "chat_vision", fake)
+
+    seek.ask(frames, [seek.Label(name="舔")], 6.0, llmmod.LLM(provider="anthropic", api_key="k", model="m"))
+    assert seen["n"] == 1                                        # 三帧拼成一张发
+    assert "序号" in seen["user"] and "时间顺序" in seen["user"]
+    assert "同一只狗的连续几秒" in seen["system"] and "see=unclear" in seen["system"]
+    assert "desc" in seen["user"] and "不要写结论" in seen["user"]
+
+    seek.ask(frames, [seek.Label(name="舔")], 6.0,
+             llmmod.LLM(provider="anthropic", api_key="k", model="m"), tile=False)
+    assert seen["n"] == 3                                        # 关掉拼图就分开发
