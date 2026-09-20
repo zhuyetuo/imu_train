@@ -612,3 +612,89 @@ def test_接口_部位条数放宽到60(monkeypatch, tmp_path):
         body["labels"] = [{"name": f"类{i}", "parts": []} for i in range(24)]
         body["labels"][0]["parts"] = []
         assert tc.post("/api/v1/seek", json=body).status_code == 200 and seen["n_labels"] == 24
+
+
+def test_静止帧不再打断批次(fake_video, monkeypatch):
+    """狗一会儿动一会儿停时，原来每遇到一个静止帧就把当前批先送掉，批长期只有一两帧。
+
+    这里的画面是"动一秒停一秒"：12 帧里 6 帧要送检测。batch=4 的话应该攒成 4+2 两批，
+    而不是一帧一批。送检的总帧数一帧不能多——省下来的是批次数，不是召回。
+    """
+    fake_video["cap"] = _Cap([i * 1000 for i in range(12)], moving=lambda t: t % 2 == 1)
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.008)
+    sent = []
+
+    def detect_batch(frames, conf=0.35):
+        sent.append(len(frames))
+        return [[{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": 0.9}] for _ in frames]
+    monkeypatch.setattr(dog, "detect_batch", detect_batch)
+
+    stats: dict = {}
+    s = seek.sample_video("x.mp4", every_sec=1.0, batch=4, stats_out=stats)
+    assert len(s) == 12 and [r["t"] for r in s] == [float(i) for i in range(12)]   # 顺序没乱
+    assert all(r["boxes"] for r in s)                      # 静止的也带着框
+    assert max(sent) > 1                                   # 关键：批没被静止帧切碎
+    assert sum(sent) == stats["detected"] and stats["detected"] + stats["skipped"] == 12
+
+
+def test_静止帧沿用的是同一批里前一个检测帧的框(fake_video, monkeypatch):
+    """静止帧排进队列后才回填框。回填时必须按顺序取"它前面那个检测帧"的框，
+    不能整批都用上一批的——那样框会落后一整批。"""
+    fake_video["cap"] = _Cap([i * 1000 for i in range(6)], moving=lambda t: t in (1, 3))
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: False)
+    monkeypatch.setattr(seek.config, "STATIC_SKIP_THR", 0.008)
+    n = {"i": 0}
+
+    def detect_batch(frames, conf=0.35):
+        out = []
+        for _f in frames:
+            n["i"] += 1
+            out.append([{"bbox": [0.07, 0.13, 0.15, 0.15], "conf": float(n["i"])}])
+        return out
+    monkeypatch.setattr(dog, "detect_batch", detect_batch)
+
+    s = seek.sample_video("x.mp4", every_sec=1.0, batch=8)     # 一整批，全靠回填
+    confs = [r["boxes"][0]["conf"] for r in s]
+    # 每个静止帧的框 = 它前面最近那个检测帧的，而不是上一批的
+    assert all(confs[i] == confs[i - 1] or confs[i] > confs[i - 1] for i in range(1, len(confs)))
+    assert confs == sorted(confs) and confs[-1] == max(confs)
+
+
+def test_预读_结果跟不预读一模一样_提前退出不卡住(monkeypatch):
+    """预读只是把解码挪到后台线程，出来的帧和顺序必须一字不差；
+    max_samples 提前 break 时，解码线程正卡在 put 上也要能收掉，不然每建一路漏一个线程。"""
+    closed = {"n": 0}
+
+    def src(n):
+        try:
+            for i in range(n):
+                yield float(i), i
+        finally:
+            closed["n"] += 1
+
+    assert list(seek.prefetch(src(5), size=2)) == [(float(i), i) for i in range(5)]
+    assert closed["n"] == 1
+    assert list(seek.prefetch(src(5), size=1)) == [(float(i), i) for i in range(5)]   # size<=1 = 关掉
+
+    # 提前退出：队列只放 2，源有 500，线程一定卡在 put 上
+    g = seek.prefetch(src(500), size=2)
+    assert next(g) == (0.0, 0)
+    g.close()
+    import threading
+    import time as _t
+    for _ in range(200):
+        if not any(t.name == "decode-prefetch" for t in threading.enumerate()):
+            break
+        _t.sleep(0.01)
+    assert not any(t.name == "decode-prefetch" for t in threading.enumerate())
+
+
+def test_预读_解码出错照样抛到主线程(monkeypatch):
+    def boom():
+        yield 0.0, 1
+        raise RuntimeError("ffmpeg 挂了")
+
+    import pytest as _p
+    with _p.raises(RuntimeError, match="ffmpeg 挂了"):
+        list(seek.prefetch(boom(), size=4))
