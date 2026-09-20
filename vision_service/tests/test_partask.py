@@ -508,12 +508,36 @@ def test_接触问法的统计_三个数都可验证():
            + [mk(True, "后左爪", "（对照）", control=True)])
     txt = partask.summarize_contact(res)
     assert "正式 90%" in txt and "对照 10%" in txt and "✓ 差了 80 个点" in txt
-    assert "部位跟几何对得上：6/9（67%）" in txt
-    assert "只看前/后不看左右：9/9（100%）" in txt
-    assert "左右对不上" in txt and "降级到「后爪」" in txt          # 给出该怎么办
+    # 前后和左右分开数：9 条里全对 6、前后对 9、左右对 6
+    assert "全对 6（67%）、前后对 9（100%）、左右对 6（67%）" in txt
+    assert "样本不够下结论" in txt                                  # n=9 < 15
     assert "这几帧里在动：100%" in txt
+    assert "模型说的部位：正式" in txt and "对照" in txt             # 偏好要看得见
 
     # 两组差不多：粗筛本身要重做
     bad = [mk(True, "后左爪", "后左爪") for _ in range(5)] + \
           [mk(True, "后左爪", "（对照）", control=True) for _ in range(5)]
     assert "⚠ 两组差不多" in partask.summarize_contact(bad)
+
+
+def test_前后系统性对不上_要说不是噪声():
+    """实测：左右 6/7 一致、前后 0/7。0 不是噪声（噪声会在 50% 上下），
+    是系统性相反——而我原来的指标把 part[:1]（前/后）标成了"只看前后不看左右"，
+    最该单独看的左右差点被埋掉。"""
+    def mk(part, slot):
+        return {"path": "a.mp4", "t": 1, "see": "clear", "contact": True, "part": part,
+                "slot": slot, "dist": 0.1, "moving": True, "confidence": 0.8, "desc": "d",
+                "usage": {"input": 1, "output": 1}}
+
+    res = ([mk("前左爪", "后左爪")] * 4 + [mk("前右爪", "后右爪")] * 2
+           + [mk("前左爪", "后右爪")])
+    txt = partask.summarize_contact(res)
+    assert "全对 0（0%）、前后对 0（0%）、左右对 6（86%）" in txt
+    assert "前后系统性对不上" in txt and "不是噪声" in txt
+    assert "样本不够下结论" in txt and "p=0.06" in txt              # n=7，别当结论
+
+    # 样本够 + 左右显著：才给"左右可以信"的结论
+    big = ([mk("前左爪", "后左爪")] * 14 + [mk("前右爪", "后右爪")] * 4)
+    t2 = partask.summarize_contact(big)
+    assert "左右对得上而前后不对" in t2 and "样本不够" not in t2
+

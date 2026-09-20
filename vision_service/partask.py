@@ -41,6 +41,8 @@ import json
 import os
 import time
 
+from collections import Counter
+
 from . import config, embed, llm as llmmod, posepart, seek
 
 # 问的时候给哪些类别。部位从 --part 推出来：问"是不是在舔后爪"比问"在干嘛"准得多，
@@ -284,6 +286,19 @@ def dump_debug(results: list[dict], out_dir: str, limit: int = 8) -> str:
             "\n  **先看图**：狗在图上有多大？舌头看得见吗？看不见的话改提示词/换模型都没用")
 
 
+def _binom_p(k: int, n: int) -> float:
+    """瞎猜（一半对一半）时，一致数 ≥ k 的概率。样本少时用来提醒"还不能下结论"。
+
+    2026-09-20：左右一致 6/7 看着很像回事，算出来 p=0.06——不够。
+    没有这一行的话，一个 n=7 的结果会被当成结论写进决策里。
+    """
+    import math
+
+    if n <= 0:
+        return 1.0
+    return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
+
+
 def summarize_contact(results: list[dict], llm=None) -> str:
     """接触问法的三个数。**它们都是可验证的，不像"命中率"那样依赖模型会不会判行为。**
 
@@ -305,10 +320,15 @@ def summarize_contact(results: list[dict], llm=None) -> str:
         return (sum(1 for r in rows if f(r)) / len(rows) * 100) if rows else 0.0
 
     c_ok, c_ctl = rate(ok, lambda r: r.get("contact")), rate(ctl, lambda r: r.get("contact"))
-    agree = [r for r in ok if r.get("contact") and r.get("part")]
-    same = sum(1 for r in agree if r.get("part") == r.get("slot"))
-    side = sum(1 for r in agree
-               if (r.get("part") or "")[:1] == (r.get("slot") or "")[:1])   # 前/后对上就算
+    # 只在两边都说了"某只爪"的那些条上比。跟尾根/颈部比前后左右没有意义
+    paw = [r for r in ok if (r.get("part") or "").endswith("爪")
+           and (r.get("slot") or "").endswith("爪")]
+    same = sum(1 for r in paw if r.get("part") == r.get("slot"))
+    # **前后和左右要分开数。** 2026-09-20 我把 part[:1]（那是"前/后"）标成了
+    # "只看前后不看左右"，把最该单独看的左右埋掉了——实测正是"左右几乎全对、
+    # 前后全反"，而那个错标签让这条结论差点被漏掉
+    fb = sum(1 for r in paw if (r["part"] or " ")[0] == (r["slot"] or " ")[0])
+    lr = sum(1 for r in paw if (r["part"] or "  ")[1] == (r["slot"] or "  ")[1])
     lines = ["", f"问了 {len(ok) + len(ctl)}/{n} 条（{n - len(ok) - len(ctl)} 条取不到帧）"
              + (f"，其中正式 {len(ok)} 条、对照 {len(ctl)} 条" if ctl else ""),
              f"  看不清 {len(unclear)}（{rate(ok, lambda r: r.get('see') == 'unclear'):.0f}%）",
@@ -322,13 +342,34 @@ def summarize_contact(results: list[dict], llm=None) -> str:
         else:
             lines.append("     ⚠ 两组差不多 → 几何的「贴着」画面不认，粗筛本身要重做，"
                          "不是调阈值的事")
-    if agree:
-        lines.append(f"  ② 部位跟几何对得上：{same}/{len(agree)}（{same / len(agree) * 100:.0f}%）"
-                     f"，只看前/后不看左右：{side}/{len(agree)}（{side / len(agree) * 100:.0f}%）")
-        if side and same / max(side, 1) < 0.7:
-            lines.append("     → 前后对得上但左右对不上，跟四爪全可见只有 58% 一致；"
-                         "部位标签先降级到「后爪」这一级，别给左右")
-    lines.append(f"  ③ 这几帧里在动：{rate(ok, lambda r: r.get('moving')):.0f}%"
+    if paw:
+        n_p = len(paw)
+        lines.append(f"  ② 两边都说是某只爪的 {n_p} 条里：全对 {same}（{same / n_p * 100:.0f}%）、"
+                     f"前后对 {fb}（{fb / n_p * 100:.0f}%）、左右对 {lr}（{lr / n_p * 100:.0f}%）")
+        # 一半对一半是瞎猜的期望值；样本少的时候先说清楚"不够"，别急着下结论
+        p_lr = _binom_p(lr, n_p)
+        if n_p < 15:
+            lines.append(f"     ⚠ 只有 {n_p} 条，**样本不够下结论**"
+                         f"（左右一致 {lr}/{n_p}，瞎猜也能这么好的概率 p={p_lr:.2f}；"
+                         f"要 p<0.05 至少得再跑三四倍的量）")
+        if fb / n_p < 0.3:
+            lines.append("     → **前后系统性对不上**：不是噪声（噪声会在 50% 上下）。"
+                         "要么姿态模型在俯拍上把前后爪搞反了，要么画面里挨着口鼻的"
+                         "本来就是前爪。查之前先看下面那行分布")
+        if lr / n_p >= 0.7 and n_p >= 15 and p_lr < 0.05:
+            lines.append("     → 左右对得上而前后不对：几何的「左右」可以信，"
+                         "「前后」不能信；部位标签按左右给、前后交给人或 IMU")
+    # 模型自己的部位偏好：对照组该是"随便什么都有"，如果它在两组里都爱说同一个部位，
+    # 那上面的一致率里有一部分是这个偏好造出来的，不是真在分辨
+    def dist(rows):
+        c = Counter((r.get("part") or "没贴到") for r in rows)
+        return "、".join(f"{k}{v}" for k, v in c.most_common(4))
+
+    lines.append(f"  ③ 模型说的部位：正式 {dist(ok)}")
+    if ctl:
+        lines.append(f"              对照 {dist(ctl)}")
+        lines.append("     ← 两行长得像的话，说明模型有固定偏好，上面的一致率有水分")
+    lines.append(f"  ④ 这几帧里在动：{rate(ok, lambda r: r.get('moving')):.0f}%"
                  "  ← 舔的时候狗在动。下一步跟 IMU 的理毛时段取交集，这一条打底")
     if llm is not None:
         tin = sum(int((r.get("usage") or {}).get("input") or 0) for r in ok + ctl)
