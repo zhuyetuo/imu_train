@@ -520,10 +520,13 @@ def test_接触问法的统计_三个数都可验证():
     assert "⚠ 两组差不多" in partask.summarize_contact(bad)
 
 
-def test_前后系统性对不上_要说不是噪声():
-    """实测：左右 6/7 一致、前后 0/7。0 不是噪声（噪声会在 50% 上下），
-    是系统性相反——而我原来的指标把 part[:1]（前/后）标成了"只看前后不看左右"，
-    最该单独看的左右差点被埋掉。"""
+def test_候选全是同一侧时_前后一致率没有信息量():
+    """2026-09-20 我把"前后 0/7"读成了「系统性相反」，差点据此去查姿态模型。
+
+    **那个 0 是结构性必然的**：候选是按几何判「后爪」筛出来的，几何那一边前后
+    是个常数；模型又一次「后爪」都没说过。两个常数当然永远不相等，里面没有信息。
+    有信息的是另一句：画面说过几次「后爪」。
+    """
     def mk(part, slot):
         return {"path": "a.mp4", "t": 1, "see": "clear", "contact": True, "part": part,
                 "slot": slot, "dist": 0.1, "moving": True, "confidence": 0.8, "desc": "d",
@@ -533,11 +536,78 @@ def test_前后系统性对不上_要说不是噪声():
            + [mk("前左爪", "后右爪")])
     txt = partask.summarize_contact(res)
     assert "全对 0（0%）、前后对 0（0%）、左右对 6（86%）" in txt
-    assert "前后系统性对不上" in txt and "不是噪声" in txt
+    assert "结构性地没有信息" in txt and "两个常数比" in txt
+    assert "一次都没说过「后爪」" in txt                            # 有信息的是这一句
+    assert "两边都不是真值" in txt
     assert "样本不够下结论" in txt and "p=0.06" in txt              # n=7，别当结论
 
-    # 样本够 + 左右显著：才给"左右可以信"的结论
-    big = ([mk("前左爪", "后左爪")] * 14 + [mk("前右爪", "后右爪")] * 4)
-    t2 = partask.summarize_contact(big)
-    assert "左右对得上而前后不对" in t2 and "样本不够" not in t2
+    # 几何那边前后有变化时，才轮得到"系统性相反"这个说法
+    mixed = ([mk("前左爪", "后左爪")] * 5 + [mk("后右爪", "前右爪")] * 5)
+    t2 = partask.summarize_contact(mixed)
+    assert "前后系统性对不上" in t2 and "结构性" not in t2
 
+
+def test_两边几乎全不一致时_指向人工标真值():
+    """两个不可靠的估计器互相对，只能说明至少有一个错，没法知道是哪个——
+    因为两边都不是真值。2026-09-20 在这上面绕了一整天。"""
+    def mk(part, slot):
+        return {"path": "a.mp4", "t": 1, "see": "clear", "contact": True, "part": part,
+                "slot": slot, "dist": 0.1, "moving": True, "confidence": 0.8, "desc": "d",
+                "usage": {"input": 1, "output": 1}}
+
+    res = [mk("前左爪", "后左爪")] * 10 + [mk("前右爪", "后左爪")] * 10
+    txt = partask.summarize_contact(res)
+    assert "两边几乎完全不一致" in txt and "都不是真值" in txt
+    assert "--label-sheet" in txt and "二十分钟" in txt
+
+
+
+def test_导人工标注单_和读回来算分(tmp_path, monkeypatch):
+    """两个估计器互相对判不出谁对，唯一的出路是人工标一小批当真值。
+    50 帧二十分钟，就能同时量出几何和画面各自的准确率。"""
+    import csv
+
+    monkeypatch.setattr(partask, "frames_around",
+                        lambda *a, **kw: ([b"\xff\xd8jpg"], ""))
+    res = [{"path": "d/a.mp4", "t": 1.0, "slot": "后左爪", "part": "前左爪", "contact": True},
+           {"path": "d/b.mp4", "t": 2.0, "slot": "（对照）", "part": None, "control": True},
+           {"path": "d/c.mp4", "t": 3.0, "skipped": "视频不在"}]
+    d = str(tmp_path / "sheet")
+    msg = partask.label_sheet(res, d, "/nas")
+    assert "导了 2 张" in msg and "别看" in msg and "--truth" in msg   # 提醒别看着另两列填
+    assert sorted(os.listdir(d)) == ["00.jpg", "01.jpg", "labels.csv"]
+    rows = list(csv.DictReader(open(os.path.join(d, "labels.csv"), encoding="utf-8-sig")))
+    assert rows[0]["几何"] == "后左爪" and rows[0]["画面"] == "前左爪"
+    assert rows[0]["人工填这一列"] == "" and rows[1]["对照"] == "是"
+
+    # 填完读回来：人工说前左爪 → 画面全对、几何全错
+    for r in rows:
+        r["人工填这一列"] = "前左爪" if not r["对照"] else "没贴到"
+    with open(os.path.join(d, "labels.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    txt = partask.score_truth(os.path.join(d, "labels.csv"))
+    assert "几何（姿态关键点）对 0/2（0%）" in txt      # 人工说前左爪，几何说后左爪
+    assert "画面（大模型）  对 2/2（100%）" in txt      # 画面两条都对上了
+    assert "对照组 1 条里人工也说「没贴到」的：1" in txt
+    assert "画面明显强于几何" in txt                    # 给出该怎么办
+
+    # 「看不清」要从分母里剔掉：人也判不了的帧，拿来给模型打分没有意义
+    for r in rows:
+        r["人工填这一列"] = "看不清"
+    with open(os.path.join(d, "labels.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    t2 = partask.score_truth(os.path.join(d, "labels.csv"))
+    assert "全是「看不清」" in t2 and "人也判不了" in t2
+
+    # 还没填就来算：明说，别报个 0%
+    for r in rows:
+        r["人工填这一列"] = ""
+    with open(os.path.join(d, "labels.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    assert "还是空的" in partask.score_truth(os.path.join(d, "labels.csv"))

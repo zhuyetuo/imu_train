@@ -286,6 +286,91 @@ def dump_debug(results: list[dict], out_dir: str, limit: int = 8) -> str:
             "\n  **先看图**：狗在图上有多大？舌头看得见吗？看不见的话改提示词/换模型都没用")
 
 
+def label_sheet(results: list[dict], out_dir: str, video_root: str, *,
+                n_frames: int = 6, step_s: float = 0.3) -> str:
+    """导一批帧给人标，当真值。
+
+    **为什么必须有这一步**：2026-09-20 花了一整天，一直在拿一个不可靠的估计器
+    （姿态几何）去跟另一个不可靠的估计器（视觉大模型）对。它们完全不一致——
+    但这只说明至少有一个错，**没法知道是哪个，因为两边都不是真值**。
+    再调任何参数都绕不过这一点。
+
+    50 帧、每帧二十秒，二十分钟的人力，就能同时量出两边各自的准确率。
+    这个数我们找了一天都没拿到。
+
+    导出：NN.jpg（跟发给模型的是同一张拼图）+ labels.csv（几何和画面各填了一列，
+    人工那一列空着）。填完用 --truth labels.csv 读回来算分。
+    """
+    import csv
+
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for i, r in enumerate(results):
+        if r.get("skipped"):
+            continue
+        frames, why = frames_around(os.path.join(video_root, r["path"]), r["path"], r["t"],
+                                    n=n_frames, span_s=3.0, step_s=step_s)
+        if not frames:
+            continue
+        tile = seek.tile_frames(frames)
+        name = f"{len(rows):02d}.jpg"
+        with open(os.path.join(out_dir, name), "wb") as f:
+            f.write(tile or frames[0])
+        rows.append({"图": name, "人工填这一列": "", "几何": r.get("slot"),
+                     "画面": r.get("part") or "没贴到",
+                     "对照": "是" if r.get("control") else "",
+                     "视频": r["path"], "秒": r["t"]})
+    with open(os.path.join(out_dir, "labels.csv"), "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ["图"])
+        w.writeheader()
+        w.writerows(rows)
+    return (f"导了 {len(rows)} 张到 {out_dir}/\n"
+            f"  打开图，在 labels.csv 的「人工填这一列」写口鼻贴着哪个部位"
+            f"（{'/'.join(posepart.SLOT_NAMES)}，没贴到就写「没贴到」，看不清写「看不清」）\n"
+            f"  **别看「几何」和「画面」那两列再填**——那会把两边的错一起带进真值里\n"
+            f"  填完：python -m vision_service.partask --truth {out_dir}/labels.csv")
+
+
+def score_truth(csv_path: str) -> str:
+    """人工标完之后，同时量几何和画面各自的准确率。"""
+    import csv
+
+    with open(csv_path, encoding="utf-8-sig") as f:
+        rows = [r for r in csv.DictReader(f) if (r.get("人工填这一列") or "").strip()]
+    if not rows:
+        return f"{csv_path} 里「人工填这一列」还是空的，先填再来"
+    done = [r for r in rows if r["人工填这一列"].strip() != "看不清"]
+    n = len(done)
+    if not n:
+        return f"填了 {len(rows)} 行，但全是「看不清」——那本身就是个结论：这些帧人也判不了"
+
+    def acc(col):
+        return sum(1 for r in done if r[col].strip() == r["人工填这一列"].strip())
+
+    geo, vis = acc("几何"), acc("画面")
+    ctl = [r for r in done if (r.get("对照") or "").strip()]
+    lines = [f"人工标了 {len(rows)} 条，其中 {len(rows) - n} 条「看不清」，按 {n} 条算：", "",
+             f"  几何（姿态关键点）对 {geo}/{n}（{geo / n * 100:.0f}%）",
+             f"  画面（大模型）  对 {vis}/{n}（{vis / n * 100:.0f}%）",
+             f"  瞎猜（六选一）    约 17%"]
+    if ctl:
+        c_far = sum(1 for r in ctl if r["人工填这一列"].strip() == "没贴到")
+        lines.append(f"  对照组 {len(ctl)} 条里人工也说「没贴到」的：{c_far}"
+                     f"（{c_far / len(ctl) * 100:.0f}%）← 低的话说明对照组本身不干净")
+    lines.append("")
+    best = max(geo, vis)
+    if best / n < 0.3:
+        lines.append("  两边都接近瞎猜 → **这条路（从画面判部位）走不通**，"
+                     "别再调了。部位这一级交给人，或者换成训一个自己的模型")
+    elif vis > geo * 1.5:
+        lines.append("  画面明显强于几何 → 几何只当召回，部位以画面为准")
+    elif geo > vis * 1.5:
+        lines.append("  几何明显强于画面 → 别问大模型了，省这笔钱")
+    else:
+        lines.append("  两边差不多 → 取一致的那部分当高置信样本，不一致的交给人")
+    return "\n".join(lines)
+
+
 def _binom_p(k: int, n: int) -> float:
     """瞎猜（一半对一半）时，一致数 ≥ k 的概率。样本少时用来提醒"还不能下结论"。
 
@@ -352,13 +437,32 @@ def summarize_contact(results: list[dict], llm=None) -> str:
             lines.append(f"     ⚠ 只有 {n_p} 条，**样本不够下结论**"
                          f"（左右一致 {lr}/{n_p}，瞎猜也能这么好的概率 p={p_lr:.2f}；"
                          f"要 p<0.05 至少得再跑三四倍的量）")
-        if fb / n_p < 0.3:
+        # 候选是按"某一侧的爪"筛出来的，几何那边前后是个常数——这时候"前后一致率"
+        # 结构性地只能是 0 或 100，里面没有信息。2026-09-20 我把结构性的 0 读成了
+        # "系统性相反"，差点据此去查姿态模型
+        geo_fb = {(r["slot"] or " ")[0] for r in paw}
+        if len(geo_fb) == 1:
+            side = next(iter(geo_fb))
+            n_same_fb = sum(1 for r in paw if (r["part"] or " ")[0] == side)
+            lines.append(f"     ⚠ 候选全是几何判「{side}爪」的，所以「前后一致率」在这里"
+                         f"**结构性地没有信息**（两个常数比）。有信息的是这个："
+                         f"画面说「{side}爪」的有 {n_same_fb}/{n_p} 条")
+            if n_same_fb == 0:
+                lines.append(f"       → 画面**一次都没说过「{side}爪」**。要么它在俯拍上"
+                             f"分不出前后爪，要么挨着口鼻的本来就是另一头的爪。"
+                             f"**光靠这两个互相对是判不出谁对的——两边都不是真值。**")
+        elif fb / n_p < 0.3:
             lines.append("     → **前后系统性对不上**：不是噪声（噪声会在 50% 上下）。"
                          "要么姿态模型在俯拍上把前后爪搞反了，要么画面里挨着口鼻的"
-                         "本来就是前爪。查之前先看下面那行分布")
+                         "本来就是前爪")
         if lr / n_p >= 0.7 and n_p >= 15 and p_lr < 0.05:
             lines.append("     → 左右对得上而前后不对：几何的「左右」可以信，"
                          "「前后」不能信；部位标签按左右给、前后交给人或 IMU")
+        elif n_p >= 15 and same / n_p < 0.2:
+            lines.append("     → **两边几乎完全不一致，而且都不是真值**——"
+                         "再调任何参数都绕不过这一点，因为没法知道错的是哪一个。"
+                         "下一步是人工标一小批当真值：--label-sheet 导 50 帧，"
+                         "二十分钟就能同时量出几何和画面各自的准确率")
     # 模型自己的部位偏好：对照组该是"随便什么都有"，如果它在两组里都爱说同一个部位，
     # 那上面的一致率里有一部分是这个偏好造出来的，不是真在分辨
     def dist(rows):
@@ -545,7 +649,7 @@ def probe(hit: dict, video_root: str, span_s: float = 3.0, n: int = 4) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="把姿态捞出来的部位候选送去问大模型")
-    ap.add_argument("--part", required=True, help="部位名，比如 后爪")
+    ap.add_argument("--part", default="后爪", help="部位名，比如 后爪")
     ap.add_argument("--index-dir", default=config.EMBED_INDEX_DIR)
     ap.add_argument("--near-max", type=float, default=0.25)
     ap.add_argument("--min-run", type=int, default=1,
@@ -569,6 +673,11 @@ def main() -> None:
     ap.add_argument("--behavior", action="store_true",
                     help="退回老问法（判舔/啃/抓挠）。默认只问「口鼻贴着哪个部位」——"
                          "「是不是在舔」画面答不了（舌头只有几个像素），那一半交给 IMU")
+    ap.add_argument("--label-sheet", metavar="DIR",
+                    help="导一批帧给人标当真值。**两个估计器互相对是判不出谁对的**，"
+                         "50 帧二十分钟就能同时量出两边的准确率")
+    ap.add_argument("--truth", metavar="CSV",
+                    help="读回人工标好的 labels.csv，算几何和画面各自的准确率")
     ap.add_argument("--dump", metavar="DIR",
                     help="把**真正发出去的那张拼图**、完整提示词、模型原始回答存下来。"
                          "模型答得不对时第一件事是看这个，不是改提示词")
@@ -589,6 +698,9 @@ def main() -> None:
     import logging
     logging.basicConfig(level=logging.WARNING, format="[%(name)s] %(message)s")
 
+    if args.truth:
+        print(score_truth(args.truth))
+        return
     key = posepart.part_of(args.part) or args.part
     r = posepart.find(args.index_dir, key, args.near_max, True, args.per_video,
                       args.min_gap, args.min_run, args.min_motion)
@@ -669,6 +781,9 @@ def main() -> None:
     if len(rounds) > 1:
         print(agreement(rounds))
 
+    if args.label_sheet:
+        print("  " + label_sheet(results, args.label_sheet, config.VIDEO_ROOT,
+                                 n_frames=args.frames, step_s=args.step))
     if args.dump:
         print("  " + dump_debug(results, args.dump))
     # **先打印再写文件**：写文件失败不该吃掉刚花了钱问回来的答案。
