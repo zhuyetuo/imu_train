@@ -175,7 +175,44 @@ def match(rows, part: str, near_max: float | None = None, require_nearest: bool 
 
 # ── 从整份索引里捞候选 ────────────────────────────────────────────────
 
-def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool):
+def stable(mask, ts, min_run: int, max_gap_s: float = 2.5):
+    """只留「连着 min_run 帧都成立」的那些帧 → bool (N,)。
+
+    这是用来把**随机的误检**跟**真动作**分开的，不是为了收紧阈值。
+
+    2026-09-20 实测：俯拍 + 狗蜷着或摊平躺着时，RTMPose(AP-10K) 这个视角是分布外的，
+    它照样给出高置信度，但关键点落在地板和墙上——鼻子和某只后爪"重合"多半是这种
+    误检的副产品，而不是真碰到了。联系表上十五格里看不到一格是真在舔。
+
+    误检的特点是**帧与帧之间不稳定**：这一秒判后左爪，下一秒骨架换个错法就判别的了。
+    真在舔后爪的狗会连着十几秒都判同一只爪。索引是每秒一帧，所以"连着 N 帧"就是
+    "连着 N 秒"。
+
+    max_gap_s：索引里只有有狗的帧，中间可能断档；时间上断开的不算连续。
+    """
+    import numpy as np
+
+    m = np.asarray(mask, dtype=bool)
+    t = np.asarray(ts, dtype="float32")
+    if min_run <= 1 or not len(m):
+        return m
+    out = np.zeros(len(m), dtype=bool)
+    i = 0
+    while i < len(m):
+        if not m[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(m) and m[j] and (t[j] - t[j - 1]) <= max_gap_s:
+            j += 1
+        if j - i >= min_run:
+            out[i:j] = True
+        i = j
+    return out
+
+
+def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool,
+              min_run: int = 1):
     """一份索引 → (rel_path, 命中的时间点 list, 该路有狗帧数, 该路可判部位帧数)。"""
     import json
 
@@ -194,6 +231,7 @@ def _scan_one(npz_path: str, part: str, near_max: float, require_nearest: bool):
     dists, _vis = decode(rows)
     slot, best = nearest(dists)
     m = match(rows, part, near_max, require_nearest)
+    m = stable(m, ts, min_run)
     hits = [{"t": round(float(ts[i]), 2), "dist": round(float(best[i]), 3),
              "slot": SLOT_NAMES[int(slot[i])] if slot[i] >= 0 else "?"}
             for i in np.flatnonzero(m)]
@@ -233,7 +271,7 @@ def thin(hits: list[dict], min_gap_s: float) -> list[dict]:
 
 def find(index_dir: str, part: str, near_max: float | None = None,
          require_nearest: bool = True, max_per_video: int = 20,
-         min_gap_s: float = 60.0) -> dict:
+         min_gap_s: float = 60.0, min_run: int = 1) -> dict:
     """整份索引里所有"鼻子够到这个部位"的帧。不跑任何模型，几十秒扫完。
 
     两道抽稀，为的都是"清单里每一条是一个新场景"：min_gap_s 把一次连续的舔爪
@@ -247,7 +285,7 @@ def find(index_dir: str, part: str, near_max: float | None = None,
     for name in files:
         if not name.endswith(".npz"):
             continue
-        r = _scan_one(os.path.join(index_dir, name), part, thr, require_nearest)
+        r = _scan_one(os.path.join(index_dir, name), part, thr, require_nearest, min_run)
         if r is None:
             continue
         path, hits, rows, part_ok = r
@@ -259,8 +297,8 @@ def find(index_dir: str, part: str, near_max: float | None = None,
     out = thin(out, min_gap_s)                 # 跨文件再去一次：imu11/imu12 是同一段视频
     out.sort(key=lambda h: h["dist"])
     return {"part": part, "known": slots is not None, "near_max": thr, "min_gap_s": min_gap_s,
-            "hits": out, "raw_hits": n_raw, "with_dog": n_dog, "part_ok": n_part,
-            "videos": len(files)}
+            "min_run": min_run, "hits": out, "raw_hits": n_raw, "with_dog": n_dog,
+            "part_ok": n_part, "videos": len(files)}
 
 
 def calib(index_dir: str, part: str, require_nearest: bool = True) -> str:
@@ -389,6 +427,9 @@ def main() -> None:
     ap.add_argument("--per-video", type=int, default=20, help="每路最多留几个")
     ap.add_argument("--min-gap", type=float, default=60.0,
                     help="同一段视频里两条候选至少隔多少秒（一次连续的舔爪只出一条）")
+    ap.add_argument("--min-run", type=int, default=1,
+                    help="要连着几秒都判成这个部位才算。用来滤掉随机误检——"
+                         "真在舔会连着十几秒，骨架画错则每秒跳一个地方")
     ap.add_argument("--limit", type=int, default=50, help="最多打印几条")
     ap.add_argument("--calib", action="store_true", help="先看距离分布，定阈值用")
     ap.add_argument("--sheet", metavar="PNG",
@@ -400,13 +441,15 @@ def main() -> None:
     if args.calib:
         print(calib(args.index_dir, key))
         return
-    r = find(args.index_dir, key, args.near_max, not args.any, args.per_video, args.min_gap)
+    r = find(args.index_dir, key, args.near_max, not args.any, args.per_video, args.min_gap,
+             args.min_run)
     if not r["known"]:
         print(f"不认识的部位：{args.part} → {key}（认得的：{'、'.join(PARTS)}）")
         return
     print(f"{args.part} → {key}：{r['videos']} 路索引，有狗 {r['with_dog']:,} 帧，"
           f"其中 {r['part_ok']:,} 帧判得出部位，{r['raw_hits']:,} 帧鼻子够到了它"
-          f"（近到 {r['near_max']} 体长以内，骨架塌掉的已滤）")
+          f"（近到 {r['near_max']} 体长以内，骨架塌掉的已滤"
+          + (f"，且要连着 {r['min_run']} 秒都判成它" if r["min_run"] > 1 else "") + "）")
     print(f"  抽稀后 {len(r['hits']):,} 个候选：同一段视频里相隔不足 {r['min_gap_s']:.0f} 秒的"
           f"算同一次，每路最多 {args.per_video} 条——所以**每一条都是一个新场景**")
     if not r["hits"]:
