@@ -88,3 +88,39 @@ def test_读不到就如实说_绝不把模型加载搞挂(monkeypatch):
     assert ran == [1]
     assert gpumem.report()["models"]["检测 yolo"]["mib"] is None      # 量不到就写量不到
     assert gpumem.release()["ok"] is False and "驱动不高兴" in gpumem.release()["why"]
+
+
+def test_建完一路自动还缓存_但留一截周转(monkeypatch):
+    """实测：25 GiB 里 23 GiB 是"用过还留着"的缓存，模型权重只有 1.1 GiB。
+    不还的话，三路并行撑出来的峰值会一直挂在卡上，别人要用卡就被挡住。
+
+    但也不能每次全还：下一路马上又要用，全还了每次都得重新向驱动要（几十毫秒，
+    还更碎）。留几个 G 周转，超出的才还。
+    """
+    state = {"reserved": 25000 * gpumem.MIB, "alloc": 1700 * gpumem.MIB, "emptied": 0}
+
+    class _Cuda:
+        @staticmethod
+        def memory_allocated():
+            return state["alloc"]
+
+        @staticmethod
+        def memory_reserved():
+            return state["reserved"]
+
+        @staticmethod
+        def empty_cache():
+            state["emptied"] += 1
+            state["reserved"] = state["alloc"]
+
+        @staticmethod
+        def is_available():
+            return True
+
+    monkeypatch.setattr(gpumem, "_torch", lambda: type("T", (), {"cuda": _Cuda})())
+    freed = gpumem.trim(keep_mib=4096)
+    assert freed == 23300.0 and state["emptied"] == 1
+
+    # 闲着的没到线：一下都别动，省得白白去要一次显存
+    state["reserved"] = state["alloc"] + 1000 * gpumem.MIB
+    assert gpumem.trim(keep_mib=4096) == 0.0 and state["emptied"] == 1
