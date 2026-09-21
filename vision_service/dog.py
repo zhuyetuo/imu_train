@@ -34,7 +34,7 @@ import os
 import threading
 import time
 
-from . import config
+from . import config, gpumem
 
 _logger = logging.getLogger("vision_service.dog")
 
@@ -147,7 +147,10 @@ def _load(force: bool = False):
             #   - 每采一帧就搬一次几十 MB 的权重，白烧带宽
             globals()["_device_used"] = _pick_device()
             try:
-                _model.to(_device_used)
+                # 量一下这个模型常驻多少显存：容器里 nvitop 只看得到进程总量，
+                # 拆不开是检测、分割、向量还是姿态
+                with gpumem.track("检测 yolo", _device_used):
+                    _model.to(_device_used)
             except Exception as e:  # noqa: BLE001 搬不过去就留在 CPU 上，但要说出来
                 _logger.warning("把检测模型搬到 %s 失败，留在 CPU 上：%s", _device_used, e)
                 globals()["_device_used"] = "cpu"

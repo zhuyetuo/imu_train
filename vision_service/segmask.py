@@ -17,7 +17,7 @@ import os
 import threading
 import time
 
-from . import config
+from . import config, gpumem
 
 _logger = logging.getLogger("vision_service.segmask")
 
@@ -69,7 +69,8 @@ def _load_locked() -> None:
         _classes = dog._resolve_classes(m)
         _device_used = dog._pick_device()
         try:
-            m.to(_device_used)
+            with gpumem.track("抠狗 yolo-seg", _device_used):
+                m.to(_device_used)
         except Exception as e:  # noqa: BLE001
             _logger.warning("把分割模型搬到 %s 失败，留在 CPU 上：%s", _device_used, e)
             _device_used = "cpu"
