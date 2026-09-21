@@ -143,6 +143,9 @@ SEEK_PRICE_PER_M  = {
 EMBED_MODEL     = _env("EMBED_MODEL", "google/siglip-base-patch16-224")
 EMBED_DEVICE    = _env("EMBED_DEVICE", SAM_DEVICE)
 EMBED_BATCH     = int(_env("EMBED_BATCH", "128"))
+# 索引档位的默认值：fine = 每秒一帧（慢、全）；fast = 只解关键帧（快、稀）。
+# 每次建索引都可以单独指定，这个只是没指定时用哪个
+EMBED_MODE      = _env("EMBED_MODE", "fine")
 EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 # 算向量前先把狗抠出来、背景涂灰（实例分割）：花砖地 / 门框不再进向量，分数只看狗。
 # 用 YOLO 分割版权重（跟检测同一家）；没权重 / 加载失败自动退回不抠。

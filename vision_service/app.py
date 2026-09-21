@@ -275,6 +275,9 @@ class EmbedBuildIn(BaseModel):
     every_sec: float = Field(1.0, ge=0.5, le=5.0)
     force: bool = False
     conf: float = Field(0.35, ge=0.05, le=0.95)
+    # fine = 每秒一帧（慢、全）；fast = 只解关键帧（快、稀，这批素材约 12 秒一帧）。
+    # 已经有精档的路再要快档会原样返回，不降级
+    mode: str | None = Field(None, pattern="^(fine|fast)$")
 
 
 class EmbedIndexedIn(BaseModel):
@@ -322,7 +325,8 @@ def embed_build(body: EmbedBuildIn):
     full = _resolve_under(config.VIDEO_ROOT, body.path)
     _embed_ready()
     try:
-        return embed.build(body.path, full, every_sec=body.every_sec, force=body.force, conf=body.conf)
+        return embed.build(body.path, full, every_sec=body.every_sec, force=body.force,
+                           conf=body.conf, mode=body.mode)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001

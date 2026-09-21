@@ -186,6 +186,77 @@ def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s:
                            f"{err[-300:] or '（stderr 是空的）'}")
 
 
+def keyframe_times(path: str) -> list[float]:
+    """这一路视频的关键帧在第几秒。只拆包不解码，一小时的片子零点几秒。"""
+    import subprocess
+
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v", "-skip_frame", "nokey",
+           "-show_entries", "frame=pts_time", "-of", "csv=p=0", path]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=300).stdout
+    ts = []
+    for line in out.splitlines():
+        line = line.strip().rstrip(",")
+        try:
+            ts.append(float(line))
+        except ValueError:
+            continue        # N/A 之类：这一帧没有时间戳，跳过
+    return ts
+
+
+def iter_frames_keyframes(path: str, hwaccel: bool = True):
+    """**只解关键帧**：快档索引用。yield (t, BGR)，t 是关键帧的真实 PTS。
+
+    为什么快这么多：H.264 是帧间压缩的，P/B 帧要靠前面的帧才能还原，所以正常解码
+    必须把整条流解一遍（这批素材 14.2fps × 3600 秒 ≈ 5 万帧）才能拿到我们要的
+    3600 帧。`-discard nokey` 在**拆包那一步**就把非关键帧扔了，解码器只看到关键帧，
+    这批素材一小时只有约 290 个——解码量掉到 1/170。
+
+    代价是密度：这批素材关键帧约 12 秒一个（实测 0 / 13.8 / 25.7 / 36.8 / 50.1），
+    所以快档的时间分辨率是 12 秒，**短动作会整个漏掉**。这一条必须一路传到界面上，
+    不能让人把"快档里搜不到"当成"素材里没有"。
+
+    t 为什么不能沿用「第 n 帧 × 每秒一帧」：关键帧的间隔是编码器定的，不均匀。
+    所以先 ffprobe 拿一串真实 PTS，再按顺序配给解出来的帧；`-vsync 0` 保证 ffmpeg
+    既不补帧也不丢帧，两边一一对应。
+    """
+    import subprocess
+
+    import numpy as np
+
+    w, h = _video_size(path)
+    if not w or not h:
+        raise ValueError(f"读不到分辨率：{path}")
+    times = keyframe_times(path)
+    if not times:
+        raise RuntimeError(f"拿不到关键帧时间戳（可能这一路没有 PTS）：{path}")
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+    if hwaccel:
+        cmd += ["-hwaccel", "cuda"]
+    # -discard nokey 放在 -i 前面：对这一路输入生效，在拆包时就扔掉非关键帧
+    cmd += ["-discard", "nokey", "-i", path,
+            "-vsync", "0", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
+    n = 0
+    try:
+        while True:
+            buf = proc.stdout.read(w * h * 3)
+            if len(buf) < w * h * 3:
+                break
+            if n >= len(times):
+                # 解出来的比 ffprobe 数的还多：宁可停在这儿，也不给后面的帧编个假时间
+                _logger.warning("%s：解出的关键帧比 ffprobe 数的多（%d > %d），后面的不要了",
+                                os.path.basename(path), n + 1, len(times))
+                break
+            yield times[n], np.frombuffer(buf, dtype="uint8").reshape(h, w, 3)
+            n += 1
+    finally:
+        proc.stdout.close()
+        err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
+        rc = proc.wait()
+    if n == 0:
+        raise RuntimeError(f"ffmpeg 退出码 {rc}，一个关键帧都没解出来：{err[-300:] or '（stderr 是空的）'}")
+
+
 def iter_frames_cv2(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None):
     """老路：cv2 顺序 grab，只在跨过采样点时 retrieve。时间读 PTS。
 
@@ -340,7 +411,7 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
                  start_s: float = 0.0, end_s: float | None = None,
                  max_side: int = 512, jpeg_quality: int = 80, max_samples: int = 20000,
                  batch: int | None = None, on_frame=None, on_batch=None,
-                 stats_out: dict | None = None) -> list[dict]:
+                 stats_out: dict | None = None, keyframes_only: bool = False) -> list[dict]:
     """过一遍视频，每 every_sec 取一帧：跑狗检测（一批批送 GPU），有狗就裁出来存成 JPEG。
 
     返回 [{t, boxes, jpeg(bytes|None), motion(float|None)}]。motion 是跟上一个
@@ -445,7 +516,9 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     pending: list[tuple[float, object, bool]] = []
     # 参照帧 = 最近一个"决定要送检测"的帧。跟它比没变就沿用它的框
     ref_key = None
-    src = prefetch(iter_frames(path, every_sec, start_s, end_s))
+    # 快档：只解关键帧。解码量掉到 1/170，代价是密度（这批素材约 12 秒一帧）
+    src = prefetch(iter_frames_keyframes(path, hwaccel=config.DECODE_HWACCEL) if keyframes_only
+                   else iter_frames(path, every_sec, start_s, end_s))
     while True:
         t_wait = time.monotonic()
         try:
