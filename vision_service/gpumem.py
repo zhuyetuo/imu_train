@@ -120,6 +120,35 @@ def release() -> dict:
             "reserved_mib": round(after / MIB, 1)}
 
 
+def trim(keep_mib: float = 4096.0) -> float:
+    """缓存着没用的超过 keep_mib 就还一部分回去。建完一路索引时调一次。
+
+    为什么留一截不全还：下一路马上又要用，全还了每次都得重新向驱动要，
+    而向驱动要显存是有代价的（几十毫秒，还会更碎）。留几个 G 当周转，
+    超出的才还——这样稳态占用从"峰值"降到"峰值一次之后的常驻"。
+
+    为什么不干脆每次都 empty_cache：那等于把缓存分配器关掉，建索引会更慢，
+    而慢下来的是每一路、每一批，省下的显存却只有在别人要用卡时才有意义。
+
+    返回还回去多少 MiB（0 = 没到线，什么都没做）。
+    """
+    t = _torch()
+    if t is None:
+        return 0.0
+    try:
+        idle = (t.cuda.memory_reserved() - t.cuda.memory_allocated()) / MIB
+        if idle <= keep_mib:
+            return 0.0
+        before = t.cuda.memory_reserved()
+        t.cuda.empty_cache()
+        freed = (before - t.cuda.memory_reserved()) / MIB
+    except Exception:  # noqa: BLE001 诊断/回收都不该把正事搞挂
+        return 0.0
+    if freed > 0:
+        _logger.info("建完一路，还回 %.0f MiB 缓存（原本闲着 %.0f MiB）", freed, idle)
+    return round(freed, 1)
+
+
 def report() -> dict:
     """显存明细。数都是 MiB。
 

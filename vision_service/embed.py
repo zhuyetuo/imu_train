@@ -486,11 +486,16 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     np.savez(tmp, **cols)
     os.replace(tmp, p)
     _cache.pop(rel_path, None)
+    # 建完一路就把缓存着没用的还回去（留一截周转）。不还的话，三路并行撑出来的
+    # 峰值会一直挂在卡上：实测 25 GiB 里 23 GiB 是这个，而模型权重只有 1.1 GiB。
+    # 卡还是那张卡，别人（vLLM、另一个服务）要用时就被这堆"用过的空块"挡住了
+    freed = gpumem.trim()
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
             "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static,
             "raw": emb_raw is not None,
             "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
+            "freed_mib": freed,
             "spent": {k: round(v, 1) for k, v in spent.items()}}
 
 
