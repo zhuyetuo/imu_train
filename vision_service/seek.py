@@ -1136,6 +1136,12 @@ def seek_video(path: str, labels: list[Label], *, every_sec: float = 1.0, clip_s
     # 而不是调提示词——「不是这些行为」和「根本看不清」混成一个 none 的话，
     # 这两条路分不开
     stats["unclear"] = sum(1 for a in answers if a.get("see") == "unclear")
+    # 判出了类别、但置信度没过线被 merge_segments 扔掉的有多少。
+    # **这一档跟"答 none"是两回事**：模型其实指认了动作，只是没把握。
+    # 不单独报的话，一批 0 条候选看着跟"模型全答 none"一模一样，而这两种的
+    # 解法完全相反——前者把 min_conf 调低就能看到东西，后者调了也白调
+    stats["low_conf"] = sum(1 for a in answers
+                            if a.get("label") and (a.get("confidence") or 0.0) < min_conf)
     stats["seconds"] = round(time.monotonic() - t0, 1)
     # 每一次调用单独记一条：平台那边存表做统计（次数 / token / 耗时）
     stats["calls"] = [{"latency_ms": int(a.get("latency_ms") or 0), "input": int(a["usage"].get("input") or 0),
