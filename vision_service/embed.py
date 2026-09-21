@@ -290,6 +290,55 @@ def download_progress() -> dict | None:
 
 # ── 索引文件 ──────────────────────────────────────────────────────────
 
+def spent_summary(n: int = 30) -> dict:
+    """最近建好的 n 份索引，各步各花了多少秒 → 汇总。
+
+    建索引慢的时候，唯一有用的问题是"慢在哪一步"：解码+检测、姿态、抠狗、向量
+    这四步的代价差着数量级，凭感觉调错了旋钮只会白慢一遍。每份索引的 meta 里
+    本来就记着 spent，这里把最近几十份摊开加一加，直接说最重的是哪一步。
+
+    只读 npz 的 meta（几 KB），不碰向量那几百万个浮点数。
+    """
+    import numpy as np
+
+    d = config.EMBED_INDEX_DIR
+    try:
+        files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".npz")]
+    except OSError:
+        return {"n": 0, "why": f"索引目录读不到：{d}"}
+    files.sort(key=lambda p_: os.path.getmtime(p_), reverse=True)
+    tot: dict[str, float] = {}
+    frames = 0
+    used = 0
+    for f in files[:max(1, n)]:
+        try:
+            with np.load(f, allow_pickle=False) as z:
+                meta = json.loads(str(z["meta"]))
+                nt = int(len(z["t"]))
+        except Exception:  # noqa: BLE001 坏文件跳过，别让一份坏的挡住汇总
+            continue
+        sp = meta.get("spent") or {}
+        if not sp:
+            continue
+        used += 1
+        frames += nt
+        for k, v in sp.items():
+            tot[k] = tot.get(k, 0.0) + float(v or 0)
+    total = sum(tot.values())
+    name = {"scan": "解码+检测", "pose": "姿态", "seg": "抠狗", "embed": "向量"}
+    rows = [{"step": name.get(k, k), "sec": round(v, 1),
+             "pct": round(v / total * 100, 1) if total else 0.0}
+            for k, v in sorted(tot.items(), key=lambda kv: -kv[1])]
+    out = {"n": used, "frames": frames, "total_sec": round(total, 1),
+           "per_video_sec": round(total / used, 1) if used else 0.0, "steps": rows}
+    if rows:
+        top = rows[0]
+        out["note"] = (f"最重的是「{top['step']}」，占 {top['pct']:.0f}%（{used} 份索引合计 "
+                       f"{total:.0f} 秒，平均每路 {out['per_video_sec']:.0f} 秒）。"
+                       "调旋钮之前先看这一行：占比低的那几步再怎么调都省不出时间。")
+    return out
+
+
 def index_path(rel_path: str) -> str:
     h = hashlib.sha1(rel_path.encode("utf-8")).hexdigest()[:24]
     return os.path.join(config.EMBED_INDEX_DIR, f"{h}.npz")
