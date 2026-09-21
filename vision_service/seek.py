@@ -300,7 +300,12 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     # 狗睡着、空房间时省掉大半检测；一动就照常送
     last_boxes: list[dict] = []          # 上一次真送检测的那帧的框，静止帧沿用它
     skip_thr = config.STATIC_SKIP_THR
-    stats = {"detected": 0, "skipped": 0}
+    # 把「解码+检测」这一大块拆开计时。这一步实测占建索引 93%，不拆开就只能
+    # 凭感觉调旋钮，而解码和检测该调的东西完全不同：
+    #   wait_s   卡在等下一帧上的时间。prefetch 在后台线程解码，所以"等得久" = 解码跟不上
+    #   detect_s 送 GPU 检测的时间
+    #   cpu_s    剩下的：帧差、裁图、JPEG 编码，都在 CPU 上
+    stats = {"detected": 0, "skipped": 0, "wait_s": 0.0, "detect_s": 0.0, "cpu_s": 0.0}
 
     def frame_key(frame, boxes):
         """(整帧小图, 上次狗框那块的小图)。只看整帧不够：狗只占画面 0.5%，它舔爪子时
@@ -366,7 +371,9 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
         """
         nonlocal last_boxes
         todo = [f for _t, f, st in pending if not st]
+        t_det = time.monotonic()
         boxes_all = iter(dog.detect_batch(todo, conf) if todo else [])
+        stats["detect_s"] += time.monotonic() - t_det
         stats["detected"] += len(todo)
         for t, frame, st in pending:
             if st:
@@ -378,7 +385,16 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     pending: list[tuple[float, object, bool]] = []
     # 参照帧 = 最近一个"决定要送检测"的帧。跟它比没变就沿用它的框
     ref_key = None
-    for t, frame in prefetch(iter_frames(path, every_sec, start_s, end_s)):
+    src = prefetch(iter_frames(path, every_sec, start_s, end_s))
+    while True:
+        t_wait = time.monotonic()
+        try:
+            t, frame = next(src)
+        except StopIteration:
+            break
+        finally:
+            stats["wait_s"] += time.monotonic() - t_wait
+        t_cpu = time.monotonic()
         static = False
         if skip_thr > 0:
             # 区域比对用 last_boxes 当位置提示：一批之内它是冻住的，参照帧和当前帧裁的是
@@ -390,17 +406,25 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
             else:
                 ref_key = k
         pending.append((t, frame, static))
+        stats["cpu_s"] += time.monotonic() - t_cpu
         if len(pending) >= batch:
+            t_b, d0 = time.monotonic(), stats["detect_s"]
             flush(pending)
+            # flush 里既有检测（GPU）也有裁图/编码（CPU），把检测那段扣掉才是 CPU 的
+            stats["cpu_s"] += (time.monotonic() - t_b) - (stats["detect_s"] - d0)
             pending = []
         if len(out) + len(pending) >= max_samples:
             break
     if pending:
+        t_b, d0 = time.monotonic(), stats["detect_s"]
         flush(pending)
+        stats["cpu_s"] += (time.monotonic() - t_b) - (stats["detect_s"] - d0)
     if on_batch is not None and hook_buf:
         on_batch(list(hook_buf))
         hook_buf.clear()
-    _logger.info("采样 %s：%d 帧，送检 %d，静止跳过 %d", os.path.basename(path), len(out), stats["detected"], stats["skipped"])
+    _logger.info("采样 %s：%d 帧，送检 %d，静止跳过 %d（等解码 %.1fs，检测 %.1fs，CPU %.1fs）",
+                 os.path.basename(path), len(out), stats["detected"], stats["skipped"],
+                 stats["wait_s"], stats["detect_s"], stats["cpu_s"])
     if stats_out is not None:
         stats_out.update(stats)
     return out

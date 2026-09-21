@@ -325,7 +325,8 @@ def spent_summary(n: int = 30) -> dict:
         for k, v in sp.items():
             tot[k] = tot.get(k, 0.0) + float(v or 0)
     total = sum(tot.values())
-    name = {"scan": "解码+检测", "pose": "姿态", "seg": "抠狗", "embed": "向量"}
+    name = {"scan": "解码+检测（老索引没拆）", "scan_wait": "等解码", "scan_detect": "检测",
+            "scan_cpu": "裁图/帧差(CPU)", "pose": "姿态", "seg": "抠狗", "embed": "向量"}
     rows = [{"step": name.get(k, k), "sec": round(v, 1),
              "pct": round(v / total * 100, 1) if total else 0.0}
             for k, v in sorted(tot.items(), key=lambda kv: -kv[1])]
@@ -476,7 +477,14 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
                                 on_batch=on_batch if use_mask else None, stats_out=scan_stats)
     # 过一遍视频的总时间里刨掉姿态和抠狗，剩下的是解码 + 狗检测 + 裁图
+    # 「解码+检测」这一步实测占九成以上，所以它自己也要拆开报：等解码 / 检测 / CPU。
+    # 三项之和就是原来的 scan，合计没变，只是能看出该调哪个旋钮了
     spent["scan"] = round(time.monotonic() - t_scan - spent["pose"] - spent["seg"], 1)
+    for k_, name_ in (("wait_s", "scan_wait"), ("detect_s", "scan_detect"), ("cpu_s", "scan_cpu")):
+        if k_ in scan_stats:
+            spent[name_] = round(float(scan_stats[k_]), 1)
+    if {"scan_wait", "scan_detect", "scan_cpu"} <= set(spent):
+        del spent["scan"]      # 拆开之后别再留一个总数，不然汇总时重复计一遍
     with_dog = [s for s in samples if s["jpeg"] is not None]
     if with_dog:
         # 同一张图（静止沿用的）只算一次向量
