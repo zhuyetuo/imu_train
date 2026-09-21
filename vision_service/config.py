@@ -191,9 +191,14 @@ DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
 # 一条流一条流地排。这台机器 CPU 有 32 线程闲着，让一部分路走软解，两种硬件同时
 # 出力，吞吐是相加的，不是抢。
 #
-# 默认 0（不变），因为哪个比例最快取决于这台机器的 NVDEC 引擎数和 CPU 核数，
-# **没量过就不该替人定**。先 0.5 跑五分钟，跟 0 比一下 N/224 的推进速度。
-DECODE_CPU_SHARE = float(_env("DECODE_CPU_SHARE", "0"))
+# 默认 0.5（一半一半）。本来设的是 0（不改变行为），但 2026-09-21 实测发现那是
+# **最差的一格**：平台那边并发已经提到 12，而 5090 只有 2 个 NVDEC 引擎——
+# 12 路全挤硬解，排队 + 12×600 MiB 的解码上下文，比 6 路还慢。
+#
+# 既然并发上去了，就必须有人走 CPU，不然多开的那几路纯属添乱。哪个比例最优仍然
+# 取决于机器，但「全走 NVDEC」在高并发下已经被排除了。不合适就 .env 里一行退回：
+#   DECODE_CPU_SHARE=0     全走 NVDEC（配合并发压回 6）
+DECODE_CPU_SHARE = float(_env("DECODE_CPU_SHARE", "0.5"))
 # 软解每路给几个线程。不限制的话 ffmpeg 默认按核数开，十几路一起就是几百个线程
 # 互相抢，比单路还慢
 DECODE_CPU_THREADS = int(_env("DECODE_CPU_THREADS", "4"))

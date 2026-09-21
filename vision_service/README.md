@@ -556,6 +556,12 @@ python -m vision_service.posepart --part 后爪 --near-max 0.4 --min-motion 0.06
 一小时 720p 视频原来 45 秒左右，瓶颈是 cv2 逐帧 grab（CPU）和狗检测一张张送 GPU。现在：
 
 - 有 ffmpeg 就用它解码抽帧（多线程，有卡走 NVDEC），`DECODE_FFMPEG=0` 退回 cv2，`DECODE_HWACCEL=0` 不用 NVDEC
+- **解码是建索引最大的一笔（实测约六成）**，而且一路视频只能串行解。所以默认
+  `DECODE_CPU_SHARE=0.5`：一半的路走 NVDEC、一半走 CPU 软解，两种硬件同时出力。
+  5090 只有 2 个 NVDEC 引擎，并发十几路全走硬解只会排队——**并发和这个比例必须
+  一起调**，只改一个会比原来还慢。`DECODE_CPU_THREADS=4` 限制软解每路的线程数，
+  不限的话十几路一起就是几百个线程互相抢。
+  生效值看 `GET /api/v1/decode`，分步耗时看 `GET /api/v1/embed/spent`
 - 狗检测一批 `DETECT_BATCH`（默认 16）帧一起送 GPU
 - 平台那边建索引默认 3 路并行送（`VISION_INDEX_CONCURRENCY`），GPU 有锁，解码各自并行
 
