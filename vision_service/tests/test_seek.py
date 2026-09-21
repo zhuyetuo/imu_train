@@ -408,8 +408,14 @@ def test_ffmpeg_抽帧_按时间编号_两种都不行退回cv2(monkeypatch, fak
     got = list(seek.iter_frames("x.mp4", every_sec=2.0, start_s=10.0))
     assert [t for t, _ in got] == [10.0, 12.0, 14.0]
     assert got[1][1].shape == (h, w, 3) and int(got[1][1][0, 0, 0]) == 1
-    assert len(calls) == 2 and "-hwaccel" in calls[0] and "-hwaccel" not in calls[1]
-    assert "fps=1/2.0" in calls[1] and calls[1][calls[1].index("-ss") + 1] == "10.000"
+    # 三次：显存抽帧 → 显存解码但 CPU 抽帧 → 软解。中间那次是有意的——
+    # ffmpeg 没编 cuda 滤镜时，退回 CPU 抽帧仍然比软解快得多，不该一步掉到底
+    assert len(calls) == 3
+    assert "-hwaccel_output_format" in calls[0] and "hwdownload" in calls[0][calls[0].index("-vf") + 1]
+    assert "-hwaccel" in calls[1] and "-hwaccel_output_format" not in calls[1]
+    assert "hwdownload" not in calls[1][calls[1].index("-vf") + 1]
+    assert "-hwaccel" not in calls[2]
+    assert "fps=1/2.0" in calls[2] and calls[2][calls[2].index("-ss") + 1] == "10.000"
 
     # 两种都不行 → cv2
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: FakeProc(ok=False))
@@ -758,3 +764,38 @@ def test_cv2取后面的片段先seek过去_不从头读(fake_video, monkeypatch
     fake_video["cap"] = _Cap([i * 1000 for i in range(5)])
     list(seek.iter_frames("x.mp4", every_sec=1.0))                # start_s=0 不 seek
     assert not hasattr(fake_video["cap"], "seeked")
+
+
+def test_显存里抽帧_只把留下的那一帧下行到内存(monkeypatch, fake_video):
+    """25fps 的视频每秒取 1 帧：不在显存里抽，解出来的每一帧都要拷回内存再被丢掉，
+    96% 的拷贝是白做的。实测建索引 93% 的时间在这一步，其中「等解码」占七成。"""
+    import subprocess
+
+    w, h = 64, 32
+    calls = []
+
+    class P:
+        def __init__(self):
+            self.stdout = __import__("io").BytesIO(bytes(w * h * 3))
+            self.stderr = __import__("io").BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: (calls.append(cmd), P())[1])
+    monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+
+    list(seek.iter_frames("x.mp4", every_sec=1.0))
+    assert len(calls) == 1                                  # 一次就成，不用退回
+    cmd = calls[0]
+    assert cmd[cmd.index("-hwaccel_output_format") + 1] == "cuda"
+    # fps 只挑帧不碰像素，能在显存里做；挑完才 hwdownload
+    assert cmd[cmd.index("-vf") + 1] == "fps=1/1.0,hwdownload,format=nv12"
+
+    # 关掉开关就回到老办法（机器上 ffmpeg 有问题时的后路）
+    calls.clear()
+    monkeypatch.setattr(seek.config, "DECODE_GPU_FILTER", False)
+    list(seek.iter_frames("x.mp4", every_sec=1.0))
+    assert "-hwaccel_output_format" not in calls[0] and calls[0][calls[0].index("-vf") + 1] == "fps=1/1.0"

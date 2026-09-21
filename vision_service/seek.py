@@ -121,29 +121,55 @@ def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s:
     w, h = _video_size(path)
     if not w or not h:
         raise ValueError(f"读不到分辨率：{path}")
-    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
-    if hwaccel:
-        cmd += ["-hwaccel", "cuda"]
-    if start_s > 0:
-        cmd += ["-ss", f"{start_s:.3f}"]
-    cmd += ["-i", path]
-    if end_s is not None:
-        cmd += ["-t", f"{max(0.0, end_s - start_s):.3f}"]
-    cmd += ["-vf", f"fps=1/{every_sec}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
+
+    def _cmd(gpu_filter: bool) -> list[str]:
+        c = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        if hwaccel:
+            c += ["-hwaccel", "cuda"]
+            if gpu_filter:
+                # **抽帧在显存里做，只有留下的那一帧才下行到内存。**
+                # 不加这一句的话，解出来的每一帧都要从显存拷回内存，然后才在 CPU 上
+                # 被 fps 滤镜丢掉——25fps 的视频每秒取 1 帧，等于 96% 的拷贝是白做的。
+                # 实测建索引 93% 的时间在这一步，其中「等解码」又占七成。
+                c += ["-hwaccel_output_format", "cuda"]
+        if start_s > 0:
+            c += ["-ss", f"{start_s:.3f}"]
+        c += ["-i", path]
+        if end_s is not None:
+            c += ["-t", f"{max(0.0, end_s - start_s):.3f}"]
+        vf = f"fps=1/{every_sec}"
+        if hwaccel and gpu_filter:
+            # fps 只挑帧、不碰像素，显存里的帧照样能过；挑完再下载、转 bgr24
+            vf += ",hwdownload,format=nv12"
+        c += ["-vf", vf, "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+        return c
+
+    # 先走显存抽帧那条；这台机器的 ffmpeg 要是没编 cuda 滤镜，退回老办法再试一次。
+    # 不直接掉到 cv2：那条比 ffmpeg 慢好几倍，为了一个可以本地重试的问题不值当
+    attempts = [True, False] if (hwaccel and config.DECODE_GPU_FILTER) else [False]
     n = 0
-    try:
-        while True:
-            buf = proc.stdout.read(w * h * 3)
-            if len(buf) < w * h * 3:
-                break
-            frame = np.frombuffer(buf, dtype="uint8").reshape(h, w, 3)
-            yield start_s + n * every_sec, frame
-            n += 1
-    finally:
-        proc.stdout.close()
-        err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
-        rc = proc.wait()
+    err = ""
+    rc = 0
+    for i, gpu_filter in enumerate(attempts):
+        cmd = _cmd(gpu_filter)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=w * h * 3 * 4)
+        try:
+            while True:
+                buf = proc.stdout.read(w * h * 3)
+                if len(buf) < w * h * 3:
+                    break
+                frame = np.frombuffer(buf, dtype="uint8").reshape(h, w, 3)
+                yield start_s + n * every_sec, frame
+                n += 1
+        finally:
+            proc.stdout.close()
+            err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
+            rc = proc.wait()
+        if n:
+            break
+        if i + 1 < len(attempts):
+            _logger.warning("显存抽帧没出帧（%s），退回 CPU 抽帧再试一次：%s",
+                            os.path.basename(path), err[-200:] or "（stderr 是空的）")
     if n == 0:
         # **退出码 0 但一帧都没给，也算失败**。原来只在 rc != 0 时抛，于是这一支
         # 既不抛也不产出，调用方那边直接 return——cv2 那条后路根本没机会跑，

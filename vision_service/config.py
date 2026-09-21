@@ -190,6 +190,10 @@ DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
 # （720p 一帧 2.7MB，16 帧约 43MB，三路并建约 130MB）。设 0/1 = 关掉，退回原来的串行
 DECODE_PREFETCH = int(_env("DECODE_PREFETCH", "16"))
 # 狗检测一批送几帧（GPU 上一批 16~32 比一张张送快好几倍；显存紧就调小）
+# 抽帧在显存里做（-hwaccel_output_format cuda + hwdownload）：只有留下的那一帧
+# 才下行到内存。25fps 的视频每秒取 1 帧，不这么做等于 96% 的显存→内存拷贝是白做的。
+# ffmpeg 没编 cuda 滤镜的机器会自动退回老办法，所以默认开着是安全的
+DECODE_GPU_FILTER = _env("DECODE_GPU_FILTER", "1").lower() not in ("0", "false", "no", "")
 DETECT_BATCH    = int(_env("DETECT_BATCH", "32"))
 # 半精度推理（GPU 上快近一倍，框差别在小数点后）
 DETECT_HALF     = _env("DETECT_HALF", "1") not in ("0", "false", "False", "")
