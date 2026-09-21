@@ -186,24 +186,63 @@ def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s:
                            f"{err[-300:] or '（stderr 是空的）'}")
 
 
-def keyframe_times(path: str) -> list[float]:
-    """这一路视频的关键帧在第几秒。只拆包不解码，一小时的片子零点几秒。"""
+def _probe_lines(args: list[str], path: str) -> list[str]:
     import subprocess
 
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v", "-skip_frame", "nokey",
-           "-show_entries", "frame=pts_time", "-of", "csv=p=0", path]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=300).stdout
-    ts = []
-    for line in out.splitlines():
-        line = line.strip().rstrip(",")
-        try:
-            ts.append(float(line))
-        except ValueError:
-            continue        # N/A 之类：这一帧没有时间戳，跳过
-    return ts
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v", *args, "-of", "csv=p=0", path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:  # noqa: BLE001 ffprobe 没装 / 超时：换下一种问法，别把整路搞挂
+        _logger.warning("ffprobe 失败（%s）：%s", " ".join(args), e)
+        return []
+    return r.stdout.splitlines()
 
 
-def iter_frames_keyframes(path: str, hwaccel: bool = True):
+def keyframe_times(path: str) -> list[float]:
+    """这一路视频的关键帧在第几秒。只拆包不解码，一小时的片子零点几秒。
+
+    问三遍，**因为一种问法问不到不等于这一路没有时间戳**：
+
+      1. 包层的 pts_time + flags：最可靠。关键帧在包上就标着 K，
+         而且包的 pts 比帧的 pts 更少出现 N/A（帧的那个要解码器填）
+      2. 帧层的 best_effort_timestamp_time：容器里 pts 缺了它也会推一个出来
+      3. 帧层的 pts_time：原来唯一的那一种
+
+    实测 2026-09-21：一批素材只用第 3 种时整路拿不到，整个「快档」就报
+    「可能这一路没有 PTS」失败了——其实包层标得好好的。一种问法就断言
+    「这一路没有 PTS」，是把自己的盲点说成了素材的毛病。
+    """
+    def _floats(lines: list[str], flag_col: bool) -> list[float]:
+        ts: list[float] = []
+        for line in lines:
+            line = line.strip().rstrip(",")
+            if not line:
+                continue
+            if flag_col:
+                # "12.345,K__" —— 只要关键帧那些包
+                head, _, flags = line.partition(",")
+                if "K" not in flags:
+                    continue
+                line = head
+            else:
+                line = line.partition(",")[0]
+            try:
+                ts.append(float(line))
+            except ValueError:
+                continue        # N/A 之类：这一帧没有时间戳，跳过
+        return ts
+
+    ts = _floats(_probe_lines(["-show_entries", "packet=pts_time,flags"], path), flag_col=True)
+    if ts:
+        return ts
+    for ent in ("frame=best_effort_timestamp_time", "frame=pts_time"):
+        ts = _floats(_probe_lines(["-skip_frame", "nokey", "-show_entries", ent], path), flag_col=False)
+        if ts:
+            return ts
+    return []
+
+
+def iter_frames_keyframes(path: str, hwaccel: bool = True, times: list[float] | None = None):
     """**只解关键帧**：快档索引用。yield (t, BGR)，t 是关键帧的真实 PTS。
 
     为什么快这么多：H.264 是帧间压缩的，P/B 帧要靠前面的帧才能还原，所以正常解码
@@ -226,9 +265,11 @@ def iter_frames_keyframes(path: str, hwaccel: bool = True):
     w, h = _video_size(path)
     if not w or not h:
         raise ValueError(f"读不到分辨率：{path}")
-    times = keyframe_times(path)
+    # times 由调用方给：上面已经问过一次了，一小时的片子也要零点几秒，
+    # 224 路再问一遍就是白等一分钟
+    times = times if times is not None else keyframe_times(path)
     if not times:
-        raise RuntimeError(f"拿不到关键帧时间戳（可能这一路没有 PTS）：{path}")
+        raise RuntimeError(f"拿不到关键帧时间戳（各种问法都问不出）：{path}")
     cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
     if hwaccel:
         cmd += ["-hwaccel", "cuda"]
@@ -521,8 +562,21 @@ def sample_video(path: str, every_sec: float = 1.0, conf: float = 0.35,
     # 参照帧 = 最近一个"决定要送检测"的帧。跟它比没变就沿用它的框
     ref_key = None
     # 快档：只解关键帧。解码量掉到 1/170，代价是密度（这批素材约 12 秒一帧）
-    src = prefetch(iter_frames_keyframes(path, hwaccel=config.DECODE_HWACCEL) if keyframes_only
-                   else iter_frames(path, every_sec, start_s, end_s))
+    #
+    # 拿不到关键帧时间戳（各种问法都问不出）时**退回精档，而不是让这一路失败**：
+    # 快档是个省时间的优化，优化做不成就照常做，别把一路素材挡在索引外面。
+    # 退了要说出来（stats_out["fell_back"]），不然这一路会被当成快档，
+    # 而它其实是精档——两者密度差 12 倍，混着记会让「搜不到」无从解释。
+    fell_back = False
+    key_times = keyframe_times(path) if keyframes_only else None
+    if keyframes_only and not key_times:
+        _logger.warning("%s：拿不到关键帧时间戳，这一路退回精档（每秒一帧）建", os.path.basename(path))
+        keyframes_only = False
+        fell_back = True
+    if stats_out is not None:
+        stats_out["fell_back"] = fell_back
+    src = prefetch(iter_frames_keyframes(path, hwaccel=config.DECODE_HWACCEL, times=key_times)
+                   if keyframes_only else iter_frames(path, every_sec, start_s, end_s))
     while True:
         t_wait = time.monotonic()
         try:

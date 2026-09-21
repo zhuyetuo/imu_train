@@ -491,6 +491,11 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
                                 on_batch=on_batch if use_mask else None, stats_out=scan_stats,
                                 keyframes_only=fast)
+    # 这一路拿不到关键帧时间戳，退回了精档（见 seek.sample_video）。索引里就得记
+    # 成精档：密度差 12 倍，记成快档的话，以后「搜不到」既可能是密度不够也可能是
+    # 真没有，而且缓存检查会以为这一路还欠一次精档重建
+    if scan_stats.get("fell_back"):
+        mode, fast = "fine", False
     # 过一遍视频的总时间里刨掉姿态和抠狗，剩下的是解码 + 狗检测 + 裁图
     # 「解码+检测」这一步实测占九成以上，所以它自己也要拆开报：等解码 / 检测 / CPU。
     # 三项之和就是原来的 scan，合计没变，只是能看出该调哪个旋钮了
