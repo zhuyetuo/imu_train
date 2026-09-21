@@ -857,13 +857,17 @@ def test_软解限线程_不然十几路一起几百个线程互相抢(monkeypat
     assert cmd.index("-threads") < cmd.index("-i") and cmd[cmd.index("-threads") + 1] == "4"
 
 
-def test_默认就一半走CPU_不用改env():
-    """默认从 0 改成 0.5 是 2026-09-21 实测定的：平台那边并发已经 12，而 5090 只有
-    2 个 NVDEC 引擎——12 路全挤硬解是**最差的一格**（排队 + 12×600 MiB 上下文），
-    比 6 路还慢。既然并发上去了就必须有人走 CPU，默认留 0 等于让人踩那一格。
+def test_默认全走NVDEC_配合并发8():
+    """2026-09-21 把三种配置都量了一遍（每路耗时）：
+
+        6 路全 NVDEC 12.6s ／ 12 路全 NVDEC 14.8s ／ 12 路 6+6 混合 11.9s
+
+    差别都在几个点内——瓶颈已经不在解码并行度上了（抠狗/向量/姿态在服务里是加锁
+    串行的，并发再高照样排队）。所以回到最简单那一格：全走 NVDEC + 并发 8。
+    **这个数跟平台的 VISION_INDEX_CONCURRENCY 是配套的，只改一个必然更差。**
     """
     from vision_service import config
     import importlib
 
     importlib.reload(config)
-    assert config.DECODE_CPU_SHARE == 0.5 and config.DECODE_CPU_THREADS == 4
+    assert config.DECODE_CPU_SHARE == 0.0 and config.DECODE_CPU_THREADS == 4
