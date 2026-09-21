@@ -404,6 +404,7 @@ def test_ffmpeg_抽帧_按时间编号_两种都不行退回cv2(monkeypatch, fak
     monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
     monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
     monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.0)   # 这一条测的是命令长什么样
 
     got = list(seek.iter_frames("x.mp4", every_sec=2.0, start_s=10.0))
     assert [t for t, _ in got] == [10.0, 12.0, 14.0]
@@ -786,6 +787,7 @@ def test_显存里抽帧_只把留下的那一帧下行到内存(monkeypatch, fa
     monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
     monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
     monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.0)   # 钉死走 NVDEC 那条
 
     list(seek.iter_frames("x.mp4", every_sec=1.0))
     assert len(calls) == 1                                  # 一次就成，不用退回
@@ -853,3 +855,15 @@ def test_软解限线程_不然十几路一起几百个线程互相抢(monkeypat
     assert "-hwaccel" not in cmd
     # -threads 要在 -i 前面才对这一路输入生效
     assert cmd.index("-threads") < cmd.index("-i") and cmd[cmd.index("-threads") + 1] == "4"
+
+
+def test_默认就一半走CPU_不用改env():
+    """默认从 0 改成 0.5 是 2026-09-21 实测定的：平台那边并发已经 12，而 5090 只有
+    2 个 NVDEC 引擎——12 路全挤硬解是**最差的一格**（排队 + 12×600 MiB 上下文），
+    比 6 路还慢。既然并发上去了就必须有人走 CPU，默认留 0 等于让人踩那一格。
+    """
+    from vision_service import config
+    import importlib
+
+    importlib.reload(config)
+    assert config.DECODE_CPU_SHARE == 0.5 and config.DECODE_CPU_THREADS == 4
