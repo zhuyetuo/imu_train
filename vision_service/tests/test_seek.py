@@ -877,3 +877,66 @@ def test_默认是6硬解加6软解_配合并发12():
 
     importlib.reload(config)
     assert config.DECODE_CPU_SHARE == 0.5 and config.DECODE_CPU_THREADS == 4
+
+
+def test_关键帧时间戳问三遍_包层问不到再问帧层(monkeypatch):
+    """一种问法问不到，不等于这一路没有时间戳。
+
+    2026-09-21 实测：只用 frame=pts_time 时一批素材整路拿不到，「快档」就报
+    「可能这一路没有 PTS」整批失败——其实包层标得好好的。把自己的盲点说成
+    素材的毛病，是这里最容易犯、也最难查的错。
+    """
+    from vision_service import seek
+
+    asked: list[str] = []
+
+    def fake(args, path):
+        key = " ".join(args)
+        asked.append(key)
+        if "packet=" in key:
+            return ["1.5,K__", "3.0,___", "4.5,K__"]      # 非关键帧的包要滤掉
+        return ["N/A", "N/A"]
+
+    monkeypatch.setattr(seek, "_probe_lines", fake)
+    assert seek.keyframe_times("x.mp4") == [1.5, 4.5]
+    assert len(asked) == 1        # 包层问到了就不用再问帧层
+
+    asked.clear()
+
+    def only_best_effort(args, path):
+        key = " ".join(args)
+        asked.append(key)
+        if "best_effort" in key:
+            return ["0.0", "12.0"]
+        return ["N/A"]
+
+    monkeypatch.setattr(seek, "_probe_lines", only_best_effort)
+    assert seek.keyframe_times("x.mp4") == [0.0, 12.0]
+    assert any("packet=" in a for a in asked) and any("best_effort" in a for a in asked)
+
+
+def test_拿不到关键帧就退回精档_不是让这一路失败(monkeypatch):
+    """快档只是个省时间的优化。优化做不成就照常做，别把一路素材挡在索引外面——
+    原来这里直接抛，整个「快档」按路报错，人只能看到一屏红字。
+
+    但退了要说出来：快档和精档密度差 12 倍，记错了以后「搜不到」就没法解释。
+    """
+    from vision_service import seek
+
+    monkeypatch.setattr(seek, "keyframe_times", lambda p: [])
+    monkeypatch.setattr(seek, "_video_size", lambda p: (64, 48))
+
+    used: dict = {}
+
+    def fake_iter(path, every_sec, start_s=0.0, end_s=None, hwaccel=True):
+        used["every_sec"] = every_sec
+        return iter(())
+
+    monkeypatch.setattr(seek, "iter_frames", fake_iter)
+    monkeypatch.setattr(seek, "iter_frames_keyframes",
+                        lambda *a, **k: pytest.fail("拿不到关键帧还去走快档那条路"))
+
+    stats: dict = {}
+    out = seek.sample_video("x.mp4", every_sec=1.0, stats_out=stats, keyframes_only=True)
+    assert out == []
+    assert stats["fell_back"] is True and used["every_sec"] == 1.0
