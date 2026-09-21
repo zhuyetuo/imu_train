@@ -203,13 +203,22 @@ DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
 # 差别都在几个点以内，说明瓶颈已经不在解码并行度上了——抠狗/向量/姿态那几步在
 # 服务里是**加锁串行**的（单卡并发只买到显存翻倍和碎片化），并发再高它们照样排队。
 #
-# 所以回到最简单的一格：**全走 NVDEC，配合并发 8**（web 机 VISION_INDEX_CONCURRENCY）。
-# 8 是在"两个引擎能喂饱"和"排队还不明显"之间取的，比 12 路全硬解那一格保守。
-# 想再试混合：DECODE_CPU_SHARE=0.5 + 并发 12，两个一起改，只改一个必然更差。
-DECODE_CPU_SHARE = float(_env("DECODE_CPU_SHARE", "0"))
+# 现在在试的一格：**6 路 NVDEC + 12 路软解**（share = 12/18 ≈ 0.667，
+# 配 web 机 VISION_INDEX_CONCURRENCY=18）。想法是硬解就那么多产能，
+# 把 CPU 那边开到管够，看总吞吐还能不能往上走。
+#
+# 我的预判（可打脸）：涨不了多少。因为抠狗/向量/姿态在服务里是**加锁串行**的，
+# 解码再快，这几步照样排队——6+6 相对 6 路纯硬解也只快了 6%。
+#
+# 退回已知可用的两格，两个数必须一起改：
+#   DECODE_CPU_SHARE=0    + 并发 8    全走 NVDEC（最简单）
+#   DECODE_CPU_SHARE=0.5  + 并发 12   一半一半（实测 11.9 s/路）
+DECODE_CPU_SHARE = float(_env("DECODE_CPU_SHARE", "0.667"))
 # 软解每路给几个线程。不限制的话 ffmpeg 默认按核数开，十几路一起就是几百个线程
-# 互相抢，比单路还慢
-DECODE_CPU_THREADS = int(_env("DECODE_CPU_THREADS", "4"))
+# 互相抢，比单路还慢。
+# 12 路软解 × 2 = 24 线程，14900K 有 32 个——剩下 8 个给裁图/帧差/JPEG 那些活，
+# 以及平台后端自己。开到 4 就是 48 个线程抢 32 个核，纯内耗
+DECODE_CPU_THREADS = int(_env("DECODE_CPU_THREADS", "2"))
 # 解码放后台线程，预读这么多帧。解码是 CPU、检测/姿态/分割/向量是 GPU，串在一个循环里
 # 两边轮流干等；预读之后 ffmpeg 一直在解。队列满了它自己停，不会把内存吃光
 # （720p 一帧 2.7MB，16 帧约 43MB，三路并建约 130MB）。设 0/1 = 关掉，退回原来的串行
