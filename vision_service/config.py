@@ -185,6 +185,18 @@ VLLM_CONTAINER  = _env("VLLM_CONTAINER", "imu_vllm")
 # 有 ffmpeg 就用它解码抽帧（多线程 + NVDEC），比 cv2 逐帧 grab 快好几倍；DECODE_FFMPEG=0 退回 cv2
 DECODE_FFMPEG   = _env("DECODE_FFMPEG", "1") not in ("0", "false", "False", "")
 DECODE_HWACCEL  = _env("DECODE_HWACCEL", "1") not in ("0", "false", "False", "")
+# 多大比例的路改走 CPU 软解（0 = 全走 NVDEC，0.5 = 一半一半）。
+#
+# 为什么值得混着用：解码占建索引六成，而**一路视频只能串行解**——NVDEC 再快也是
+# 一条流一条流地排。这台机器 CPU 有 32 线程闲着，让一部分路走软解，两种硬件同时
+# 出力，吞吐是相加的，不是抢。
+#
+# 默认 0（不变），因为哪个比例最快取决于这台机器的 NVDEC 引擎数和 CPU 核数，
+# **没量过就不该替人定**。先 0.5 跑五分钟，跟 0 比一下 N/224 的推进速度。
+DECODE_CPU_SHARE = float(_env("DECODE_CPU_SHARE", "0"))
+# 软解每路给几个线程。不限制的话 ffmpeg 默认按核数开，十几路一起就是几百个线程
+# 互相抢，比单路还慢
+DECODE_CPU_THREADS = int(_env("DECODE_CPU_THREADS", "4"))
 # 解码放后台线程，预读这么多帧。解码是 CPU、检测/姿态/分割/向量是 GPU，串在一个循环里
 # 两边轮流干等；预读之后 ffmpeg 一直在解。队列满了它自己停，不会把内存吃光
 # （720p 一帧 2.7MB，16 帧约 43MB，三路并建约 130MB）。设 0/1 = 关掉，退回原来的串行

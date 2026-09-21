@@ -19,6 +19,7 @@ dry_run=True 只做本地筛选、不调 API，先看会送多少段再决定。
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -124,6 +125,10 @@ def iter_frames_ffmpeg(path: str, every_sec: float, start_s: float = 0.0, end_s:
 
     def _cmd(gpu_filter: bool) -> list[str]:
         c = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        if not hwaccel and config.DECODE_CPU_THREADS > 0:
+            # 软解限线程：不限的话 ffmpeg 按核数开，十几路一起就是几百个线程互相抢，
+            # 比单路还慢。放在 -i 前面才对这一路输入生效
+            c += ["-threads", str(config.DECODE_CPU_THREADS)]
         if hwaccel:
             c += ["-hwaccel", "cuda"]
             if gpu_filter:
@@ -219,10 +224,39 @@ def iter_frames_cv2(path: str, every_sec: float, start_s: float = 0.0, end_s: fl
         cap.release()
 
 
-def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None):
-    """有 ffmpeg 走 ffmpeg（先试 NVDEC，不行退软解），没有走 cv2。"""
+_decode_turn = itertools.count()
+
+
+def pick_hwaccel() -> bool:
+    """这一路走 NVDEC 还是 CPU 软解。按 DECODE_CPU_SHARE 轮流分。
+
+    轮流而不是随机：随机会撞出"连着五路都走 CPU"的运气，而并发只有六路，
+    那一阵子 GPU 就空着了。轮流保证任意时刻两边的路数都贴着设定的比例。
+    """
+    if not config.DECODE_HWACCEL:
+        return False
+    share = max(0.0, min(1.0, config.DECODE_CPU_SHARE))
+    if share <= 0:
+        return True
+    if share >= 1:
+        return False
+    # 每 k 路里有一路走 CPU（share=0.5 → 每 2 路一路；0.34 → 每 3 路一路）
+    k = max(2, round(1 / share))
+    return next(_decode_turn) % k != 0
+
+
+def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None,
+                hwaccel: bool | None = None):
+    """有 ffmpeg 走 ffmpeg（先试 NVDEC，不行退软解），没有走 cv2。
+
+    hwaccel=None：按 DECODE_CPU_SHARE 轮流决定走 NVDEC 还是 CPU。
+    """
     if ffmpeg_available():
-        for hw in ((True, False) if config.DECODE_HWACCEL else (False,)):
+        first = pick_hwaccel() if hwaccel is None else hwaccel
+        # 第一种不行就换另一种：NVDEC 挑中了退软解；软解挑中了也别把 NVDEC 落下。
+        # 但 DECODE_HWACCEL=0 是"这台机器别碰 NVDEC"的意思，那就一种都不试
+        order = (True, False) if first else ((False, True) if config.DECODE_HWACCEL else (False,))
+        for hw in order:
             yielded = False
             try:
                 for item in iter_frames_ffmpeg(path, every_sec, start_s, end_s, hwaccel=hw):

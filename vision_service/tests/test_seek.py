@@ -799,3 +799,57 @@ def test_显存里抽帧_只把留下的那一帧下行到内存(monkeypatch, fa
     monkeypatch.setattr(seek.config, "DECODE_GPU_FILTER", False)
     list(seek.iter_frames("x.mp4", every_sec=1.0))
     assert "-hwaccel_output_format" not in calls[0] and calls[0][calls[0].index("-vf") + 1] == "fps=1/1.0"
+
+
+def test_两种解码器轮流分_把闲着的那一半硬件也用上(monkeypatch):
+    """解码占建索引六成，而一路视频只能串行解——NVDEC 再快也是一条流一条流地排。
+    CPU 有几十个线程闲着，分一部分路给软解，两种硬件同时出力，吞吐是相加的。
+
+    轮流而不是随机：随机会撞出"连着五路都走 CPU"的运气，而并发只有六路，
+    那一阵子 GPU 就空着了。
+    """
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+    monkeypatch.setattr(seek, "_decode_turn", __import__("itertools").count())
+
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.0)
+    assert [seek.pick_hwaccel() for _ in range(4)] == [True] * 4        # 默认全走 NVDEC
+
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.5)
+    got = [seek.pick_hwaccel() for _ in range(6)]
+    assert got.count(False) == 3 and got.count(True) == 3               # 一半一半
+    assert got == [False, True, False, True, False, True]               # 而且是交替的
+
+    monkeypatch.setattr(seek, "_decode_turn", __import__("itertools").count())
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.34)
+    assert [seek.pick_hwaccel() for _ in range(6)].count(False) == 2    # 三路里一路走 CPU
+
+    # 「这台机器别碰 NVDEC」压过比例设置
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", False)
+    assert seek.pick_hwaccel() is False
+
+
+def test_软解限线程_不然十几路一起几百个线程互相抢(monkeypatch, fake_video):
+    import subprocess
+
+    w, h = 64, 32
+    calls = []
+
+    class P:
+        def __init__(self):
+            self.stdout = __import__("io").BytesIO(bytes(w * h * 3))
+            self.stderr = __import__("io").BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: (calls.append(cmd), P())[1])
+    monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
+    monkeypatch.setattr(seek, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(seek.config, "DECODE_HWACCEL", True)
+    monkeypatch.setattr(seek.config, "DECODE_CPU_THREADS", 4)
+
+    list(seek.iter_frames("x.mp4", every_sec=1.0, hwaccel=False))
+    cmd = calls[0]
+    assert "-hwaccel" not in cmd
+    # -threads 要在 -i 前面才对这一路输入生效
+    assert cmd.index("-threads") < cmd.index("-i") and cmd[cmd.index("-threads") + 1] == "4"
