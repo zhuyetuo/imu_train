@@ -311,9 +311,13 @@ def pick_hwaccel() -> bool:
         return True
     if share >= 1:
         return False
-    # 每 k 路里有一路走 CPU（share=0.5 → 每 2 路一路；0.34 → 每 3 路一路）
-    k = max(2, round(1 / share))
-    return next(_decode_turn) % k != 0
+    # 按比例发牌：第 n 路走不走 CPU，看 n→n+1 这一步有没有跨过一个 CPU 名额。
+    #
+    # 原来写的是 k = round(1/share)、每 k 路给一路 CPU——**只能表达 1/2、1/3 这种**。
+    # 0.667（6 NVDEC + 12 软解）会被 round 成 k=2，变回一半一半，而且不报错、
+    # 看不出来。这种"设了个值但它悄悄变成别的"的实现最坑人。
+    n = next(_decode_turn)
+    return int((n + 1) * share) - int(n * share) == 0
 
 
 def iter_frames(path: str, every_sec: float, start_s: float = 0.0, end_s: float | None = None,

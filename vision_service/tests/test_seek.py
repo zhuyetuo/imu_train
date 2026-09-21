@@ -819,7 +819,14 @@ def test_两种解码器轮流分_把闲着的那一半硬件也用上(monkeypat
     monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.5)
     got = [seek.pick_hwaccel() for _ in range(6)]
     assert got.count(False) == 3 and got.count(True) == 3               # 一半一半
-    assert got == [False, True, False, True, False, True]               # 而且是交替的
+    assert got == [True, False, True, False, True, False]               # 而且是交替的
+
+    # **任意比例都要准**，不能只支持 1/2、1/3。原来按 round(1/share) 算，
+    # 0.667 会被悄悄变成 0.5——设了个值它却是别的，这种最坑人
+    monkeypatch.setattr(seek, "_decode_turn", __import__("itertools").count())
+    monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 2 / 3)
+    got = [seek.pick_hwaccel() for _ in range(9)]
+    assert got.count(False) == 6 and got.count(True) == 3               # 6 硬 + 12 软 那一格
 
     monkeypatch.setattr(seek, "_decode_turn", __import__("itertools").count())
     monkeypatch.setattr(seek.config, "DECODE_CPU_SHARE", 0.34)
@@ -857,17 +864,14 @@ def test_软解限线程_不然十几路一起几百个线程互相抢(monkeypat
     assert cmd.index("-threads") < cmd.index("-i") and cmd[cmd.index("-threads") + 1] == "4"
 
 
-def test_默认全走NVDEC_配合并发8():
-    """2026-09-21 把三种配置都量了一遍（每路耗时）：
+def test_默认是6硬解加12软解_配合并发18():
+    """**这个数跟平台的 VISION_INDEX_CONCURRENCY 是配套的，只改一个必然更差。**
 
-        6 路全 NVDEC 12.6s ／ 12 路全 NVDEC 14.8s ／ 12 路 6+6 混合 11.9s
-
-    差别都在几个点内——瓶颈已经不在解码并行度上了（抠狗/向量/姿态在服务里是加锁
-    串行的，并发再高照样排队）。所以回到最简单那一格：全走 NVDEC + 并发 8。
-    **这个数跟平台的 VISION_INDEX_CONCURRENCY 是配套的，只改一个必然更差。**
+    share = 12/18 ≈ 0.667；软解每路 2 线程（12×2=24，14900K 有 32 个，
+    剩下 8 个给裁图/帧差和平台后端）。
     """
     from vision_service import config
     import importlib
 
     importlib.reload(config)
-    assert config.DECODE_CPU_SHARE == 0.0 and config.DECODE_CPU_THREADS == 4
+    assert round(config.DECODE_CPU_SHARE, 3) == 0.667 and config.DECODE_CPU_THREADS == 2
