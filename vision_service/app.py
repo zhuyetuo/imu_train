@@ -18,7 +18,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, dog, embed, llm as llmmod, models, sam, seek
+from . import config, gpumem, dog, embed, llm as llmmod, models, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -402,6 +402,22 @@ def embed_search(body: EmbedSearchIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"搜索失败: {type(e).__name__}: {e}") from e
+
+
+@app.get("/api/v1/gpu")
+def gpu_report():
+    """显存被谁占了：逐个模型 + torch 缓存 + 非 torch 那部分。
+
+    nvitop 只看得到「这个进程 27 GiB」，拆不开是检测、分割、向量还是姿态，
+    在容器里更看不出来。这一个接口把它拆开。
+    """
+    return gpumem.report()
+
+
+@app.post("/api/v1/gpu/release")
+def gpu_release():
+    """把 torch 缓存着、已经不用的显存还给系统。不动任何模型。"""
+    return gpumem.release()
 
 
 @app.get("/api/v1/models")

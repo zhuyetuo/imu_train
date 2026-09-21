@@ -28,7 +28,7 @@ import os
 import threading
 import time
 
-from . import config, dog, pose, posepart, seek, segmask
+from . import config, dog, gpumem, pose, posepart, seek, segmask
 
 _logger = logging.getLogger("vision_service.embed")
 
@@ -126,7 +126,8 @@ def _do_load() -> None:
             raise RuntimeError("；".join(errors))
         want = config.EMBED_DEVICE
         _device = "cuda" if (want == "cuda" and torch.cuda.is_available()) else "cpu"
-        _model = m.to(_device).eval()
+        with gpumem.track(f"画面向量 {config.EMBED_MODEL.split('/')[-1]}", _device):
+            _model = m.to(_device).eval()
         _load_error = None
     except Exception as e:  # noqa: BLE001 权重下不动/版本不对，都要报出来
         _load_error = (f"加载 {config.EMBED_MODEL} 失败：{_cause(e)}"

@@ -21,7 +21,7 @@ import logging
 import os
 import threading
 
-from . import config
+from . import config, gpumem
 
 _logger = logging.getLogger("vision_service.pose")
 
@@ -79,6 +79,10 @@ def _load():
             globals()["_device_used"] = dev
             if want and dev == "cpu":
                 _logger.warning("姿态模型想用 cuda，但 onnxruntime 没有 CUDA provider，退回 CPU（装 onnxruntime-gpu）")
+            # onnxruntime 的显存不归 torch 管，量不到——但明细里要有这一条，
+            # 不然人看着各项加起来对不上整卡用量，只会以为统计错了
+            gpumem.external("姿态 rtmpose（onnxruntime）", dev,
+                            "走 onnxruntime，torch 量不到，算在 non_torch 里")
             _logger.info("姿态模型已加载：%s（%s）", p, dev)
         except Exception as e:  # noqa: BLE001
             _error = f"姿态模型加载失败：{type(e).__name__}: {e}"
