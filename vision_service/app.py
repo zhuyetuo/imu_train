@@ -404,6 +404,41 @@ def embed_search(body: EmbedSearchIn):
         raise HTTPException(500, f"搜索失败: {type(e).__name__}: {e}") from e
 
 
+@app.get("/api/v1/decode")
+def decode_settings():
+    """解码这几个旋钮**实际生效的值**，外加 .env 找没找到。
+
+    「我改了 .env 为什么没变」是这类配置最常见的坑：文件路径不对、服务没重启、
+    环境里已经有同名变量压过了。猜是猜不出来的——把生效值直接打出来，
+    跟 ps 里看到的 ffmpeg 命令一对就知道。
+    """
+    import os
+
+    from . import seek
+
+    n = 6
+    picks = [seek.pick_hwaccel() for _ in range(n)]
+    return {
+        "env_file": config.ENV_FILE,
+        "env_file_exists": os.path.isfile(config.ENV_FILE),
+        "decode_ffmpeg": config.DECODE_FFMPEG,
+        "decode_hwaccel": config.DECODE_HWACCEL,
+        "decode_gpu_filter": config.DECODE_GPU_FILTER,
+        "decode_cpu_share": config.DECODE_CPU_SHARE,
+        "decode_cpu_threads": config.DECODE_CPU_THREADS,
+        # 接下来 6 路会怎么分（True=NVDEC）。这一行最直接：
+        # 全是 True 就说明 cpu_share 没生效，别再猜了
+        "next_6_streams_nvdec": picks,
+        "detect_imgsz": config.DETECT_IMGSZ,
+        "detect_batch": config.DETECT_BATCH,
+        "embed_batch": config.EMBED_BATCH,
+        "pose_on": bool(config.POSE_ONNX and os.path.isfile(config.POSE_ONNX)),
+        "note": ("cpu_share=0 = 全走 NVDEC。5090 只有 2 个 NVDEC 引擎，"
+                 "并发开到十几路全走它只会排队，不会更快——要么把并发压回 6，"
+                 "要么让一部分路走 CPU 软解（DECODE_CPU_SHARE=0.5）。"),
+    }
+
+
 @app.get("/api/v1/embed/spent")
 def embed_spent(n: int = 30):
     """最近 n 份索引各步各花了多少秒。建索引慢的时候先看这个，别凭感觉调旋钮。"""
