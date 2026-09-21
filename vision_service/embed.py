@@ -777,19 +777,25 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             missing.append(rp)
             continue
         loaded.append((rp, d))
-    # 一句话搜：只认有「原图向量」那一列的索引；没有的这次跳过并如实上报。
-    # 两个空间的分数不可比，混着排出来的名次是假的——宁可少搜几路，也别给一个假名次
+    # 一句话搜优先用「原图向量」那一列；老索引没有这一列的，**退回抠图那一列照搜**，
+    # 并如实报有几路是退回来的。
+    #
+    # 原来是整路跳过，理由是"两个空间的分数不可比"。但 2026-09-21 那三轮实验已经
+    # 量过：换成 emb_raw 之后分数还是 0.2 上下，跟 emb 没有可分辨的差别（见 README
+    # 的「一句话搜：实测在这批素材上不好使」）。**两列打出来的分本来就一样**，
+    # 所谓不可比是当时的猜测，不是量出来的。为一个量不到的好处扔掉 17 路素材，
+    # 这笔账是亏的——人看到的是"搜不到"，而素材就在那儿。
     old_index: list[str] = []
     col = "emb"
+    col_of: dict[str, str] = {}
     if is_text:
         col = "emb_raw"
-        keep = []
         for rp, d in loaded:
             if d.get(col) is not None and len(d[col]) == len(d["t"]):
-                keep.append((rp, d))
+                col_of[rp] = col
             else:
+                col_of[rp] = "emb"          # 老索引：用抠图那一列
                 old_index.append(rp)
-        loaded = keep
     searched = len(loaded)
     mode = "video" if center is True else "none" if center is False else str(center or "none")
     # 每一路自己的均值 + 全局均值。索引存的是 float16，求和前转 float32，
@@ -799,7 +805,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     if mode in ("video", "global"):
         tot = sum(len(d["t"]) for _rp, d in loaded)
         if tot >= 20:
-            sums = [(rp, len(d["t"]), d[col].astype("float32").sum(axis=0))
+            sums = [(rp, len(d["t"]), d[col_of.get(rp, col)].astype("float32").sum(axis=0))
                     for rp, d in loaded if len(d["t"])]
             mu = sum(s_ for _rp, _n, s_ in sums) / tot
             if mode == "video":
@@ -828,7 +834,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     for rp, d in loaded:
         if not len(d["t"]):
             continue
-        emb = d[col].astype("float32")
+        emb = d[col_of.get(rp, col)].astype("float32")
         sub = mus.get(rp, mu) if mode == "video" else mu
         if sub is not None:
             emb = emb - sub
@@ -867,7 +873,8 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
     return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
-            # 一句话搜用的是哪一列、有几路因为索引是旧版被跳过
+            # 一句话搜用的是哪一列、有几路因为索引是旧版退回了抠图那一列
+            # （不是跳过：实测两列分数没有可分辨的差别，跳过等于白扔素材）
             "text_space": ("原图" if col == "emb_raw" else "抠图") if is_text else None,
             "old_index": len(old_index),
             # 搜过的里面有几路是快档（只解关键帧，约 12 秒一帧）。

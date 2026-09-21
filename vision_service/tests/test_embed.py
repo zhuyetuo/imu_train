@@ -523,13 +523,16 @@ def test_建索引记下每一步花了多少秒(monkeypatch, tmp_path):
     assert embed.load("a/b.mp4")["meta"]["spent"]["pose"] >= 0
 
 
-def test_一句话搜用没抠背景那一列_老索引跳过并如实说(index_dir):
-    """SigLIP 的文本塔是拿自然照片训的，而索引默认存的是"狗抠出来、背景涂灰"的图——
-    那种图不在它见过的分布里，文字跟它对不上，一句话搜的分永远在 0.2 上下。
-    以图搜图两边都是抠图、同分布，所以那条路 0.8 都有。所以文字走 emb_raw。
+def test_一句话搜优先用没抠背景那一列_老索引退回抠图列照搜(index_dir):
+    """SigLIP 的文本塔是拿自然照片训的，索引默认存的是"狗抠出来、背景涂灰"的图，
+    所以文字优先走 emb_raw。
 
-    没有那一列的老索引**这次不搜它**：两个空间的分数不可比，混着排出来的名次是假的。
-    宁可少搜几路、并且明说，也别给一个看着正常的假名次。
+    但**没有那一列的老索引要退回 emb 照搜，不能跳过**。原来是跳过的，理由是
+    "两个空间的分数不可比"——那是猜的。2026-09-21 三轮实验量过：换成 emb_raw
+    之后分数还是 0.2 上下，跟 emb 没有可分辨的差别。为一个量不到的好处把十几路
+    素材扔在外面，人看到的是"搜不到"，而素材就在那儿。
+
+    退回了要如实报（old_index），不然人不知道这几路比出来的是另一列。
     """
     a = np.array([1, 0, 0, 0], dtype="float32")
     b = np.array([0, 1, 0, 0], dtype="float32")
@@ -537,8 +540,9 @@ def test_一句话搜用没抠背景那一列_老索引跳过并如实说(index_
     _save("old.mp4", [1.0], [a], raw=False)              # 老索引：只有抠图那一列
 
     r = embed.search(a, ["new.mp4", "old.mp4"], center=False, is_text=True)
-    assert r["searched"] == 1 and r["old_index"] == 1 and r["text_space"] == "原图"
-    assert [h["path"] for h in r["hits"]] == ["new.mp4", "new.mp4"]
+    assert r["searched"] == 2 and r["old_index"] == 1 and r["text_space"] == "原图"
+    # 老索引那一路也要在命中里——它就是这次要用上的那几路
+    assert "old.mp4" in {h["path"] for h in r["hits"]}
 
     # 以图搜图照旧用抠图那一列，老索引一起搜（那条路本来就不挑）
     r2 = embed.search(a, ["new.mp4", "old.mp4"], center=False)
