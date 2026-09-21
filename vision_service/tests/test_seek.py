@@ -864,14 +864,16 @@ def test_软解限线程_不然十几路一起几百个线程互相抢(monkeypat
     assert cmd.index("-threads") < cmd.index("-i") and cmd[cmd.index("-threads") + 1] == "4"
 
 
-def test_默认是6硬解加12软解_配合并发18():
-    """**这个数跟平台的 VISION_INDEX_CONCURRENCY 是配套的，只改一个必然更差。**
+def test_默认是6硬解加6软解_配合并发12():
+    """量过的三组里唯一最好的那个（每路耗时）：
 
-    share = 12/18 ≈ 0.667；软解每路 2 线程（12×2=24，14900K 有 32 个，
-    剩下 8 个给裁图/帧差和平台后端）。
+        6 路全 NVDEC 12.6s ／ 12 路全 NVDEC 14.8s ／ **12 路 6+6 混合 11.9s**
+
+    **这个数跟平台的 VISION_INDEX_CONCURRENCY=12 是配套的，只改一个必然更差。**
+    线程 4 也是那次量到 11.9 时的值——改了就不是同一个配置了。
     """
     from vision_service import config
     import importlib
 
     importlib.reload(config)
-    assert round(config.DECODE_CPU_SHARE, 3) == 0.667 and config.DECODE_CPU_THREADS == 2
+    assert config.DECODE_CPU_SHARE == 0.5 and config.DECODE_CPU_THREADS == 4
