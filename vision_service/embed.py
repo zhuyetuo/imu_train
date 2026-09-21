@@ -316,6 +316,8 @@ def load(rel_path: str) -> dict | None:
              "meta": json.loads(str(z["meta"]))}
         # 姿态向量是后加的：老索引没有这一列，搜索时只用画面
         d["pose"] = z["pose"].astype("float32") if "pose" in z.files else None
+        # 没抠背景那一列（一句话搜用）：也是后加的，老索引没有
+        d["emb_raw"] = z["emb_raw"].astype("float32") if "emb_raw" in z.files else None
     _cache[rel_path] = (mtime, d)
     return d
 
@@ -359,14 +361,18 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     use_mask = config.EMBED_MASK_BG and segmask.available()
     if not force:
         old = load(rel_path)
+        want_raw = bool(use_mask and config.EMBED_RAW_TOO)
         if old is not None and old["meta"].get("model") == config.EMBED_MODEL \
-                and bool(old["meta"].get("masked", False)) == bool(use_mask):
+                and bool(old["meta"].get("masked", False)) == bool(use_mask) \
+                and bool(old["meta"].get("raw_wanted", False)) == want_raw:
             return {"n": int(len(old["t"])), "cached": True, "seconds": 0.0, "model": config.EMBED_MODEL,
-                    "masked": bool(use_mask)}
+                    "masked": bool(use_mask), "raw": want_raw}
     # 姿态可用就顺路算：每个有狗的帧一条姿态向量（整帧只在采样那一刻拿得到）
     use_pose = pose.available()
 
-    last = {"pose": None, "jpeg": None}     # 上一个真算过的帧：静止的帧直接沿用它的姿态 / 抠图
+    # jpeg_raw：抠背景**之前**那张（按框裁的原图）。一句话搜要拿它算向量——
+    # 文本塔是拿自然照片训的，跟涂灰背景的抠图对不上
+    last = {"pose": None, "jpeg": None, "jpeg_raw": None}   # 上一个真算过的帧：静止的帧沿用它的姿态 / 抠图
     # 各步各花了多少秒。慢的时候不用猜是解码还是哪个模型：日志和索引 meta 里都记着
     spent = {"pose": 0.0, "seg": 0.0, "embed": 0.0}
 
@@ -399,6 +405,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
             if todo else []
         done = {}
         for (rec, _frame), img in zip(todo, imgs):
+            rec["jpeg_raw"] = rec["jpeg"]           # 抠之前先留一份原图裁剪
             if img is not None:
                 ok_, buf_ = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ok_:
@@ -408,8 +415,10 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         for rec, _frame in items:
             if id(rec) in done:
                 last["jpeg"] = rec["jpeg"]
+                last["jpeg_raw"] = rec.get("jpeg_raw")
             elif last["jpeg"] is not None:
                 rec["jpeg"] = last["jpeg"]
+                rec["jpeg_raw"] = last["jpeg_raw"]
                 n_static += 1
         spent["seg"] += time.monotonic() - t_seg
 
@@ -432,8 +441,25 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
         emb_u = enc.encode_images(order)
         spent["embed"] = round(time.monotonic() - t_, 1)
         emb = emb_u[[uniq[s_["jpeg"]] for s_ in with_dog]]
+        # 一句话搜专用的那一条：**没抠背景**的裁剪。没开抠图时两条一样，就不重复存
+        if use_mask and config.EMBED_RAW_TOO and all(s_.get("jpeg_raw") for s_ in with_dog):
+            uniq_r: dict[bytes, int] = {}
+            order_r = []
+            for s_ in with_dog:
+                if s_["jpeg_raw"] not in uniq_r:
+                    uniq_r[s_["jpeg_raw"]] = len(order_r)
+                    order_r.append(s_["jpeg_raw"])
+            t_ = time.monotonic()
+            emb_raw = enc.encode_images(order_r)[[uniq_r[s_["jpeg_raw"]] for s_ in with_dog]]
+            spent["embed"] = round(spent["embed"] + time.monotonic() - t_, 1)
+        else:
+            emb_raw = None
     else:
         emb = np.zeros((0, 1), dtype="float32")
+        emb_raw = None
+    if use_mask and config.EMBED_RAW_TOO and with_dog and emb_raw is None:
+        # 想要却没算出来：一句话搜会跳过这一路。不吭声的话，人只会看到"搜到的少"
+        _logger.warning("%s：想存原图向量但没拿到（抠图那一步没跑？），一句话搜会跳过这一路", rel_path)
     t = np.array([s["t"] for s in with_dog], dtype="float32")
     box = np.array([norm_box(s["boxes"]) for s in with_dog], dtype="float32") \
         if with_dog else np.zeros((0, 4), dtype="float32")
@@ -445,18 +471,25 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
             "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked,
             "static_reused": n_static,
+            # raw = 真存了那一列；raw_wanted = 这次想不想要。缓存按"想不想要"比：
+            # 按"有没有"比的话，一旦哪一路没算出来（比如没抠成），每次建都会重建一遍
+            "raw": emb_raw is not None, "raw_wanted": bool(use_mask and config.EMBED_RAW_TOO),
             "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
             "spent": {k: round(v, 1) for k, v in spent.items()}}
     os.makedirs(config.EMBED_INDEX_DIR, exist_ok=True)
     p = index_path(rel_path)
     tmp = p + ".tmp.npz"
-    np.savez(tmp, t=t, emb=emb.astype("float16"), box=box, pose=pose_rows.astype("float16"),
-             meta=np.array(json.dumps(meta, ensure_ascii=False)))
+    cols = {"t": t, "emb": emb.astype("float16"), "box": box, "pose": pose_rows.astype("float16"),
+            "meta": np.array(json.dumps(meta, ensure_ascii=False))}
+    if emb_raw is not None:
+        cols["emb_raw"] = emb_raw.astype("float16")
+    np.savez(tmp, **cols)
     os.replace(tmp, p)
     _cache.pop(rel_path, None)
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
             "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
             "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static,
+            "raw": emb_raw is not None,
             "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
             "spent": {k: round(v, 1) for k, v in spent.items()}}
 
@@ -615,7 +648,7 @@ def text_query(text: str, encoder: Encoder | None = None):
 def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, gap_s: float = 3.0,
            exclude: tuple[str, float, float] | None = None, center: bool = True,
            pose_vec=None, pose_w: float | None = None, part: str | None = None,
-           part_near_max: float | None = None) -> dict:
+           part_near_max: float | None = None, is_text: bool = False) -> dict:
     """在这些视频的索引里找最像的，按视频把相邻命中合成段。
 
     返回 {hits:[{path,t,score,vis_score,pose_score?}], segments:[{path,start_s,end_s,score,n}], searched, missing}。
@@ -640,6 +673,12 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     per-video 是更彻底的做法，不需要改调用方）。
 
     文本查询没有"自己那一路"可减，这时退回全局均值——文本向量本来就不带狗的身份。
+
+    is_text：这是一句话搜。**改用没抠背景的那一列（emb_raw）比**——SigLIP 的文本塔
+    是拿自然照片训的，而默认存的是"狗抠出来、背景涂灰"的图，不在它见过的分布里，
+    文字跟它对不上，分永远在 0.2 上下。以图搜图两边都是抠图、同分布，所以那条路
+    0.8 都有。没有那一列的老索引**这次不搜它**（scores 在两个空间里不可比，
+    混着排出来的名次是假的），在 old_index 里如实报有几路被跳过。
     """
     import numpy as np
 
@@ -654,6 +693,19 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             missing.append(rp)
             continue
         loaded.append((rp, d))
+    # 一句话搜：只认有「原图向量」那一列的索引；没有的这次跳过并如实上报。
+    # 两个空间的分数不可比，混着排出来的名次是假的——宁可少搜几路，也别给一个假名次
+    old_index: list[str] = []
+    col = "emb"
+    if is_text:
+        col = "emb_raw"
+        keep = []
+        for rp, d in loaded:
+            if d.get(col) is not None and len(d[col]) == len(d["t"]):
+                keep.append((rp, d))
+            else:
+                old_index.append(rp)
+        loaded = keep
     searched = len(loaded)
     mode = "video" if center is True else "none" if center is False else str(center or "none")
     # 每一路自己的均值 + 全局均值。索引存的是 float16，求和前转 float32，
@@ -663,7 +715,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     if mode in ("video", "global"):
         tot = sum(len(d["t"]) for _rp, d in loaded)
         if tot >= 20:
-            sums = [(rp, len(d["t"]), d["emb"].astype("float32").sum(axis=0))
+            sums = [(rp, len(d["t"]), d[col].astype("float32").sum(axis=0))
                     for rp, d in loaded if len(d["t"])]
             mu = sum(s_ for _rp, _n, s_ in sums) / tot
             if mode == "video":
@@ -692,7 +744,7 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     for rp, d in loaded:
         if not len(d["t"]):
             continue
-        emb = d["emb"].astype("float32")
+        emb = d[col].astype("float32")
         sub = mus.get(rp, mu) if mode == "video" else mu
         if sub is not None:
             emb = emb - sub
@@ -729,6 +781,9 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
     return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
+            # 一句话搜用的是哪一列、有几路因为索引是旧版被跳过
+            "text_space": ("原图" if col == "emb_raw" else "抠图") if is_text else None,
+            "old_index": len(old_index),
             "centered": mu is not None, "center": mode if mu is not None else "none",
             "pose_used": used_pose, "pose_w": pw if used_pose else 0.0,
             # part_used=None 且 part 有值 = 这个部位判不了（腰、腹股沟……），**没筛**。

@@ -135,14 +135,20 @@ def test_整段没狗_索引是空的_不炸(index_dir, fake_video, monkeypatch)
 
 # ── 搜索 ──────────────────────────────────────────────────────────────
 
-def _save(rel, t, emb):
+def _save(rel, t, emb, raw=True):
+    """raw=False 造一份**老索引**（没有原图向量那一列）：一句话搜该跳过它。"""
     import json
     import os
 
     os.makedirs(embed.config.EMBED_INDEX_DIR, exist_ok=True)
-    np.savez(embed.index_path(rel), t=np.array(t, dtype="float32"), emb=np.array(emb, dtype="float16"),
-             box=np.zeros((len(t), 4), dtype="float32"),
-             meta=np.array(json.dumps({"model": "fake/siglip", "path": rel})))
+    cols = {"t": np.array(t, dtype="float32"), "emb": np.array(emb, dtype="float16"),
+            "box": np.zeros((len(t), 4), dtype="float32"),
+            "meta": np.array(json.dumps({"model": "fake/siglip", "path": rel}))}
+    if raw:
+        # 真实索引里这一列是"没抠背景"的那张算出来的，值跟 emb 不一样；
+        # 测试里只要求"有这一列、行数对得上"，所以直接复用 emb
+        cols["emb_raw"] = np.array(emb, dtype="float16")
+    np.savez(embed.index_path(rel), **cols)
 
 
 def test_搜索_最像的在前_排掉自己_合段_缺索引报出来(index_dir):
@@ -515,3 +521,26 @@ def test_建索引记下每一步花了多少秒(monkeypatch, tmp_path):
     assert r["detected"] == 3 and r["skipped"] == 1
     # 存进索引 meta，事后翻旧索引也能看
     assert embed.load("a/b.mp4")["meta"]["spent"]["pose"] >= 0
+
+
+def test_一句话搜用没抠背景那一列_老索引跳过并如实说(index_dir):
+    """SigLIP 的文本塔是拿自然照片训的，而索引默认存的是"狗抠出来、背景涂灰"的图——
+    那种图不在它见过的分布里，文字跟它对不上，一句话搜的分永远在 0.2 上下。
+    以图搜图两边都是抠图、同分布，所以那条路 0.8 都有。所以文字走 emb_raw。
+
+    没有那一列的老索引**这次不搜它**：两个空间的分数不可比，混着排出来的名次是假的。
+    宁可少搜几路、并且明说，也别给一个看着正常的假名次。
+    """
+    a = np.array([1, 0, 0, 0], dtype="float32")
+    b = np.array([0, 1, 0, 0], dtype="float32")
+    _save("new.mp4", [1.0, 2.0], [a, b])                 # 新索引：两列都有
+    _save("old.mp4", [1.0], [a], raw=False)              # 老索引：只有抠图那一列
+
+    r = embed.search(a, ["new.mp4", "old.mp4"], center=False, is_text=True)
+    assert r["searched"] == 1 and r["old_index"] == 1 and r["text_space"] == "原图"
+    assert [h["path"] for h in r["hits"]] == ["new.mp4", "new.mp4"]
+
+    # 以图搜图照旧用抠图那一列，老索引一起搜（那条路本来就不挑）
+    r2 = embed.search(a, ["new.mp4", "old.mp4"], center=False)
+    assert r2["searched"] == 2 and r2["old_index"] == 0 and r2["text_space"] is None
+    assert {h["path"] for h in r2["hits"]} == {"new.mp4", "old.mp4"}

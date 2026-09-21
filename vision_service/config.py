@@ -147,6 +147,12 @@ EMBED_INDEX_DIR = _env("EMBED_INDEX_DIR", os.path.join(HERE, "index"))
 # 算向量前先把狗抠出来、背景涂灰（实例分割）：花砖地 / 门框不再进向量，分数只看狗。
 # 用 YOLO 分割版权重（跟检测同一家）；没权重 / 加载失败自动退回不抠。
 # 改这个开关后老索引会自动重建（索引 meta 里记着有没有抠）
+# 抠图那张之外，再存一条**没抠背景**的向量，专给「一句话搜」用。
+# 为什么要两条：SigLIP 的文本塔是拿自然照片训的，而索引里存的是"狗抠出来、背景涂灰"
+# 的图——那种图不在它见过的分布里，文字跟它对不上，一句话搜的分永远在 0.2 上下。
+# 以图搜图两边都是抠图，同分布，所以那条路 0.8 都有。多存这一条只多一次向量计算，
+# 索引大小 +一倍（float16，一小时视频约 5 MB → 10 MB）
+EMBED_RAW_TOO   = _env("EMBED_RAW_TOO", "1").lower() not in ("0", "false", "no", "")
 EMBED_MASK_BG   = _env("EMBED_MASK_BG", "1").lower() not in ("0", "false", "no", "")
 # m 档就够：分割是在裁出来的块上跑的，狗占大半，不像整帧检测那样要 x 才找得到小狗；比 x 快两三倍
 SEG_WEIGHTS     = _env("SEG_WEIGHTS", os.path.join(HERE, "..", "models", "vision", "yolo", "yolo26m-seg.pt"))

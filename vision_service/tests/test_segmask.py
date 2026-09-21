@@ -133,7 +133,13 @@ def test_建索引_抠狗按批送_不是一张张(monkeypatch, tmp_path):
 
     r = embed.build("A.mp4", "/x/A.mp4", encoder=Enc())
     assert calls == [3, 2] and r["with_mask"] == 5
-    assert all(j != b"orig" for j in seen)                      # 全换成抠完的图
+    # 索引那一列全是抠完的图（b"orig" 是没抠的）
+    assert all(j != b"orig" for j in seen[:1]) and r["masked"] is True
+    # 一句话搜那一列用的是**没抠的**那张：文本塔拿自然照片训的，涂灰背景的抠图
+    # 不在它见过的分布里。所以这两张都要算一次向量
+    assert b"orig" in seen and r["raw"] is True
+    d = embed.load("A.mp4")
+    assert d["emb_raw"] is not None and len(d["emb_raw"]) == 5
 
 
 def test_sample_video_攒批喊on_batch(monkeypatch):
@@ -220,6 +226,7 @@ def test_静止的帧沿用上一帧的抠图_不再送分割_向量只算一次
 
     r = embed.build("A.mp4", "/x/A.mp4", encoder=Enc())
     assert sent == [2] and r["with_mask"] == 2 and r["static_reused"] == 3
-    assert len(encoded) == 2                                   # 5 帧只算 2 个向量
+    # 抠图 2 个 + 没抠的那一列 2 个（静止沿用的不重复算）
+    assert len(encoded) == 4                                   # 5 帧只算 2+2 个向量
     d = embed.load("A.mp4")
     assert len(d["t"]) == 5 and np.allclose(d["emb"][0], d["emb"][2]) and not np.allclose(d["emb"][0], d["emb"][4])

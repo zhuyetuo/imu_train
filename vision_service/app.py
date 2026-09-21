@@ -395,7 +395,7 @@ def embed_search(body: EmbedSearchIn):
         else:
             r = embed.search(embed.text_query(body.text), body.paths, top_k=body.top_k,
                              min_score=body.min_score, gap_s=body.gap_s, center=body.center,
-                             part=body.part, part_near_max=body.part_near_max)
+                             part=body.part, part_near_max=body.part_near_max, is_text=True)
             r["query"] = {"kind": "text", "text": body.text}
         return r
     except ValueError as e:
