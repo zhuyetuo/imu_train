@@ -571,3 +571,76 @@ def test_分步耗时汇总_说清慢在哪一步(index_dir, tmp_path, monkeypat
     assert r["n"] == 2 and r["total_sec"] == 50.0 and r["per_video_sec"] == 25.0
     assert r["steps"][0]["step"] == "姿态" and r["steps"][0]["pct"] == 60.0
     assert "最重的是「姿态」" in r["note"]
+
+
+def test_快档只解关键帧_时间用真实PTS_不是第n帧乘每秒(monkeypatch, tmp_path):
+    """关键帧的间隔是编码器定的、不均匀（实测 0 / 13.8 / 25.7 / 36.8 / 50.1），
+    所以 t 不能沿用「第 n 帧 × every_sec」——那会把 13.8 秒那一帧记成 1 秒，
+    跳转过去是完全不同的画面，而且错得无声无息。
+    """
+    import subprocess
+
+    from vision_service import seek
+
+    w, h = 8, 4
+    frames = b"".join(bytes([i]) * (w * h * 3) for i in range(3))
+
+    class P:
+        def __init__(self):
+            self.stdout = __import__("io").BytesIO(frames)
+            self.stderr = __import__("io").BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    cmds = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: (cmds.append(cmd), P())[1])
+    monkeypatch.setattr(seek, "_video_size", lambda p: (w, h))
+    monkeypatch.setattr(seek, "keyframe_times", lambda p: [0.0, 13.8, 25.72, 36.76])
+
+    got = list(seek.iter_frames_keyframes("x.mp4", hwaccel=True))
+    assert [t for t, _ in got] == [0.0, 13.8, 25.72]          # 按真实 PTS 配对
+    cmd = cmds[0]
+    # -discard nokey 要在 -i 前面：在**拆包**那一步就扔掉非关键帧，解码器根本看不到它们
+    assert cmd.index("-discard") < cmd.index("-i") and cmd[cmd.index("-discard") + 1] == "nokey"
+    # -vsync 0：既不补帧也不丢帧，不然解出来的帧数跟 ffprobe 数的对不上，配对就错位了
+    assert cmd[cmd.index("-vsync") + 1] == "0"
+
+    # 拿不到时间戳就报错，不拿「第 n 帧」凑一个假的出来
+    monkeypatch.setattr(seek, "keyframe_times", lambda p: [])
+    with pytest.raises(RuntimeError, match="关键帧时间戳"):
+        list(seek.iter_frames_keyframes("x.mp4"))
+
+
+def test_精档是快档的超集_不会被降级(index_dir, monkeypatch):
+    """人的用法是「快档全量刷一遍找目标 → 只对要扩的那几路建精档」。
+    所以已有精档时再要快档必须原样返回——把 3600 帧的索引换成 290 帧的，
+    而且悄无声息，那是纯粹的数据损失。"""
+    from vision_service import seek
+
+    monkeypatch.setattr(embed.config, "EMBED_MODEL", "fake/siglip")
+    monkeypatch.setattr(embed.pose, "available", lambda: False)
+    monkeypatch.setattr(embed.segmask, "available", lambda: False)
+    embed._cache.clear()
+    seen = []
+    monkeypatch.setattr(seek, "sample_video",
+                        lambda *a, **kw: (seen.append(kw.get("keyframes_only")),
+                                          [{"t": 1.0, "boxes": [{"bbox": [0, 0, 1, 1], "conf": 1}],
+                                            "jpeg": b"x", "motion": None}])[1])
+
+    class Enc:
+        def encode_images(self, jpegs):
+            return np.ones((len(jpegs), 4), dtype="float32")
+
+    enc = Enc()
+    assert embed.build("A.mp4", "/x/A.mp4", encoder=enc, mode="fine")["mode"] == "fine"
+    assert seen == [False]
+    r = embed.build("A.mp4", "/x/A.mp4", encoder=enc, mode="fast")
+    assert r["cached"] is True and r["mode"] == "fine"        # 不降级
+    assert seen == [False]                                     # 压根没再跑一遍
+
+    # 反过来：已有快档、要精档 → 重建
+    embed._cache.clear()
+    assert embed.build("B.mp4", "/x/B.mp4", encoder=enc, mode="fast")["mode"] == "fast"
+    assert seen[-1] is True
+    assert embed.build("B.mp4", "/x/B.mp4", encoder=enc, mode="fine")["cached"] is False

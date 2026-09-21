@@ -401,22 +401,36 @@ def box_ok(box) -> bool:
 
 
 def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = False,
-          conf: float = 0.35, encoder: Encoder | None = None) -> dict:
-    """给一路视频建索引。已有且模型一致就直接返回（force 重建）。"""
+          conf: float = 0.35, encoder: Encoder | None = None, mode: str | None = None) -> dict:
+    """给一路视频建索引。已有且模型一致就直接返回（force 重建）。
+
+    mode："fine"（每秒一帧，默认）/ "fast"（只解关键帧）。
+
+    **精档是快档的超集**，所以缓存判断不对称：已经有精档时再要快档，直接返回
+    已有的那份——不能把好的降级成差的；反过来已有快档、要精档，那就得重建。
+    人先用快档全量刷一遍找目标，再对要扩的那十几路建精档，正是这个顺序。
+    """
     import numpy as np
 
     enc = encoder or _default_encoder
     t0 = time.monotonic()
     # 抠不抠狗（背景涂灰）：抠了的和没抠的向量不在一个分布里，索引 meta 记着，不一致就重建
+    mode = (mode or config.EMBED_MODE or "fine").lower()
+    if mode not in ("fine", "fast"):
+        raise ValueError(f"mode 只能是 fine / fast，给的是 {mode!r}")
+    fast = mode == "fast"
     use_mask = config.EMBED_MASK_BG and segmask.available()
     if not force:
         old = load(rel_path)
         want_raw = bool(use_mask and config.EMBED_RAW_TOO)
+        old_mode = (old or {}).get("meta", {}).get("mode", "fine")
+        # 已有精档、这次要快档：直接用已有的，不降级
+        mode_ok = old_mode == mode or (old_mode == "fine" and fast)
         if old is not None and old["meta"].get("model") == config.EMBED_MODEL \
                 and bool(old["meta"].get("masked", False)) == bool(use_mask) \
-                and bool(old["meta"].get("raw_wanted", False)) == want_raw:
+                and bool(old["meta"].get("raw_wanted", False)) == want_raw and mode_ok:
             return {"n": int(len(old["t"])), "cached": True, "seconds": 0.0, "model": config.EMBED_MODEL,
-                    "masked": bool(use_mask), "raw": want_raw}
+                    "masked": bool(use_mask), "raw": want_raw, "mode": old_mode}
     # 姿态可用就顺路算：每个有狗的帧一条姿态向量（整帧只在采样那一刻拿得到）
     use_pose = pose.available()
 
@@ -475,7 +489,8 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     scan_stats: dict = {}
     t_scan = time.monotonic()
     samples = seek.sample_video(full_path, every_sec=every_sec, conf=conf, on_frame=on_frame,
-                                on_batch=on_batch if use_mask else None, stats_out=scan_stats)
+                                on_batch=on_batch if use_mask else None, stats_out=scan_stats,
+                                keyframes_only=fast)
     # 过一遍视频的总时间里刨掉姿态和抠狗，剩下的是解码 + 狗检测 + 裁图
     # 「解码+检测」这一步实测占九成以上，所以它自己也要拆开报：等解码 / 检测 / CPU。
     # 三项之和就是原来的 scan，合计没变，只是能看出该调哪个旋钮了
@@ -524,7 +539,9 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     pose_rows = np.array([s.get("pose") or [0.0] * pose.DIM for s in with_dog], dtype="float32") \
         if with_dog else np.zeros((0, pose.DIM), dtype="float32")
     n_pose = int(sum(1 for s in with_dog if s.get("pose")))
-    meta = {"model": config.EMBED_MODEL, "every_sec": every_sec, "sampled": len(samples),
+    meta = {"model": config.EMBED_MODEL, "mode": mode,
+            # 快档的采样间隔是编码器定的（关键帧多久一个），不是我们选的
+            "every_sec": None if fast else every_sec, "sampled": len(samples),
             "with_dog": len(with_dog), "built_at": time.time(), "path": rel_path,
             "pose": use_pose, "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked,
             "static_reused": n_static,
@@ -548,7 +565,7 @@ def build(rel_path: str, full_path: str, every_sec: float = 1.0, force: bool = F
     # 卡还是那张卡，别人（vLLM、另一个服务）要用时就被这堆"用过的空块"挡住了
     freed = gpumem.trim()
     return {"n": int(len(t)), "cached": False, "seconds": round(time.monotonic() - t0, 1),
-            "model": config.EMBED_MODEL, "sampled": len(samples), "with_dog": len(with_dog),
+            "model": config.EMBED_MODEL, "mode": mode, "sampled": len(samples), "with_dog": len(with_dog),
             "with_pose": n_pose, "masked": bool(use_mask), "with_mask": n_masked, "static_reused": n_static,
             "raw": emb_raw is not None,
             "detected": scan_stats.get("detected", 0), "skipped": scan_stats.get("skipped", 0),
@@ -840,12 +857,17 @@ def search(vec, rel_paths: list[str], top_k: int = 50, min_score: float = 0.0, g
             if pscores is not None:
                 h["pose_score"] = round(float(pscores[i]), 4)
             hits.append(h)
+    # 快档那几路密度只有 1/12，搜不到不等于没有。如实报出来，让界面能说清楚
+    coarse = sum(1 for _rp, d in loaded if (d.get("meta") or {}).get("mode") == "fast")
     hits.sort(key=lambda h: -h["score"])
     hits = hits[:top_k]
     return {"hits": hits, "segments": group_hits(hits, gap_s), "searched": searched, "missing": missing,
             # 一句话搜用的是哪一列、有几路因为索引是旧版被跳过
             "text_space": ("原图" if col == "emb_raw" else "抠图") if is_text else None,
             "old_index": len(old_index),
+            # 搜过的里面有几路是快档（只解关键帧，约 12 秒一帧）。
+            # 不报的话人会把"快档里没搜到"当成"素材里没有"
+            "coarse": coarse,
             "centered": mu is not None, "center": mode if mu is not None else "none",
             "pose_used": used_pose, "pose_w": pw if used_pose else 0.0,
             # part_used=None 且 part 有值 = 这个部位判不了（腰、腹股沟……），**没筛**。
