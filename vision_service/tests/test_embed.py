@@ -544,3 +544,30 @@ def test_一句话搜用没抠背景那一列_老索引跳过并如实说(index_
     r2 = embed.search(a, ["new.mp4", "old.mp4"], center=False)
     assert r2["searched"] == 2 and r2["old_index"] == 0 and r2["text_space"] is None
     assert {h["path"] for h in r2["hits"]} == {"new.mp4", "old.mp4"}
+
+
+def test_分步耗时汇总_说清慢在哪一步(index_dir, tmp_path, monkeypatch):
+    """建索引慢的时候，唯一有用的问题是"慢在哪一步"——四步的代价差着数量级，
+    凭感觉调错旋钮只会白慢一遍。"""
+    import json
+    import os
+
+    os.makedirs(embed.config.EMBED_INDEX_DIR, exist_ok=True)
+
+    def _idx(name, spent, n=3):
+        p = os.path.join(embed.config.EMBED_INDEX_DIR, name)
+        np.savez(p, t=np.zeros(n, dtype="float32"), emb=np.zeros((n, 4), dtype="float16"),
+                 box=np.zeros((n, 4), dtype="float32"),
+                 meta=np.array(json.dumps({"model": "m", "spent": spent})))
+
+    _idx("a.npz", {"scan": 4.0, "pose": 12.0, "seg": 2.0, "embed": 2.0})
+    _idx("b.npz", {"scan": 6.0, "pose": 18.0, "seg": 3.0, "embed": 3.0})
+    # 没记 spent 的老索引：跳过，不拉低平均
+    p = os.path.join(embed.config.EMBED_INDEX_DIR, "old.npz")
+    np.savez(p, t=np.zeros(1, dtype="float32"), emb=np.zeros((1, 4), dtype="float16"),
+             box=np.zeros((1, 4), dtype="float32"), meta=np.array(json.dumps({"model": "m"})))
+
+    r = embed.spent_summary()
+    assert r["n"] == 2 and r["total_sec"] == 50.0 and r["per_video_sec"] == 25.0
+    assert r["steps"][0]["step"] == "姿态" and r["steps"][0]["pct"] == 60.0
+    assert "最重的是「姿态」" in r["note"]

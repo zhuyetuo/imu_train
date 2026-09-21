@@ -404,6 +404,12 @@ def embed_search(body: EmbedSearchIn):
         raise HTTPException(500, f"搜索失败: {type(e).__name__}: {e}") from e
 
 
+@app.get("/api/v1/embed/spent")
+def embed_spent(n: int = 30):
+    """最近 n 份索引各步各花了多少秒。建索引慢的时候先看这个，别凭感觉调旋钮。"""
+    return embed.spent_summary(n)
+
+
 @app.get("/api/v1/gpu")
 def gpu_report():
     """显存被谁占了：逐个模型 + torch 缓存 + 非 torch 那部分。
