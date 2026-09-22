@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 
 from . import config, seek
 
@@ -164,8 +165,15 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
     }
     if model:
         try:
-            out["model"] = _to_jpeg(run_model(avg, model))
+            # **喂拉伸去噪之后的图，不是原始暗图。** 实测 2026-09-22：直接喂原片
+            # （只用到 14~40 这 26 级）出来糊成一团还染红——这个暗度远超
+            # Retinexformer 训练时见过的范围，等于让它在纯噪声上瞎猜。
+            # 先把堆栈+拉伸做完（这几步一个像素都不编造），再让模型在一张
+            # 已经"看得见"的图上补细节，才是它擅长的事。
+            model_in = kill_chroma_noise(stacked)
+            out["model"] = _to_jpeg(run_model(model_in, model))
             out["model_name"] = model
+            out["model_weights"] = os.path.basename(config.LOWLIGHT_WEIGHTS or "")
         except Exception as e:  # noqa: BLE001 模型这条是加分项，挂了不该把前三张一起拖没
             out["model_error"] = f"{type(e).__name__}: {e}"
     return out
@@ -173,7 +181,7 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
 
 def enhance_seq(path: str, start_s: float, end_s: float, fps: float = 10.0,
                 max_frames: int = 150, smooth: int = 3, width: int = 640,
-                fill: float = 1.0) -> dict:
+                fill: float = 1.0, denoise: bool = True) -> dict:
     """把一整段增强成一串帧，让人循环着看。
 
     ## 为什么非得是动的
@@ -190,7 +198,7 @@ def enhance_seq(path: str, start_s: float, end_s: float, fps: float = 10.0,
        做的事，它要的就是静态画面）。这里取前后各一两帧的均值：噪声压下去
        一半多，动作基本还在。
 
-    一个像素都不编造：只有平均、线性拉伸、去色噪三步。
+    一个像素都不编造：平均、线性拉伸、去色噪、双边滤波，全是只减不加的运算。
     """
     import cv2
     import numpy as np
@@ -216,12 +224,23 @@ def enhance_seq(path: str, start_s: float, end_s: float, fps: float = 10.0,
         lo_i, hi_i = max(0, i - half), min(len(frames), i + half + 1)
         f = np.mean([frames[j].astype("float32") for j in range(lo_i, hi_i)], axis=0)
         f = np.clip((f - info["lo"]) * info["gain"], 0, 255).astype("uint8")
-        out.append(_to_jpeg(kill_chroma_noise(f), quality=80))
+        # 色度糊得比单帧那几张更狠：这里每帧只平均了 3 帧（单帧那几张平均 30 帧），
+        # 噪声高一截，blur=9 压不住，录屏上看就是彩色麻点在跳
+        f = kill_chroma_noise(f, blur=21)
+        if denoise:
+            # 亮度上再压一道空间噪声。用双边滤波：它按像素值差加权，边缘两侧
+            # 互不参与平均——所以糊掉的是平坦区的噪点，狗的轮廓和地砖线还在。
+            # 不用 NLM：那个效果更好但一帧几十毫秒，上百帧就得等半分钟
+            ycc = cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)
+            ycc[:, :, 0] = cv2.bilateralFilter(ycc[:, :, 0], 5, 30, 5)
+            f = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+        out.append(_to_jpeg(f, quality=80))
     return {
         "frames": out,
         "fps": fps,
         # 这些要摆到界面上：放大顶到上限还是一片噪点 = 这一路夜间没拍到东西
-        "info": info | {"n": len(out), "smooth": max(1, 2 * half + 1), "width": frames[0].shape[1]},
+        "info": info | {"n": len(out), "smooth": max(1, 2 * half + 1),
+                        "width": frames[0].shape[1], "denoise": bool(denoise)},
     }
 
 
