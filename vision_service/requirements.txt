@@ -32,3 +32,7 @@ protobuf>=3.20
 # 想走 GPU 换成 onnxruntime-gpu（版本得跟 CUDA 对上，跟 torch 一样不在这里钉）
 rtmlib>=0.0.13
 onnxruntime>=1.16
+# 夜视增强（可选）：Retinexformer 的网络结构文件要它。纯 python、几十 KB。
+# basicsr 那一堆训练依赖（lmdb / tb_logger / 数据加载器）**不用装**——
+# 结构文件是按路径单独加载的，训练框架的 __init__ 根本不会被执行
+einops>=0.6
