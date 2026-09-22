@@ -61,7 +61,7 @@ ensure_deps() {
     local missing=()
     # 左边是 import 名，右边是给人看的说明。只列 requirements.txt 里有的——
     # torch/sam2 不在这儿，它们走下面那段只提示不安装
-    for pair in "fastapi:fastapi" "uvicorn:uvicorn" "numpy:numpy" "cv2:opencv-python-headless" "ultralytics:ultralytics" "anthropic:anthropic" "httpx:httpx" "transformers:transformers" "PIL:pillow" "sentencepiece:sentencepiece" "rtmlib:rtmlib" "onnxruntime:onnxruntime"; do
+    for pair in "fastapi:fastapi" "uvicorn:uvicorn" "numpy:numpy" "cv2:opencv-python-headless" "ultralytics:ultralytics" "anthropic:anthropic" "httpx:httpx" "transformers:transformers" "PIL:pillow" "sentencepiece:sentencepiece" "rtmlib:rtmlib" "onnxruntime:onnxruntime" "einops:einops"; do
         local mod="${pair%%:*}"
         "$PY_BIN" -c "import ${mod}" >/dev/null 2>&1 || missing+=("${pair##*:}")
     done
