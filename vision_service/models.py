@@ -294,6 +294,8 @@ REGISTRY: dict[str, dict] = {
              "unload": _pose_unload, "test": _pose_test},
     "vllm": {"name": "本地大模型（vLLM）", "purpose": "「画面找片段」的本地视觉大模型，OpenAI 兼容口，docker 跑；「大模型 API」页里「本地服务」那一行连的就是它",
              "status": _vllm_status, "load": _vllm_load, "unload": _vllm_unload, "test": vllm_manager.test},
+    # 夜视这一摊默认关着（config.LOWLIGHT_ENABLED），下面这行在关着时不注册，
+    # 「模型服务」页上就不会出现——见文件末尾
     "lowlight": {"name": "夜视增强（Retinexformer）",
                  "purpose": "夜里那几路黑得看不出狗在干嘛时，按片段增强。**可选**：不配也能用——「夜视」里的「只拉伸」和「多帧堆栈」照常出，而且那两张不编造像素；模型这张好看但不能当证据",
                  "status": _lowlight_status, "load": _lowlight_load,
@@ -360,3 +362,9 @@ def overview() -> dict:
 
 
 __all__ = ["record", "meter", "reset_meter", "list_models", "act", "overview", "REGISTRY"]
+
+# 夜视默认关着：实测这一路夜间只有 26 级动态范围，判不出动作；模型那条还在编。
+# 关着时干脆不注册，省得「模型服务」页上摆一行点了没用的。想再试：
+# vision_service/.env 里写 LOWLIGHT_ENABLED=1
+if not config.LOWLIGHT_ENABLED:
+    REGISTRY.pop("lowlight", None)

@@ -250,6 +250,17 @@ SCAN_CLIP_MARGIN   = float(_env("SCAN_CLIP_MARGIN", "0.0"))
 STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.01"))
 
 # 找片段走画面索引时的动作量门槛（相邻两秒向量距离，0~1；跟像素帧差不是一个刻度）
+# 夜视增强这一整摊的总开关。**默认关着。**
+#
+# 2026-09-22 实测到头了：狗场夜里那几路单间原片只用到 14~40 这 26 级，
+# 铺满要放大 9.81 倍，30 帧堆栈把信噪比抬 ×5.5——传感器本来就没记录下
+# 更多信息，判不出"在不在抓挠"。Retinexformer 那条还更糟，两种输入都在编。
+# 详见 README「夜间画面：实测到头了，算法救不动」。
+#
+# 代码全留着，想再试就把这个设成 1：
+#     echo "LOWLIGHT_ENABLED=1" >> vision_service/.env && ./up.sh deploy -g
+LOWLIGHT_ENABLED = _env("LOWLIGHT_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
 # 低光增强模型的权重（Retinexformer 之类）。空 = 不用模型，只给"拉伸"和"堆栈"
 # 两张。不自动下载：这类权重多半放在网盘上，脚本拉不下来，而"自动下载失败"
 # 的报错最难查——人只看到一句超时，不知道该去哪儿放文件

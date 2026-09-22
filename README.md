@@ -638,6 +638,21 @@ python src/eval/find_task_project.py \
 不跑**——换了权重或换了素材，人要能自己再验一次。别再默认把它摆在人眼前：它好看，
 而人会照着编出来的像素去确认「它在舔后腿」，那条标注就进了训练集。
 
+### 现在是关着的，怎么再打开
+
+2026-09-22 起整摊默认关闭：界面上看不到「夜视」按钮，播放器上也没有「弱/中/强」。
+**代码一行没删**——下次想再验（换了权重、换了素材、或者补了红外补光之后），
+三处一起改就回来了：
+
+| 在哪 | 改什么 |
+| --- | --- |
+| 算法机 | `vision_service/.env` 里写 `LOWLIGHT_ENABLED=1`，再 `./up.sh deploy -g` |
+| 平台后端 | `.env` 里写 `NIGHT_VISION_ENABLED=1`（或改 `app/core/config.py` 的默认值） |
+| 平台前端 | `src/config/features.ts` 里 `NIGHT_VISION` 改成 `true` |
+
+然后 `bash smart-label/deploy/deploy_all.sh`。三处都开才有效——少开一处的话，
+按钮出来了但接口回"已关闭"，反而更难查。
+
 ### 唯一不依赖算法的对照
 
 狗场公共区那一路（cam7）夜里是亮的。同一时刻、同一只狗，增强出来的样子跟 cam7
