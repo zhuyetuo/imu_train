@@ -486,6 +486,37 @@ def lowlight_clip(body: dict = Body(...)):
     return out
 
 
+@app.post("/api/v1/lowlight_seq")
+def lowlight_seq(body: dict = Body(...)):
+    """把一整段增强成一串帧，让人循环着看。
+
+    {path, start, end, fps?, smooth?, width?} → {frames: [base64 JPEG...], fps, info}
+
+    **为什么要这个而不是只给单帧**：抓挠是动作。单帧最多说清"狗在不在、
+    什么姿势"，说不清"它在不在抓"——而人要判断的正是后者。
+
+    回的是一串图，不是视频文件：省掉转码和临时文件，前端自己按 fps 轮播，
+    还能随手改速度、来回看。
+    """
+    import base64
+
+    rel = str(body.get("path") or "")
+    if not rel:
+        raise HTTPException(status_code=422, detail="要给 path")
+    full = _resolve_under(config.VIDEO_ROOT, rel)
+    try:
+        r = lowlight.enhance_seq(
+            full, float(body.get("start") or 0.0), float(body.get("end") or 0.0),
+            fps=float(body.get("fps") or 10.0),
+            smooth=int(body.get("smooth") or 3),
+            width=int(body.get("width") or 640),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+    r["frames"] = [base64.b64encode(f).decode() for f in r["frames"]]
+    return r
+
+
 @app.get("/api/v1/gpu")
 def gpu_report():
     """显存被谁占了：逐个模型 + torch 缓存 + 非 torch 那部分。
