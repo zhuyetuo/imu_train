@@ -143,22 +143,85 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
     return out
 
 
-def run_model(bgr, name: str):
-    """模型增强。权重要自己放到 LOWLIGHT_WEIGHTS 指的地方。
+_model_cache: dict = {}
 
-    为什么不自动下载：Retinexformer 这类的官方权重放在网盘上，脚本拉不下来；
-    而"自动下载失败"的报错最难查——人只看到一句超时，不知道该去哪儿放文件。
-    所以这里直接说清楚缺什么、放哪儿。
+
+def _load_model(weights: str, repo: str):
+    """从官方仓库里拿网络结构，把权重灌进去。
+
+    为什么不自己照着论文重写一份：跟 checkpoint 差一层、差个通道数，推理不会
+    报错，只会输出一堆**看着像画面的垃圾**——而这正是最查不出来的一类错。
+    仓库 clone 下来就有现成的 arch，对得上。
     """
-    path = config.LOWLIGHT_WEIGHTS
-    if not path:
+    import sys
+
+    import torch
+
+    key = (weights, repo)
+    if key in _model_cache:
+        return _model_cache[key]
+    if repo and repo not in sys.path:
+        sys.path.insert(0, repo)
+    try:
+        from basicsr.models.archs.RetinexFormer_arch import RetinexFormer
+    except Exception as e:  # noqa: BLE001
         raise RuntimeError(
-            "没配模型权重。先把 Retinexformer 的 .pth 放到算法机上，再在 "
-            "vision_service/.env 里写 LOWLIGHT_WEIGHTS=/绝对路径/xxx.pth。"
-            "在那之前，「只拉伸」和「堆栈」两张照常出——堆栈那张是不编造的上限"
+            f"没能从 {repo or '(没配 LOWLIGHT_REPO)'} 里导入 RetinexFormer："
+            f"{type(e).__name__}: {e}。"
+            "先 git clone https://github.com/caiyuanhao1998/Retinexformer，"
+            "再在 vision_service/.env 里写 LOWLIGHT_REPO=/那个目录"
+        ) from e
+
+    ck = torch.load(weights, map_location="cpu")
+    sd = ck.get("params", ck) if isinstance(ck, dict) else ck
+    # 权重里能读出通道数和每个 stage 的层数，不用人去 yml 里对——对错了就是
+    # 上面说的那种"不报错但输出垃圾"
+    net = RetinexFormer(in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2])
+    missing, unexpected = net.load_state_dict(sd, strict=False)
+    if missing:
+        raise RuntimeError(
+            f"权重跟网络结构对不上（缺 {len(missing)} 个参数，多 {len(unexpected)} 个）。"
+            "多半是这份 checkpoint 用的是另一组 n_feat/num_blocks——"
+            "去仓库 Options/ 下找对应那个 yml 看参数"
         )
-    raise RuntimeError(
-        f"还没接 {name} 的推理代码（权重在 {path}）。"
-        "接之前请先看「堆栈」那张：它要是也一片噪点，说明原始信号里就没有东西，"
-        "模型只会把噪声画成看起来合理的画面——那种画面不能拿来确认标注"
-    )
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    net = net.to(dev).eval()
+    _model_cache[key] = (net, dev)
+    return net, dev
+
+
+def run_model(bgr, name: str = "retinexformer"):
+    """模型增强。权重和仓库都要自己放到算法机上，不自动下载。
+
+    为什么不自动下载：这类权重放在 Google Drive / 百度网盘上，脚本拉不下来；
+    而"自动下载失败"的报错最难查——人只看到一句超时，不知道该去哪儿放文件。
+
+    **输出不能当证据。** 它是模型根据训练数据补出来的"合理画面"，在纯噪声上
+    照样能画出毛发和轮廓。拿它确认「这是不是抓挠」之前，先看堆栈那张，
+    再拿同一时刻公共区那一路对一眼。
+    """
+    # 先查配置再 import torch：没配权重时该给的是"去哪儿放文件"，
+    # 不是一句 ModuleNotFoundError
+    if not config.LOWLIGHT_WEIGHTS:
+        raise RuntimeError(
+            "没配模型权重。把 Retinexformer 的 .pth（这批监控用 SMID.pth 或 "
+            "SDSD_indoor.pth，它们是拿真实低光视频训的；LOL_v1/v2 是照片、"
+            "几乎没噪声，不对口）放到算法机上，再在 vision_service/.env 里写 "
+            "LOWLIGHT_WEIGHTS=/绝对路径/xxx.pth"
+        )
+    import numpy as np
+    import torch
+
+    net, dev = _load_model(config.LOWLIGHT_WEIGHTS, config.LOWLIGHT_REPO)
+    # BGR uint8 → RGB float [0,1]
+    x = np.ascontiguousarray(bgr[:, :, ::-1]).astype("float32") / 255.0
+    t = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0).to(dev)
+    # 边长补到 4 的倍数：网络内部要下采样，尺寸不整除会对不齐
+    _b, _c, h, w = t.shape
+    ph, pw = (4 - h % 4) % 4, (4 - w % 4) % 4
+    if ph or pw:
+        t = torch.nn.functional.pad(t, (0, pw, 0, ph), mode="reflect")
+    with torch.no_grad():
+        y = net(t)
+    y = y[:, :, :h, :w].clamp(0, 1)[0].permute(1, 2, 0).cpu().numpy()
+    return (y[:, :, ::-1] * 255).astype("uint8")

@@ -254,6 +254,9 @@ STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.01"))
 # 两张。不自动下载：这类权重多半放在网盘上，脚本拉不下来，而"自动下载失败"
 # 的报错最难查——人只看到一句超时，不知道该去哪儿放文件
 LOWLIGHT_WEIGHTS = _env("LOWLIGHT_WEIGHTS", "")
+# Retinexformer 官方仓库的路径（git clone 下来就行）。**不自己重写网络结构**：
+# 重写一份跟 checkpoint 差一层就出一堆看着像画面的垃圾，而且查不出来
+LOWLIGHT_REPO = _env("LOWLIGHT_REPO", "")
 
 SEEK_INDEX_MOTION_MIN = float(_env("SEEK_INDEX_MOTION_MIN", "0.06"))
 SEEK_INDEX_MOTION_MAX = float(_env("SEEK_INDEX_MOTION_MAX", "1.0"))

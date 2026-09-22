@@ -50,7 +50,15 @@ def test_堆栈是在压噪声_不是把画面弄糊(monkeypatch):
     assert float(avg[10:30, 20:40].mean()) - float(avg[0:8, 0:8].mean()) > 25
 
 
-def test_没配权重时说清楚缺什么放哪儿():
-    """"自动下载失败"那种报错最难查——人只看到一句超时。这里直接说要放哪儿。"""
-    with pytest.raises(RuntimeError, match="LOWLIGHT_WEIGHTS"):
-        lowlight.run_model(np.zeros((8, 8, 3), dtype=np.uint8), "retinexformer")
+def test_没配权重时说清楚缺什么放哪儿_并且指明该用哪个(monkeypatch):
+    """「自动下载失败」那种报错最难查——人只看到一句超时。
+
+    这里不光说缺什么、放哪儿，还要指明**用哪一个**：这批是带真实噪声的监控
+    视频，该用 SMID / SDSD_indoor（拿低光视频训的）；LOL_v1/v2 是照片、几乎
+    没噪声，拿来只会输出一张好看但不对的图。
+    """
+    monkeypatch.setattr(lowlight.config, "LOWLIGHT_WEIGHTS", "")
+    with pytest.raises(RuntimeError) as e:
+        lowlight.run_model(np.zeros((8, 8, 3), dtype=np.uint8))
+    msg = str(e.value)
+    assert "LOWLIGHT_WEIGHTS" in msg and "SMID" in msg and "LOL_v1" in msg
