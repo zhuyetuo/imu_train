@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, dog, embed, pose, sam, segmask, vllm_manager
+from . import config, dog, embed, lowlight, pose, sam, segmask, vllm_manager
 from . import meter as _meter
 
 _started = time.time()
@@ -231,6 +231,55 @@ def _seg_test() -> dict:
             "detail": "随机图跑一次，" + ("抠到了一块" if m is not None else "没抠到东西（随机图没狗，正常）")}
 
 
+def _lowlight_status() -> dict:
+    """夜视增强模型（Retinexformer）。**没配也不算坏**——按片段的「夜视」照样
+    能给"只拉伸"和"多帧堆栈"两张，那两张还不编造像素。所以这里报的是
+    "配没配"，而不是"能不能用"。
+    """
+    import os
+
+    w, repo = config.LOWLIGHT_WEIGHTS, config.LOWLIGHT_REPO
+    missing = []
+    if not w:
+        missing.append("LOWLIGHT_WEIGHTS（.pth 的绝对路径）")
+    elif not os.path.isfile(w):
+        missing.append(f"权重文件不在：{w}")
+    if not repo:
+        missing.append("LOWLIGHT_REPO（git clone 的 Retinexformer 目录）")
+    elif not os.path.isdir(repo):
+        missing.append(f"仓库目录不在：{repo}")
+    loaded = bool(lowlight._model_cache)
+    return {
+        "available": loaded,
+        "device": "cuda" if loaded else None,
+        "weights": w or "（没配）",
+        "error": ("没配：" + "；".join(missing) +
+                  "。不配也能用——「夜视」里的「只拉伸」和「多帧堆栈」照常出，"
+                  "而且那两张不编造像素") if missing else (None if loaded else "已配好，第一次用时加载"),
+    }
+
+
+def _lowlight_load() -> dict:
+    lowlight._load_model(config.LOWLIGHT_WEIGHTS, config.LOWLIGHT_REPO)
+    return {"warm": True}
+
+
+def _lowlight_unload() -> None:
+    lowlight._model_cache.clear()
+    _cuda_free()
+
+
+def _lowlight_test() -> dict:
+    import numpy as np
+
+    # 拿一张"跟夜间素材一样暗"的图跑：亮度挤在 16~38 这 22 级里
+    img = np.random.default_rng(7).integers(16, 39, size=(256, 256, 3), dtype="uint8")
+    t0 = time.monotonic()
+    out = lowlight.run_model(img)
+    return {"latency_ms": int((time.monotonic() - t0) * 1000),
+            "detail": f"256x256 暗图跑一次，输出均值 {float(out.mean()):.0f}/255"}
+
+
 REGISTRY: dict[str, dict] = {
     "dog": {"name": "狗检测（YOLO）", "purpose": "画面里有没有狗、狗在哪；建索引 / 找片段 / 找相似都先用它框狗",
             "status": _dog_status, "load": lambda: dog.warmup(), "unload": _dog_unload, "test": _dog_test},
@@ -245,6 +294,10 @@ REGISTRY: dict[str, dict] = {
              "unload": _pose_unload, "test": _pose_test},
     "vllm": {"name": "本地大模型（vLLM）", "purpose": "「画面找片段」的本地视觉大模型，OpenAI 兼容口，docker 跑；「大模型 API」页里「本地服务」那一行连的就是它",
              "status": _vllm_status, "load": _vllm_load, "unload": _vllm_unload, "test": vllm_manager.test},
+    "lowlight": {"name": "夜视增强（Retinexformer）",
+                 "purpose": "夜里那几路黑得看不出狗在干嘛时，按片段增强。**可选**：不配也能用——「夜视」里的「只拉伸」和「多帧堆栈」照常出，而且那两张不编造像素；模型这张好看但不能当证据",
+                 "status": _lowlight_status, "load": _lowlight_load,
+                 "unload": _lowlight_unload, "test": _lowlight_test},
 }
 
 
