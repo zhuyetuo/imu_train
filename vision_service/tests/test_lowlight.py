@@ -126,3 +126,37 @@ def test_去色噪只动色度不动亮度():
     # 那块"狗"跟背景的反差原样保留——去色不该让轮廓变淡
     反差 = lambda x: 亮度(x)[40:90, 50:110].mean() - 亮度(x)[0:20, 0:20].mean()
     assert abs(反差(out) - 反差(noisy)) < 0.5
+
+
+def test_整段增强的亮度不能逐帧跳(tmp_path, monkeypatch):
+    """全段共用一套拉伸映射——每帧各算各的就会闪得没法看。
+
+    造一段"背景不动、一个小方块在走"的暗视频：如果按帧量分位数，方块走过
+    亮区时统计量变、整帧亮度就会跳。这个测试把"不许跳"钉死。
+    """
+    import numpy as np
+
+    from vision_service import lowlight as ll
+
+    n = 12
+    seq = []
+    for i in range(n):
+        f = np.full((60, 120, 3), 18, np.uint8)      # 暗背景
+        f[:, 60:] = 34                                # 右半边亮一点
+        f[20:40, 5 * i:5 * i + 20] = 10               # 一个更暗的方块，从左走到右
+        seq.append(f)
+    monkeypatch.setattr(ll.seek, "iter_frames",
+                        lambda *a, **k: [(i / 10, f) for i, f in enumerate(seq)])
+
+    r = ll.enhance_seq("x.mp4", 0.0, 1.2, fps=10, smooth=3, width=0)
+    assert r["info"]["n"] == n
+
+    import cv2
+    亮度 = []
+    for b in r["frames"]:
+        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+        亮度.append(float(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean()))
+    # 方块只占 2.8% 面积，全帧平均亮度本就该几乎不变；真跳了说明映射是按帧算的
+    assert max(亮度) - min(亮度) < 8, f"逐帧亮度在跳：{[round(x) for x in 亮度]}"
+    # 拉伸确实起作用了：原片只用到 10~34，增强后该铺开
+    assert max(亮度) > 100

@@ -171,6 +171,60 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
     return out
 
 
+def enhance_seq(path: str, start_s: float, end_s: float, fps: float = 10.0,
+                max_frames: int = 150, smooth: int = 3, width: int = 640,
+                fill: float = 1.0) -> dict:
+    """把一整段增强成一串帧，让人循环着看。
+
+    ## 为什么非得是动的
+
+    抓挠是动作。单帧最多能回答"狗在不在、什么姿势"，回答不了"它在不在抓"——
+    而人要判断的恰恰是后者。所以看清了单帧还不够，得让这一段动起来。
+
+    ## 两件必须做对的事
+
+    1. **拉伸映射全段只算一次**，用整段的时间平均图去量。每帧各算各的话，
+       狗一动画面统计量就变，亮度会一帧一跳，闪得没法看——这个坑跟当初
+       前端那版夜视是同一个。
+    2. **滑动平均，不是整段平均。** 整段平均会把动作糊成拖影（那正是 stack
+       做的事，它要的就是静态画面）。这里取前后各一两帧的均值：噪声压下去
+       一半多，动作基本还在。
+
+    一个像素都不编造：只有平均、线性拉伸、去色噪三步。
+    """
+    import cv2
+    import numpy as np
+
+    if end_s <= start_s:
+        raise RuntimeError(f"这一段时间不对：{start_s:.1f}~{end_s:.1f}s")
+    frames = [f for _t, f in seek.iter_frames(path, every_sec=1.0 / fps,
+                                              start_s=start_s, end_s=end_s)]
+    if not frames:
+        raise RuntimeError(f"这一段没解出帧：{path} {start_s:.1f}~{end_s:.1f}s")
+    frames = frames[:max_frames]
+    if width and frames[0].shape[1] > width:
+        h = int(round(frames[0].shape[0] * width / frames[0].shape[1]))
+        frames = [cv2.resize(f, (width, h), interpolation=cv2.INTER_AREA) for f in frames]
+
+    # 映射只量一次：拿整段的时间平均图（它最干净）定 lo/hi/gain
+    mean_img = np.mean([f.astype("float32") for f in frames], axis=0).astype("uint8")
+    _ref, info = stretch(mean_img, fill=fill)
+
+    half = max(0, int(smooth) // 2)
+    out = []
+    for i in range(len(frames)):
+        lo_i, hi_i = max(0, i - half), min(len(frames), i + half + 1)
+        f = np.mean([frames[j].astype("float32") for j in range(lo_i, hi_i)], axis=0)
+        f = np.clip((f - info["lo"]) * info["gain"], 0, 255).astype("uint8")
+        out.append(_to_jpeg(kill_chroma_noise(f), quality=80))
+    return {
+        "frames": out,
+        "fps": fps,
+        # 这些要摆到界面上：放大顶到上限还是一片噪点 = 这一路夜间没拍到东西
+        "info": info | {"n": len(out), "smooth": max(1, 2 * half + 1), "width": frames[0].shape[1]},
+    }
+
+
 _model_cache: dict = {}
 
 
