@@ -62,3 +62,33 @@ def test_没配权重时说清楚缺什么放哪儿_并且指明该用哪个(mon
         lowlight.run_model(np.zeros((8, 8, 3), dtype=np.uint8))
     msg = str(e.value)
     assert "LOWLIGHT_WEIGHTS" in msg and "SMID" in msg and "LOL_v1" in msg
+
+
+def test_只加载那一个网络结构文件_不被训练依赖挡住(tmp_path):
+    """实测 2026-09-22：仓库和权重都齐了，却卡在 `No module named 'lmdb'`。
+
+    因为走的是 `import basicsr.models.archs...`，那会先执行 basicsr 的 __init__，
+    把整个训练框架的依赖一起拉起来（lmdb、tb_logger、数据加载器……）——而 lmdb
+    是训练读数据用的，推理一个字节都用不上。
+
+    改成按文件路径单独加载：basicsr/__init__.py 里写什么都不影响。
+    """
+    repo = tmp_path / "Retinexformer"
+    arch = repo / "basicsr" / "models" / "archs"
+    arch.mkdir(parents=True)
+    # 这个 __init__ 一旦被执行就会炸——正是要证明它**不会**被执行
+    (repo / "basicsr" / "__init__.py").write_text("import lmdb  # 训练才用得上\n", encoding="utf-8")
+    (arch / "RetinexFormer_arch.py").write_text("class RetinexFormer:\n    pass\n", encoding="utf-8")
+
+    cls = lowlight._import_arch(str(repo))
+    assert cls.__name__ == "RetinexFormer"
+
+
+def test_结构文件自己缺依赖时点名是哪个(tmp_path):
+    """basicsr 的训练依赖可以不管，但这个文件自己要的（比如 einops）得说清楚。"""
+    repo = tmp_path / "R2"
+    arch = repo / "basicsr" / "models" / "archs"
+    arch.mkdir(parents=True)
+    (arch / "RetinexFormer_arch.py").write_text("import einops_not_installed\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="einops_not_installed"):
+        lowlight._import_arch(str(repo))

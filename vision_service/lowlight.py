@@ -146,6 +146,47 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
 _model_cache: dict = {}
 
 
+def _import_arch(repo: str):
+    """把 RetinexFormer 那一个网络结构文件单独加载进来。
+
+    **不走 `import basicsr.models.archs...`**：那条路会先执行 basicsr 的
+    __init__，把整个训练框架的依赖一起拉起来（lmdb、tb_logger、数据加载器……）。
+    实测 2026-09-22：仓库和权重都齐了，卡在 `No module named 'lmdb'` ——
+    而 lmdb 是训练读数据用的，推理一个字节都用不上。
+
+    按文件路径直接加载，只需要 torch + einops。装不上的训练依赖不该挡住推理。
+    """
+    import importlib.util
+    import os
+
+    if not repo:
+        raise RuntimeError(
+            "没配 LOWLIGHT_REPO。先 git clone https://github.com/caiyuanhao1998/Retinexformer，"
+            "再跑 ./vision_service/get_lowlight_weights.sh 把路径写进 .env"
+        )
+    f = os.path.join(repo, "basicsr", "models", "archs", "RetinexFormer_arch.py")
+    if not os.path.isfile(f):
+        raise RuntimeError(
+            f"{repo} 里没找到 basicsr/models/archs/RetinexFormer_arch.py。"
+            "LOWLIGHT_REPO 指的应该是 git clone 下来的 Retinexformer 目录本身"
+        )
+    spec = importlib.util.spec_from_file_location("_retinexformer_arch", f)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"加载不了 {f}")
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except ModuleNotFoundError as e:
+        # 到这一步还缺的，才是这个文件自己真正要的（多半是 einops）
+        raise RuntimeError(
+            f"{f} 还缺一个依赖：{e.name}。装上就行：pip install {e.name}。"
+            "（basicsr 那一堆训练依赖不用装，这里是按文件单独加载的）"
+        ) from e
+    if not hasattr(mod, "RetinexFormer"):
+        raise RuntimeError(f"{f} 里没有 RetinexFormer 这个类——仓库版本对不上？")
+    return mod.RetinexFormer
+
+
 def _load_model(weights: str, repo: str):
     """从官方仓库里拿网络结构，把权重灌进去。
 
@@ -162,15 +203,7 @@ def _load_model(weights: str, repo: str):
         return _model_cache[key]
     if repo and repo not in sys.path:
         sys.path.insert(0, repo)
-    try:
-        from basicsr.models.archs.RetinexFormer_arch import RetinexFormer
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(
-            f"没能从 {repo or '(没配 LOWLIGHT_REPO)'} 里导入 RetinexFormer："
-            f"{type(e).__name__}: {e}。"
-            "先 git clone https://github.com/caiyuanhao1998/Retinexformer，"
-            "再在 vision_service/.env 里写 LOWLIGHT_REPO=/那个目录"
-        ) from e
+    RetinexFormer = _import_arch(repo)
 
     ck = torch.load(weights, map_location="cpu")
     sd = ck.get("params", ck) if isinstance(ck, dict) else ck
