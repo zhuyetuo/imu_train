@@ -133,3 +133,20 @@ def test_检测权重路径_老位置的文件挪到models目录(tmp_path, monke
     # 没有老文件：目录建好，路径原样返回，让 ultralytics 自己下
     dest.unlink()
     assert dog._weights_path() == str(dest) and dest.parent.is_dir()
+
+
+def test_加载失败要把原因带回来_不是一个光秃秃的500(monkeypatch):
+    """「加载」抛出来的异常原来没接住，直接 500——界面上只有「视觉服务返回 500」，
+    而真正有用的那句（权重跟网络结构对不上、缺依赖、文件不在）全丢了，人只能猜。
+
+    测试那条一直是接住的，所以两个按钮表现不一样，更容易让人以为是别的问题。
+    """
+    from vision_service import models
+
+    spec = dict(models.REGISTRY["dog"])
+    spec["load"] = lambda: (_ for _ in ()).throw(RuntimeError("权重跟网络结构对不上（缺 37 个参数）"))
+    monkeypatch.setitem(models.REGISTRY, "dog", spec)
+
+    r = models.act("dog", "load")
+    assert r["ok"] is False
+    assert "缺 37 个参数" in r["error"], "报错正文要原样带回，不然人查不下去"
