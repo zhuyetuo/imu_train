@@ -15,10 +15,10 @@ import logging
 import os
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, gpumem, dog, embed, llm as llmmod, models, sam, seek
+from . import config, gpumem, dog, embed, llm as llmmod, lowlight, models, sam, seek
 
 _logger = logging.getLogger("vision_service")
 
@@ -447,6 +447,43 @@ def decode_settings():
 def embed_spent(n: int = 30):
     """最近 n 份索引各步各花了多少秒。建索引慢的时候先看这个，别凭感觉调旋钮。"""
     return embed.spent_summary(n)
+
+
+@app.post("/api/v1/lowlight")
+def lowlight_clip(body: dict = Body(...)):
+    """夜里那几秒黑得看不见狗在干嘛——把那一刻捞出来看清楚。
+
+    {path, t, window_s?, fill?, model?} → 三张 base64 JPEG：
+      raw      原样（先证明"原片就是这样"，不是平台把画面弄黑了）
+      stretch  只拉伸（不编造，但噪声照样放大）
+      stacked  前后几秒对齐后平均，再拉伸（软件能做到的上限，同样不编造）
+
+    **stack_info 里的 gain 是判据**：放大到 10 倍还是一片噪点，说明这一路夜间
+    根本没拍到东西——该去补红外补光，不是接着调算法，更不是上模型。
+    模型（Retinexformer 之类）能把噪声画成看起来合理的画面，而人正是拿这张图
+    去确认「这是不是抓挠」的。
+    """
+    import base64
+
+    rel = str(body.get("path") or "")
+    if not rel:
+        raise HTTPException(status_code=422, detail="要给 path")
+    # 走跟别的接口同一套沙箱解析：只认 VIDEO_ROOT 底下的相对路径，`..` 穿越被挡住
+    full = _resolve_under(config.VIDEO_ROOT, rel)
+    try:
+        r = lowlight.enhance_clip(
+            full, float(body.get("t") or 0.0),
+            window_s=float(body.get("window_s") or 2.0),
+            fill=float(body.get("fill") or 1.0),
+            model=(body.get("model") or None),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from e
+    out = {k: v for k, v in r.items() if not isinstance(v, (bytes, bytearray))}
+    for k in ("raw", "stretch", "stacked", "model"):
+        if isinstance(r.get(k), (bytes, bytearray)):
+            out[k] = base64.b64encode(r[k]).decode()
+    return out
 
 
 @app.get("/api/v1/gpu")

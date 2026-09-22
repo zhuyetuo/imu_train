@@ -250,5 +250,10 @@ SCAN_CLIP_MARGIN   = float(_env("SCAN_CLIP_MARGIN", "0.0"))
 STATIC_SKIP_THR = float(_env("STATIC_SKIP_THR", "0.01"))
 
 # 找片段走画面索引时的动作量门槛（相邻两秒向量距离，0~1；跟像素帧差不是一个刻度）
+# 低光增强模型的权重（Retinexformer 之类）。空 = 不用模型，只给"拉伸"和"堆栈"
+# 两张。不自动下载：这类权重多半放在网盘上，脚本拉不下来，而"自动下载失败"
+# 的报错最难查——人只看到一句超时，不知道该去哪儿放文件
+LOWLIGHT_WEIGHTS = _env("LOWLIGHT_WEIGHTS", "")
+
 SEEK_INDEX_MOTION_MIN = float(_env("SEEK_INDEX_MOTION_MIN", "0.06"))
 SEEK_INDEX_MOTION_MAX = float(_env("SEEK_INDEX_MOTION_MAX", "1.0"))
