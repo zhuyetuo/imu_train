@@ -92,3 +92,37 @@ def test_结构文件自己缺依赖时点名是哪个(tmp_path):
     (arch / "RetinexFormer_arch.py").write_text("import einops_not_installed\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="einops_not_installed"):
         lowlight._import_arch(str(repo))
+
+
+def test_去色噪只动色度不动亮度():
+    """压色噪不能改画面内容——亮度通道必须一个字节都不变。
+
+    这是它能摆在「不编造」那一列的前提：去掉的是已知为噪声的色度，
+    人看到的轮廓、明暗全是原片里本来就有的。
+    """
+    import cv2
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    img = np.full((120, 160, 3), 90, np.uint8)
+    img[40:90, 50:110] = 45                                  # 一块更暗的，当作狗
+    f = img.astype("float32")
+    f[:, :, 0] += 25                                         # 洋红偏色：蓝、红一起抬
+    f[:, :, 2] += 20
+    f += rng.normal(0, 18, f.shape) * np.array([1, 0.2, 1])  # 噪声集中在色度上
+    noisy = np.clip(f, 0, 255).astype("uint8")
+
+    out = lowlight.kill_chroma_noise(noisy)
+
+    def 彩度(x):
+        ycc = cv2.cvtColor(x, cv2.COLOR_BGR2YCrCb).astype("float32")
+        return float(np.mean(np.abs(ycc[:, :, 1] - 128) + np.abs(ycc[:, :, 2] - 128)))
+
+    def 亮度(x):
+        return cv2.cvtColor(x, cv2.COLOR_BGR2GRAY).astype("float32")
+
+    assert 彩度(out) < 彩度(noisy) / 4                        # 色噪和偏色都压下去了
+    assert np.mean(np.abs(亮度(out) - 亮度(noisy))) < 0.5     # 亮度没动
+    # 那块"狗"跟背景的反差原样保留——去色不该让轮廓变淡
+    反差 = lambda x: 亮度(x)[40:90, 50:110].mean() - 亮度(x)[0:20, 0:20].mean()
+    assert abs(反差(out) - 反差(noisy)) < 0.5
