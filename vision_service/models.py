@@ -314,14 +314,26 @@ def act(key: str, action: str) -> dict:
     spec = REGISTRY.get(key)
     if spec is None:
         raise KeyError(key)
+    # 加载/卸载抛出来的异常**要接住并原样带回**，跟「测试」一个待遇。
+    # 原来只有测试接了，加载没接：一抛就是个光秃秃的 500，界面上只显示
+    # 「视觉服务返回 500」，而真正有用的那句（权重跟网络结构对不上、缺依赖、
+    # 文件不在）全丢了——人只能猜，或者去翻服务日志。
     if action == "load":
-        r = spec["load"]() or {}
+        try:
+            r = spec["load"]() or {}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}",
+                    "status": spec["status"]()}
         st = spec["status"]()
         # vLLM 是"拉起来了但还在加载"：进程起来就算 ok，ready 由状态刷新去反映
         ok = bool(st.get("available")) or (key == "vllm" and bool(r.get("warm")))
         return {"ok": ok, "error": (r.get("error") or st.get("error")) if not ok else None, "status": st}
     if action == "unload":
-        spec["unload"]()
+        try:
+            spec["unload"]()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}",
+                    "status": spec["status"]()}
         return {"ok": True, "error": None, "status": spec["status"]()}
     if action == "test":
         t0 = time.monotonic()
