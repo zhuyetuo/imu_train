@@ -62,6 +62,32 @@ def stretch(bgr, lo_q: float = 0.01, hi_q: float = 0.995, fill: float = 1.0, max
     return out, {"lo": round(lo, 1), "hi": round(hi, 1), "gain": round(gain, 2)}
 
 
+def kill_chroma_noise(bgr, blur: int = 9):
+    """把色度通道上的噪声和整体偏色去掉，只留亮度。
+
+    为什么必须做：实测这一路夜间只用到 14~40 这 26 级，拉伸要放大 9.8 倍。
+    在这个亮度上，**色度通道里已经没有任何真实信息了**——传感器收到的红绿蓝
+    差异全是读出噪声。放大之后就是满屏紫色麻点，把本来能看出来的轮廓盖住。
+
+    做两件事，都只减不加：
+      1. 色度通道重度模糊——真实的颜色在这种光线下不可能有像素级的细节，
+         所以糊掉的一定是噪声，不是信息。
+      2. 把色度中位数拉回中性——整块的偏色（这里是洋红）是直流偏置，模糊
+         去不掉，得平移。
+
+    结果近似灰度图。**这不是在编造像素**：亮度通道一个字节没动，只是把已知
+    为噪声的那两个通道压平了。
+    """
+    import cv2
+    import numpy as np
+
+    ycc = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb).astype("float32")
+    for i in (1, 2):
+        c = cv2.GaussianBlur(ycc[:, :, i], (blur, blur), 0)
+        ycc[:, :, i] = np.clip(c + (128.0 - float(np.median(c))), 0, 255)
+    return cv2.cvtColor(np.clip(ycc, 0, 255).astype("uint8"), cv2.COLOR_YCrCb2BGR)
+
+
 def stack(path: str, t_s: float, window_s: float = 2.0, max_frames: int = 30,
           align: bool = True) -> tuple:
     """把 t_s 前后 window_s 秒的帧对齐后平均。返回 (平均后的图, 统计)。
@@ -127,10 +153,12 @@ def enhance_clip(path: str, t_s: float, window_s: float = 2.0, fill: float = 1.0
     st, st_info = stretch(raw, fill=fill)
     avg, stack_info = stack(path, t_s, window_s=window_s)
     stacked, stacked_info = stretch(avg, fill=fill)
+    # 拉伸把色噪一起放大了 9 倍多，满屏紫麻点会把轮廓盖住。色度通道在这个
+    # 亮度上没有信息，压平它只会让人看得更清楚，不会让人看见不存在的东西
     out = {
         "raw": _to_jpeg(raw),
-        "stretch": _to_jpeg(st),
-        "stacked": _to_jpeg(stacked),
+        "stretch": _to_jpeg(kill_chroma_noise(st)),
+        "stacked": _to_jpeg(kill_chroma_noise(stacked)),
         "stretch_info": st_info,
         "stack_info": stack_info | stacked_info,
     }
