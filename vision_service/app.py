@@ -463,6 +463,13 @@ def lowlight_clip(body: dict = Body(...)):
     模型（Retinexformer 之类）能把噪声画成看起来合理的画面，而人正是拿这张图
     去确认「这是不是抓挠」的。
     """
+    # 夜视默认关着：实测这一路夜间只有 26 级动态范围，判不出动作（见 README）。
+    # 想再试：vision_service/.env 里写 LOWLIGHT_ENABLED=1
+    if not config.LOWLIGHT_ENABLED:
+        raise HTTPException(status_code=503, detail=(
+            "夜视增强这一摊默认关着。实测狗场夜间原片只用到 26 级亮度，判不出"
+            "「在不在抓挠」，详见 README。要再打开：vision_service/.env 里写 "
+            "LOWLIGHT_ENABLED=1，再 ./up.sh deploy -g"))
     import base64
 
     rel = str(body.get("path") or "")
@@ -498,6 +505,13 @@ def lowlight_seq(body: dict = Body(...)):
     回的是一串图，不是视频文件：省掉转码和临时文件，前端自己按 fps 轮播，
     还能随手改速度、来回看。
     """
+    # 夜视默认关着：实测这一路夜间只有 26 级动态范围，判不出动作（见 README）。
+    # 想再试：vision_service/.env 里写 LOWLIGHT_ENABLED=1
+    if not config.LOWLIGHT_ENABLED:
+        raise HTTPException(status_code=503, detail=(
+            "夜视增强这一摊默认关着。实测狗场夜间原片只用到 26 级亮度，判不出"
+            "「在不在抓挠」，详见 README。要再打开：vision_service/.env 里写 "
+            "LOWLIGHT_ENABLED=1，再 ./up.sh deploy -g"))
     import base64
 
     rel = str(body.get("path") or "")

@@ -119,10 +119,10 @@ if [ "$SUB" = "deploy" ]; then
         deploy_run ./vision_service/get_weights.sh || FAILED+=("向量模型权重没下到（看上面怎么拷）")
         # 姿态关键点模型（以图搜图第二路信号）：下不到不算失败，那一路自动关
         deploy_run ./vision_service/get_pose_weights.sh || true
-        # 夜视增强（可选）：**只在已经有权重时才写配置**，没有就完全不提——
-        # 它不配也能用（「夜视」里的拉伸和多帧堆栈照常出，而且不编造像素），
-        # 每次部署都报一句"缺权重"只会变成噪音
-        if ls models/vision/lowlight/*.pth >/dev/null 2>&1; then
+        # 夜视这一摊默认关着（实测判不出动作，见 README），关着就别每次部署
+        # 都去翻权重。想再打开：vision_service/.env 里写 LOWLIGHT_ENABLED=1
+        if grep -qE "^LOWLIGHT_ENABLED=(1|true|yes|on)" vision_service/.env 2>/dev/null \
+           && ls models/vision/lowlight/*.pth >/dev/null 2>&1; then
             deploy_run ./vision_service/get_lowlight_weights.sh || true
         fi
         deploy_run ./vision_service/run.sh down
