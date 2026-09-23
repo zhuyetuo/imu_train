@@ -24,8 +24,10 @@ ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 # apt 也换国内源，不然装 ffmpeg 那一步就要几分钟
 RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
     apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libglib2.0-0 tzdata \
+        ffmpeg libglib2.0-0 tzdata gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
+# gcc：端侧那条线（algo_tinyml）把板上那份 C 现场编成 .so 跑——端侧服务和
+# 「导出到端侧」都在这个镜像里，没有 gcc 两样都起不来
 # ffmpeg：src/extract_clips.py 在 import 时就会探测它
 # libglib2.0-0：opencv-python-headless 的运行时依赖（headless 版不需要 libgl1）
 # tzdata：容器时区跟宿主机一致（compose 里设 TZ）

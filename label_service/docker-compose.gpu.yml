@@ -35,3 +35,6 @@ services:
             - driver: nvidia
               count: ${GPU_COUNT:-all}
               capabilities: [gpu]
+  # 端侧服务用同一个镜像，GPU 模式下镜像名带 :gpu，跟着改
+  edge-service:
+    image: imu-train-label-service:gpu
