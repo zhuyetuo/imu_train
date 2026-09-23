@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     log.info("启动 模型=%s classes=%s model_hz=%s device_hz=%s resample=%s target_labels=%s nas_root=%s "
              "infer_workers=%s log_dir=%s", model_path, _bundle["classes"], _bundle["hz"], config.DEVICE_HZ,
              config.RESAMPLE_METHOD, config.TARGET_LABELS, config.NAS_ROOT, config.INFER_WORKERS, config.LOG_DIR)
-    missing = [t for t in config.TARGET_LABELS if t not in _bundle["classes"]]
+    missing = [t for t in config.target_labels_for(_bundle["classes"]) if t not in _bundle["classes"]]
     if missing:
         log.warning("TARGET_LABELS 里这些类别模型没有: %s  模型类别: %s", missing, _bundle["classes"])
     _pool = pool.create_pool(model_path)
@@ -91,7 +91,7 @@ async def health():
         "model_hz": _bundle.get("hz"),
         "device_hz": config.DEVICE_HZ,
         "resample_method": config.RESAMPLE_METHOD,
-        "target_labels": config.TARGET_LABELS,
+        "target_labels": config.target_labels_for(_bundle.get("classes")),
         "nas_root": config.NAS_ROOT,
         "infer_workers": config.INFER_WORKERS,
         "tooth": tooth.status(),
@@ -229,7 +229,7 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         params = _stable_params()
         geom = (b["window_s"], b["stride_s"], b["label_mode"])
         result["segments"] = postprocess.stabilize(
-            result["windows"], b["classes"], config.TARGET_LABELS, *geom, params, algo=mode,
+            result["windows"], b["classes"], config.target_labels_for(b["classes"]), *geom, params, algo=mode,
         )
         cands = postprocess.scratch_candidates(result["windows"], result["segments"], *geom, params)
         # 按置信度从高到低裁到上限。裁掉多少要记下来——一小时几百条人根本审不过来，
