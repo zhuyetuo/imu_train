@@ -306,7 +306,18 @@ def load_records(args, cfg):
     elif args.dataset == "custom":
         from loader_custom import load_dataset_custom
         print("[preprocess] 自采数据集")
-        custom_cfg = cfg.get("custom", {})
+        custom_cfg = dict(cfg.get("custom", {}))
+        # --axes 3：只用加速度那三列。**不是随便砍一刀**：
+        #   - append_raw_tilt_batch 本来就按 acc 在 0:3 算姿态角，支持 C>=3
+        #   - features.py 也按 n_channels 自适应（<6 时跳过 gyro 相关那几组）
+        # 所以管线本来就能跑 3 轴，缺的只是一个入口。
+        #
+        # 什么时候该用 3 轴：**端侧只有加速度计的时候**。那种情况下用 6 轴训出来
+        # 的模型指标再好也代表不了端上的表现——那是拿一个板子上没有的信号在学。
+        if args.axes == 3:
+            cols = list(custom_cfg.get("sensor_cols") or [])
+            custom_cfg["sensor_cols"] = cols[:3]
+            print(f"[preprocess] --axes 3：只用 {custom_cfg['sensor_cols']}，丢掉陀螺仪")
         csv_path = args.raw_csv_custom or custom_cfg.get("csv_path", "data/raw_custom/data.csv")
         if "source_hz" in custom_cfg:
             cfg["source_hz"] = custom_cfg["source_hz"]
@@ -482,6 +493,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", required=True,
                         help="输出目录，如 data/processed_a")
     parser.add_argument("--config", default="configs/data.yaml")
+    parser.add_argument("--axes", type=int, default=6, choices=[3, 6],
+                        help="用几轴：6=加速度+陀螺仪（默认），3=只用加速度。"
+                             "端侧只有加速度计时要用 3，否则模型学的是板上没有的信号")
     parser.add_argument("--no_gravity_align", action="store_true",
                         help="不做重力轴对齐（默认启用）")
     parser.add_argument("--split_strategy", default="auto",

@@ -205,7 +205,7 @@ def sliding_windows(data, window_size, stride):
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", target_labels=None, is_dl=False, **kwargs):
+               resample_method="poly", target_labels=None, is_dl=False, n_channels=8, **kwargs):
     # merge_gap_s：不再使用（保留形参只是为了不破坏main()里_run_one()的
     # 调用签名，--merge_gap这个CLI参数还在，但已经名存实亡）。之前它是
     # 用来"桥接"间隔较近的同类别片段、掩盖低置信度噪声窗口的，但桥接
@@ -244,8 +244,13 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         return ts.iloc[orig] if ts is not None and orig >= 0 else None
 
     # 重力对齐 + 滑窗（跳过缺失率>30%的窗口）
-    data6 = np.concatenate([acc_ds, gyro_ds], axis=1)
-    X, start_indices = sliding_windows(data6, window_size, stride)
+    #
+    # **喂几个通道要跟模型训练时一致。** n_channels 是含姿态角那两列的总数
+    # （6 轴 → 8，3 轴 → 5），所以传感器通道是它减 2。拿 6 轴数据喂 3 轴模型
+    # （或反过来）特征维数就对不上，轻则报错，重则悄悄算出一串没意义的数。
+    sensor_ch = max(3, int(n_channels) - 2)
+    data_in = acc_ds if sensor_ch <= 3 else np.concatenate([acc_ds, gyro_ds], axis=1)
+    X, start_indices = sliding_windows(data_in, window_size, stride)
     if len(X) > 0:
         valid_windows = [
             valid_mask_ds[s:s + window_size].mean() >= 0.7
@@ -265,7 +270,9 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     if len(X) == 0:
         return
 
-    tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
+    # 姿态角是 append_raw_tilt_batch 追加在**最后两列**的。原来写死 6:8，
+    # 那只在 6 轴（acc+gyro）时才对；3 轴时追加的是 3:5，取 6:8 会越界
+    tilt = append_raw_tilt_batch(X)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
     if gravity_aligned:
         X_aligned = np.stack([gravity_align(X[i]) for i in range(len(X))])
     else:

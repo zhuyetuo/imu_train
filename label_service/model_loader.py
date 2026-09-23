@@ -14,10 +14,13 @@ from infer_csv_scratch import _load_dl_model  # src/ 已由 app.py 加进 sys.pa
 
 
 def load_model_bundle(model_path: str) -> dict:
-    """返回 dict: model, classes, is_dl, gravity_aligned, hz, window_s, stride_s, label_mode"""
+    """返回 dict: model, classes, is_dl, gravity_aligned, hz, window_s, stride_s, label_mode, n_channels"""
     is_dl = model_path.endswith(".pt")
     classes, gravity_aligned, t_hz, t_window_s, t_stride_s = [], True, 16, 2.0, 1.0
     label_mode = "majority"
+    # 这个模型吃几个通道（含姿态角两列：6 轴 → 8，3 轴 → 5）。
+    # 老模型的 json 里没有这一项，默认 8 就是原来的行为
+    n_channels = 8
     if is_dl:
         model, dl_meta = _load_dl_model(model_path)
         classes         = dl_meta["classes"]
@@ -26,6 +29,7 @@ def load_model_bundle(model_path: str) -> dict:
         t_window_s      = dl_meta["window_size"] / t_hz
         t_stride_s      = dl_meta["stride"] / t_hz
         label_mode      = dl_meta.get("label_mode", "majority")
+        n_channels      = int(dl_meta.get("n_channels", 8))
     else:
         model = joblib.load(model_path)
         meta_path = model_path.replace(".pkl", ".json")
@@ -38,12 +42,15 @@ def load_model_bundle(model_path: str) -> dict:
             t_window_s      = float(meta.get("window_s", 2.0))
             t_stride_s      = float(meta.get("stride_s", 1.0))
             label_mode      = meta.get("label_mode", "majority")
+            n_channels      = int(meta.get("n_channels", 8))
         else:
             classes = list(model.classes_) if hasattr(model, "classes_") else []
     print(f"[模型] 采样率={t_hz}Hz  窗口={t_window_s}s  步长={t_stride_s}s  "
-          f"重力对齐={gravity_aligned}  label_mode={label_mode}  类别={classes}")
+          f"重力对齐={gravity_aligned}  label_mode={label_mode}  "
+          f"通道={n_channels}（{'3 轴·只有加速度' if n_channels < 8 else '6 轴·加速度+陀螺仪'}）  类别={classes}")
     return {
         "model": model, "classes": classes, "is_dl": is_dl,
         "gravity_aligned": gravity_aligned, "hz": t_hz,
         "window_s": t_window_s, "stride_s": t_stride_s, "label_mode": label_mode,
+        "n_channels": n_channels,
     }

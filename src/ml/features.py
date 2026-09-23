@@ -142,8 +142,23 @@ def _feature_dim(window_size: int, n_channels: int, hz: int) -> int:
     return len(_extract_one(dummy, hz))
 
 
+def n_sensor_channels(n_channels: int) -> int:
+    """总通道里有几个是**传感器**通道（其余两个是追加的姿态角 pitch/roll）。
+
+    6 轴：acc3 + gyro3 + pitch/roll = 8 → 6
+    3 轴：acc3            + pitch/roll = 5 → 3
+
+    为什么要单独算：频域特征只对传感器通道提，姿态角是慢变量、不是振荡信号，
+    对它做 FFT 没有意义。原来写死 n_ch=6，6 轴时正好等于传感器通道数，
+    看不出问题；一上 3 轴（5 通道）就变成"把 pitch/roll 也当振荡信号算了"，
+    而且特征名还会把它们叫成 gyr_x/gyr_y。
+    """
+    return max(3, int(n_channels) - 2)
+
+
 def _extract_one(window: np.ndarray, hz: int) -> np.ndarray:
-    parts = [_time_features(window), _freq_features(window, hz, n_ch=6)]
+    parts = [_time_features(window),
+             _freq_features(window, hz, n_ch=n_sensor_channels(window.shape[1]))]
     if window.shape[1] >= 6:
         parts.append(_global_features(window))
         parts.append(_magnitude_features(window, hz))
@@ -168,13 +183,19 @@ def feature_names(n_channels: int) -> list:
     """特征名列表，顺序必须与 _extract_one 的拼接顺序完全一致：
     时域(全部通道) → 频域(仅前6通道 acc+gyro) → 全局(SMA+轴间相关)
     → acc/gyro模长(时域+频域) → acc-jerk模长(时域)，后三组仅当 n_channels>=6"""
+    # 通道名：前面是传感器通道，**最后两个永远是 pitch/roll**。
+    # 按下标直接查 CHANNEL_NAMES 的话，3 轴时第 4、5 个通道（其实是 pitch/roll）
+    # 会被叫成 gyr_x/gyr_y——数值没错，但看特征重要性时完全是误导
+    n_sensor = n_sensor_channels(n_channels)
+    chan = [CHANNEL_NAMES[c] if c < len(CHANNEL_NAMES) else f"ch{c}" for c in range(n_sensor)]
+    chan += CHANNEL_NAMES[6:8][: max(0, n_channels - n_sensor)]
+
     names = []
     for ch in range(n_channels):
-        ch_name = CHANNEL_NAMES[ch] if ch < len(CHANNEL_NAMES) else f"ch{ch}"
+        ch_name = chan[ch] if ch < len(chan) else f"ch{ch}"
         names.extend(f"{ch_name}_{feat}" for feat in TIME_FEAT_NAMES)
-    for ch in range(min(6, n_channels)):
-        ch_name = CHANNEL_NAMES[ch] if ch < len(CHANNEL_NAMES) else f"ch{ch}"
-        names.extend(f"{ch_name}_{feat}" for feat in FREQ_FEAT_NAMES)
+    for ch in range(min(n_sensor, n_channels)):
+        names.extend(f"{chan[ch]}_{feat}" for feat in FREQ_FEAT_NAMES)
     if n_channels >= 6:
         names.extend(GLOBAL_FEAT_NAMES)
         names.extend(MAG_FEAT_NAMES)
