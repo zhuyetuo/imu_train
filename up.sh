@@ -117,22 +117,21 @@ if [ "$SUB" = "deploy" ]; then
         export ALGO_TINYML_HOST
 
         line "label_service（端口 8383）+ edge-service（端口 8900）"
-        # 要不要重建镜像：看这次 pull 有没有动 Dockerfile/依赖；**另外直接探一下现有镜像**——
-        # 人手动 pull 过、或者上次重建没成，git diff 看不出来，而镜像里缺东西的表现是
-        # 「导出到端侧」报 No such file or directory: 'gcc'（2026-09-24 就是这样）
-        IMG="imu-train-label-service$([ -n "$GPU_FLAG" ] && echo ':gpu')"
-        image_lacks() {   # 镜像里没有 $1 这个命令（或镜像还不存在）→ 0
-            [ "${DRY_RUN:-0}" = "1" ] && return 1
-            ! docker run --rm --entrypoint sh "$IMG" -c "command -v $1" >/dev/null 2>&1
-        }
-        if { [ "$OLD_REV" != "$NEW_REV" ] && [ -n "$(git diff --name-only "$OLD_REV" "$NEW_REV" -- label_service/Dockerfile label_service/requirements-docker.txt 2>/dev/null)" ]; } \
-           || image_lacks gcc; then
-            echo "  依赖变了（或镜像里缺 gcc）→ 重建镜像（冷缓存十几分钟）"
+        if [ "$OLD_REV" != "$NEW_REV" ] && [ -n "$(git diff --name-only "$OLD_REV" "$NEW_REV" -- label_service/Dockerfile label_service/requirements-docker.txt 2>/dev/null)" ]; then
+            echo "  依赖变了 → 重建镜像（冷缓存十几分钟）"
             deploy_run bash label_service/up.sh $GPU_FLAG || FAILED+=("label_service 重建没成")
         else
             # -u：镜像不动，配置/环境变量变了就重建容器；-d 重启让挂载的新代码生效
             { deploy_run bash label_service/up.sh $GPU_FLAG -u && deploy_run bash label_service/up.sh $GPU_FLAG -d; } \
                 || FAILED+=("label_service 重启没成")
+        fi
+        # **探一下跑着的容器里有没有 gcc**（端侧那条线要它）。git diff 看不出两种情况：
+        # 人手动 pull 过（这次 diff 是空的）、或者镜像重建过但旧容器没重建——
+        # 容器一直用它创建时的那份镜像。表现都是「导出到端侧」报 No such file: 'gcc'
+        # （2026-09-24 两次都撞上了）。缺了就连镜像带容器一起重建
+        if [ "${DRY_RUN:-0}" != "1" ] && ! (cd label_service && docker compose -f docker-compose.yml exec -T label-service sh -c "command -v gcc" >/dev/null 2>&1); then
+            echo "  容器里没有 gcc → 重建镜像并重建容器（冷缓存十几分钟）"
+            deploy_run bash label_service/up.sh $GPU_FLAG --force-recreate || FAILED+=("label_service 重建没成")
         fi
     fi
     if want vision; then
