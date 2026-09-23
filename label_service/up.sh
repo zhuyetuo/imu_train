@@ -76,6 +76,8 @@ if [[ "${1:-}" =~ ^(down|stop|ps|logs|restart)$ ]]; then
   exec "${COMPOSE[@]}" "$@"
 fi
 
+# 构建前挑最快的 PyPI / torch 源，钉进 .env（挑过就不再测，见 pick_mirrors.sh）
+bash pick_mirrors.sh || true
 "${COMPOSE[@]}" up -d --build "$@"
 
 [ -f .env ] && set -a && source .env && set +a
