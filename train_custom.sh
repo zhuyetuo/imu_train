@@ -595,6 +595,7 @@ else
       --label "$_lbl" \
       --hz "$HZ" \
       --n_aug "$N_AUG" \
+      --axes "$AXES" \
       $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
       $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
     SYNTHETIC_SPEC_ARGS+=(--synthetic_spec "${_lbl}:${_sp}")

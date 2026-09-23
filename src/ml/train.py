@@ -168,10 +168,30 @@ def main(args):
 
         for syn_label, syn_path, syn_hz in synthetic_specs:
             syn = np.load(syn_path)
-            X_syn = syn["X"]                          # (N, window_size, 6) 原始未对齐 acc+gyro
+            X_syn = syn["X"]                          # (N, window_size, 6或3) 原始未对齐 acc(+gyro)
+            # 合成数据的传感器通道数要跟真实数据一致。真实数据是预处理之后的，
+            # 已经追加了姿态角两列，所以它的传感器通道 = 总数 - 2。
+            #   合成的多（6 轴合成配 3 轴真实）：只取前 3 路加速度——加速度那三列
+            #     两边是同一个东西，这样切跟按 3 轴重新合成一遍完全等价，旧的合成
+            #     文件也还能用
+            #   合成的少（3 轴合成配 6 轴真实）：补不出陀螺仪，只能报错，而且要
+            #     说人话——numpy 那句"dimension 2 size 5 vs 8"没人看得懂
+            if X_tr.ndim == 3:
+                want_sensor = X_tr.shape[2] - 2
+                if X_syn.shape[2] > want_sensor:
+                    print(f"[ml/train] 合成数据 {X_syn.shape[2]} 路、真实数据 {want_sensor} 路："
+                          f"只取合成数据的前 {want_sensor} 路（加速度）")
+                    X_syn = X_syn[:, :, :want_sensor]
+                elif X_syn.shape[2] < want_sensor:
+                    raise ValueError(
+                        f"合成数据只有 {X_syn.shape[2]} 路传感器，真实数据是 {want_sensor} 路——"
+                        f"合成数据是按 3 轴生成的，而这次按 6 轴训练。删掉 {syn_path} 重新生成，"
+                        f"或者训练也改成 3 轴")
             # 合成数据历史上从未做过重力对齐，真实数据现在是 8 通道（对齐acc/gyro + 原始tilt），
             # 这里补齐同样的处理，否则和真实数据的特征空间不一致，且通道数拼接会直接报错
-            tilt_syn = append_raw_tilt_batch(X_syn)[:, :, 6:8]
+            # 姿态角是追加在**最后两列**的。原来写死 6:8，那只在 6 轴时对；
+            # 3 轴时追加的是 3:5（推理那边同一个坑，上次修了那边漏了这边）
+            tilt_syn = append_raw_tilt_batch(X_syn)[:, :, -2:]
             if gravity_aligned_meta:
                 X_syn = gravity_align_batch(X_syn)
             X_syn = np.concatenate([X_syn, tilt_syn], axis=2)

@@ -96,7 +96,7 @@ def _load_sensor(url, csv_dir, name):
     return df, acc_cols, gyro_cols
 
 
-def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbose=True):
+def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbose=True, axes=6):
     """从 Label Studio JSON 中提取所有 target_label 的原始片段，返回 list of (N,6) ndarray。
     verbose=True 时打印每一类跳过原因的计数，方便核对"标注里明明有N段，怎么只提取出M个"。"""
     segments = []
@@ -185,6 +185,13 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbos
                     print(f"  [跳过] task{task_id} {t0_str} 只有 {len(sub)} 行")
                     continue
                 acc  = sub[acc_cols].values.astype(np.float32)
+                # 3 轴：只要加速度。**必须跟真实数据一致**——真实数据按 --axes 3
+                # 预处理成了 3 路，这里还吐 6 路的话，train.py 把两边拼起来时
+                # 通道数对不上直接崩（2026-09-23 第一次 3 轴训练，「带合成」那一
+                # 版就是这么挂的；「纯标注」那一版没用合成数据，所以训完了）
+                if axes == 3:
+                    segments.append(acc)
+                    continue
                 gyro = sub[gyro_cols].values.astype(np.float32) if gyro_cols \
                        else np.zeros((len(sub), 3), dtype=np.float32)
                 segments.append(np.concatenate([acc, gyro], axis=1))
@@ -320,6 +327,8 @@ def main():
                         help="已预处理的数据目录，用于自动推算 target_windows（默认：自动推算时必填）")
     parser.add_argument("--remap",    default="",   help="remap YAML 路径（用于自动推算时的类别映射）")
     parser.add_argument("--seed",     type=int,   default=42)
+    parser.add_argument("--axes",     type=int,   default=6, choices=[3, 6],
+                        help="用几轴，必须跟真实数据的预处理一致（6=加速度+陀螺仪，3=只用加速度）")
     args = parser.parse_args()
 
     rng         = np.random.default_rng(args.seed)
@@ -350,7 +359,7 @@ def main():
     print(f"\n加载 JSON: {len(tasks)} 个 task")
 
     print(f"\n── 提取 '{args.label}' 片段 ──")
-    segments = extract_segments_from_json(tasks, args.csv_dir, args.label)
+    segments = extract_segments_from_json(tasks, args.csv_dir, args.label, axes=args.axes)
     print(f"\n共提取 {len(segments)} 个原始片段")
     if not segments:
         print("[错误] 未找到任何片段，请检查 --label 名称和 JSON 内容")

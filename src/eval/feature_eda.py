@@ -127,7 +127,7 @@ def main():
     label_feats = {}
     from tqdm import tqdm
     for lbl, X in tqdm(label_X.items(), desc="按类别提取特征", unit="类别"):
-        tilt = append_raw_tilt_batch(X)[:, :, 6:8]
+        tilt = append_raw_tilt_batch(X)[:, :, -2:]
         X_aligned = gravity_align_batch(X)
         X_full = np.concatenate([X_aligned, tilt], axis=2)
         label_feats[lbl] = extract_features(X_full, args.hz, show_progress=True)
