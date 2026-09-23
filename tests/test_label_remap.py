@@ -178,6 +178,17 @@ def test_端侧尺寸用ml_edge配置():
     assert "--ml_config" not in jobs.build_command({"date": "d"}, "rf", None)
 
 
+def test_端侧尺寸的rf跟板上edge_rf_d10同规格():
+    """板上现役的 edge_rf_d10 是 20 棵 × 深 10，flash 装得下是验证过的。"""
+    import yaml
+
+    cmd = jobs.build_command({"date": "d", "edge_size": True}, "rf", None)
+    cfg_path = cmd[cmd.index("--ml_config") + 1]
+    assert cfg_path == "configs/ml_edge_rf_d10.yaml"
+    rf = yaml.safe_load(open(cfg_path, encoding="utf-8"))["random_forest"]
+    assert rf["n_estimators"] == 20 and rf["max_depth"] == 10
+
+
 def test_训练脚本把ml_config转给两个train_py():
     """以前 train_custom.sh 不转发 --config，端侧那份配置只能绕开脚本手动跑。"""
     src = open("train_custom.sh", encoding="utf-8").read()

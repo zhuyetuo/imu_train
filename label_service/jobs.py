@@ -260,7 +260,10 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     # 端侧尺寸：用 configs/ml_edge.yaml 的超参（限深限棵数），模型才塞得进
     # 板子给模型留的约 128KB flash。默认那份是 200 棵不限深的森林，几十 MB
     if dataset_spec.get("edge_size"):
-        cmd += ["--ml_config", "configs/ml_edge.yaml"]
+        # rf 用跟板上现役 edge_rf_d10 同规格的那份（20 棵 × 深 10，flash 装得下
+        # 是被验证过的）；别的模型（xgb 等）用 ml_edge.yaml
+        cmd += ["--ml_config",
+                "configs/ml_edge_rf_d10.yaml" if model_type == "rf" else "configs/ml_edge.yaml"]
     # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
     if int(dataset_spec.get("axes") or 6) == 3:
         cmd += ["--axes", "3"]

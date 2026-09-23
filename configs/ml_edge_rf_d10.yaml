@@ -1,0 +1,64 @@
+# 端侧随机森林：**跟板上现在跑的 edge_rf_d10 同一个规格**——20 棵树 × 最大深度 10。
+#
+# 为什么照抄它：algo_tinyml 里 core/models/edge_rf_d10 实测 20 棵、11810 个节点，
+# 已经在板子上跑着，flash 装得下是被验证过的。按同一个规格训，训出来的模型体积
+# 跟它一个量级，导出到端侧不会因为尺寸出意外。
+#
+# 跟 configs/ml_edge.yaml 的区别只有 random_forest 这一节：那边为了压到很小
+# 限深 4，注释里也写了已经欠拟合；这边是板上现役 RF 的规格。
+#
+# 在网页「提交训练」里勾「端侧尺寸」+ 模型选 rf 就用这份；选 xgb 用 ml_edge.yaml。
+
+random_forest:
+  n_estimators: 20
+  max_depth: 10
+  n_jobs: -1
+  random_state: 42
+
+xgboost:
+  # 端侧的主力候选。depth 6 是 GBDT 的常规配置不是妥协——boosting 一轮轮拟合
+  # 残差，偏差靠轮数补，所以它天生就适合浅树。
+  n_estimators: 50
+  max_depth: 6
+  learning_rate: 0.2      # 轮数从 200 降到 50，学习率相应调大，否则欠拟合
+  n_jobs: -1
+  random_state: 42
+
+lightgbm:
+  # num_leaves 直接控制每棵树的叶子数——对端侧来说这比 max_depth 更好使，
+  # 因为它直接就是"这棵树多少个叶子"，不用再去猜树满不满。
+  # 31 个叶子 → 61 个节点；50 轮 × 3 类 × 61 × 20B ≈ 179KB（上界）
+  n_estimators: 50
+  max_depth: 6
+  num_leaves: 31
+  learning_rate: 0.2
+  n_jobs: -1
+  random_state: 42
+
+catboost:
+  iterations: 50
+  depth: 6
+  learning_rate: 0.2
+  random_state: 42
+
+# 下面这些不是端侧候选，原样抄过来只是为了这个配置文件能被完整加载
+extra_trees:
+  n_estimators: 300
+  max_depth: null
+  n_jobs: -1
+  random_state: 42
+
+svm:
+  C: 1.0
+  kernel: rbf
+  probability: true
+
+histgb:
+  n_estimators: 300
+  max_depth: null
+  learning_rate: 0.1
+  random_state: 42
+
+features:
+  time_domain: [mean, std, min, max, range, rms, skewness, kurtosis, zero_crossing_rate]
+  freq_domain: [spectral_mean, spectral_std, dominant_freq, spectral_entropy]
