@@ -250,7 +250,15 @@ fi
 # 3 轴和 6 轴的窗口张量通道数不同，**绝不能共用一个目录**：先跑 6 轴再跑 3 轴
 # 的话，没加 --clean 就会直接拿旧的 6 轴 npz 接着训，训出来的模型标着 3 轴、
 # 实际吃的是 6 轴数据，而且一点报错都没有
-PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}$( [[ "$AXES" == "3" ]] && echo "_acc3" )"
+# **不能写成 $( [[ "$AXES" == "3" ]] && echo _acc3 )**：6 轴时 [[ ]] 返回 1，
+# 命令替换的退出码就是 1，而脚本开着 set -e——整个脚本会在这一行悄无声息
+# 地退出（此时输出还没 tee 进日志，一个字都不打）。第一版就是这么写的，
+# 结果所有默认 6 轴的训练都起不来
+_axes_suffix=""
+if [[ "$AXES" == "3" ]]; then
+  _axes_suffix="_acc3"
+fi
+PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}${_axes_suffix}"
 DATA_DIR="data/raw_custom/${DATE}"
 CSV="${DATA_DIR}/merged_${DATE}.csv"
 JSON="${DATA_DIR}/merged_tmp.json"
@@ -323,10 +331,20 @@ fi
 # 派生文件：merged_tmp.json/merged_<DATE>.csv/processed_dir/results/合成npz。
 # --clean 或 merged_tmp.json 不存在时自动重新合并，不用再手动跑那段
 # python -c 合并脚本）──
-if [[ ! -f "$JSON" || "$CLEAN" == "1" ]]; then
+# 标注平台提交的训练走的是另一条路：没有 project-*.json，label_service 直接把
+# 导出的数据集整理成 merged_tmp.json 放好了。**这种情况下 merged_tmp.json 就是
+# 源文件，不是派生物**——而平台总是带 --clean 提交，原来的判断一见 --clean 就
+# 去找 project-*.json、找不到就退出，于是网页上提交的训练每一次都挂在这一步。
+_json_is_source=0
+if [[ -f "$JSON" ]] && [[ -z "$(find "$DATA_DIR" -maxdepth 1 -name 'project-*.json' -print -quit 2>/dev/null)" ]]; then
+  _json_is_source=1
+  echo ""
+  echo "▶ 步骤0：$DATA_DIR 下没有 project-*.json，直接用现成的 $JSON（标注平台导出的就是这个）"
+fi
+if [[ "$_json_is_source" == "0" ]] && [[ ! -f "$JSON" || "$CLEAN" == "1" ]]; then
   n_project_json=$(find "$DATA_DIR" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
   if [[ "$n_project_json" -eq 0 ]]; then
-    echo "[错误] $DATA_DIR 下没有找到任何 project-*.json"
+    echo "[错误] $DATA_DIR 下没有找到任何 project-*.json，也没有 merged_tmp.json"
     echo "需要先把 Label Studio 导出的 project-*.json 放到这个目录下"
     exit 1
   fi
@@ -395,10 +413,14 @@ if [[ ${#EXTRA_DATES[@]} -gt 0 ]]; then
     _ejson="${_edata_dir}/merged_tmp.json"
     _ecsv="${_edata_dir}/merged_${_edate}.csv"
 
-    if [[ ! -f "$_ejson" || "$CLEAN" == "1" ]]; then
-      _en=$(find "$_edata_dir" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
+    # 跟主批次同一个道理：平台「一起训练」选的那几份，label_service 也是直接
+    # 写好 merged_tmp.json、没有 project-*.json，这时它就是源文件
+    _en=$(find "$_edata_dir" -maxdepth 1 -name "project-*.json" 2>/dev/null | wc -l)
+    if [[ "$_en" -eq 0 && -f "$_ejson" ]]; then
+      echo "  ▶ $_edata_dir 下没有 project-*.json，直接用现成的 $_ejson"
+    elif [[ ! -f "$_ejson" || "$CLEAN" == "1" ]]; then
       if [[ "$_en" -eq 0 ]]; then
-        echo "[错误] $_edata_dir 下没有找到任何 project-*.json"
+        echo "[错误] $_edata_dir 下没有找到任何 project-*.json，也没有 merged_tmp.json"
         exit 1
       fi
       echo "  ▶ 合并 $_edata_dir 下 $_en 个 project-*.json → $_ejson ..."

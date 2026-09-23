@@ -482,6 +482,31 @@ async def get_train_status(job_id: int):
     return job
 
 
+@app.get("/api/v1/label/train/{job_id}/log")
+async def get_train_log(job_id: int, offset: int = 0):
+    """从 offset 往后读训练日志，前端每隔几秒接着要一段，拼起来就是实时滚动的日志。
+
+    训练动辄几十分钟，以前在网页上只能看到「排队中/训练中」，出错了也得去算法机
+    上翻文件——这次就是这样：步骤 0 就挂了，网页上还一直显示排队中。
+    """
+    r = await asyncio.to_thread(jobs.read_log, job_id, offset)
+    if r is None:
+        raise HTTPException(404, f"训练任务 #{job_id} 不存在")
+    return r
+
+
+@app.delete("/api/v1/label/train/{job_id}")
+async def delete_train_job(job_id: int):
+    """删掉这一版训练的全部产物（模型、预处理数据、日志……）。
+
+    还在跑的、以及模型正是现在推理在用的那个，不让删（409）。
+    """
+    try:
+        return await asyncio.to_thread(jobs.delete_job, job_id, _bundle.get("model_path"))
+    except jobs.JobBusy as e:
+        raise HTTPException(409, str(e)) from e
+
+
 # ── /tooth ──────────────────────────────────────────────────────────────
 
 class ToothDetectRequest(BaseModel):
