@@ -43,12 +43,14 @@ RUN pip install --no-cache-dir -U "pip>=24.1"
 
 # torch 先单独装 CPU 版：ultralytics 依赖它，但容器里没有 GPU，装默认版会连带
 # 拉 nvidia_cu* 那一堆 CUDA 轮子（好几个 G，全是用不上的）。CPU 版约 200MB。
-# torch 本体从 torch 源拿（+cpu / +cu128 那种带后缀的版本号比 PyPI 上的高，pip 会
-# 优先选它），它的依赖（filelock、sympy、nvidia-* …）从 PIP_INDEX_URL 拿。
-# 只给 --index-url torch源 的话，依赖会跟着 torch 源的链接走到那个镜像自己的 pypi
-# 上——南大那个 pypi 一个 2KB 的包都能超时（2026-09-24）。
-# **这行别动**：改一个字符这一层就作废，几个 G 的 CUDA 包又要重下。要加东西加在最后那层 apt 里
-RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" --extra-index-url "${TORCH_INDEX_URL}" torch torchvision
+# 分两步：torch 本体（--no-deps）只从 torch 源拿；然后再装一遍让 pip 从 PIP_INDEX_URL
+# 补齐它的依赖（filelock、sympy、nvidia-* …，本体已经装好了不会动）。
+# 为什么不能一步 --extra-index-url：两个源都有 typing_extensions 时 pip 会挑到
+# torch 源那边，而它指向那个镜像自己的 pypi——南大那个一个 2KB 的包都能超时
+# （2026-09-24 两次撞上）。
+# **这两行别动**：改一个字符这一层就作废，几个 G 的 CUDA 包又要重下。要加东西加在最后那层 apt 里
+RUN pip install --no-cache-dir --no-deps --index-url "${TORCH_INDEX_URL}" torch torchvision \
+    && pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" torch torchvision
 
 # 依赖单独一层：仓库代码变了不会让 pip 重装一遍
 COPY label_service/requirements-docker.txt /tmp/requirements.txt
