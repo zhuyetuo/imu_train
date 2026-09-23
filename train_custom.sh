@@ -652,10 +652,17 @@ _throttle() {
     printf '%s\n' "$line"
   done
 }
-tail -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[A] /' &
+# --pid：训练进程一退，tail 把剩下的打完就自己退，整条管道跟着自然结束。
+#
+# **不能靠事后 kill**：$! 拿到的是管道**最后一个**进程（sed）的 PID，kill 它
+# 只杀了 sed，前头的 tail -f 还在跟着一个再也不会增长的文件、永远不退——而下面
+# 的 wait 等的是整条管道，于是脚本卡死在「方案 A 完成」之后，模型路径永远打不
+# 出来，训练任务永远「训练中」（2026-09-23 第一次跑通网页训练时就是这样）。
+# 以前在终端里跑时，人看到「方案 A 完成」就 Ctrl+C 了，所以一直没暴露
+tail --pid="$PID_A" -f -n +1 "$LOG_NO_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[A] /' &
 TAIL_A=$!
 if [[ "$SKIP_SYN" != "1" ]]; then
-  tail -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[B] /' &
+  tail --pid="$PID_B" -f -n +1 "$LOG_WITH_SYN" 2>/dev/null | stdbuf -oL tr '\r' '\n' | _throttle | sed -u 's/^/[B] /' &
   TAIL_B=$!
 fi
 
@@ -664,8 +671,12 @@ if [[ "$SKIP_SYN" != "1" ]]; then
   wait $PID_B && echo "  ✅ 方案 B 完成" || echo "  ❌ 方案 B 失败，见 $LOG_WITH_SYN"
 fi
 
-kill "$TAIL_A" "${TAIL_B:-}" 2>/dev/null || true
-wait "$TAIL_A" "${TAIL_B:-}" 2>/dev/null || true
+# 不 kill：tail 带了 --pid，训练一结束它就自己收尾退出。提前 kill 还会把最后
+# 几行（正好是结果那几行）丢掉
+wait "$TAIL_A" 2>/dev/null || true
+if [[ -n "${TAIL_B:-}" ]]; then
+  wait "$TAIL_B" 2>/dev/null || true
+fi
 
 # ── 打印结果对比（过滤进度条噪音）────────────────────────
 _show_log() {

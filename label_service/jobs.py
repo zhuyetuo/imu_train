@@ -55,9 +55,28 @@ def get_job(job_id: int) -> dict | None:
 
 
 def _next_job_id() -> int:
+    """下一个任务号。**只增不减**，删掉的号永远不再用。
+
+    以前是"现有最大号 + 1"：旧任务一删光就从 1 重来，删掉最新那个也会被下一个
+    复用（2026-09-23：平台上第 4 版，算法这边却是 job1）。平台记录里存的就是这个
+    号，复用了的话，一条没删干净的旧记录会指到一个毫不相干的新任务上，日志、
+    状态、模型全是别人的；它的工作目录（<数据集>__job<N>）也可能撞上残留。
+
+    计数器存在一个小文件里；文件丢了就退回"现有最大号 + 1"，至少不会比现在差。
+    服务是单进程的，这一段中间没有 await，不会两个提交抢到同一个号。
+    """
     os.makedirs(config.JOBS_DIR, exist_ok=True)
     ids = [int(n[:-5]) for n in os.listdir(config.JOBS_DIR) if n.endswith(".json") and n[:-5].isdigit()]
-    return (max(ids) + 1) if ids else 1
+    counter_path = os.path.join(config.JOBS_DIR, ".next_id")
+    try:
+        with open(counter_path, encoding="utf-8") as f:
+            counter = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        counter = 0
+    nid = max(counter, (max(ids) + 1) if ids else 1)
+    with open(counter_path, "w", encoding="utf-8") as f:
+        f.write(str(nid + 1))
+    return nid
 
 
 def apply_label_remap(tasks: list, remap: dict) -> int:
@@ -334,8 +353,11 @@ async def run_job(job_id: int) -> None:
             job["pid"] = proc.pid
             _save(job)
             await proc.wait()
-        if get_job(job_id) and get_job(job_id).get("status") == STATUS_FAILED:
-            return      # 人手动停掉的，cancel_job 已经把状态和原因写好了
+        cur = get_job(job_id)
+        if cur and cur.get("status") != STATUS_RUNNING:
+            # 被人手动停掉的，cancel_job 已经收过尾了（可能是失败，也可能是"模型
+            # 其实存好了、按完成算"）。这里再按退出码判一次，会把它覆盖成失败
+            return
         with open(_log_path(job_id), encoding="utf-8", errors="replace") as f:
             stdout = f.read()
 
@@ -535,6 +557,64 @@ def _alive(pid: int | None) -> bool:
         return False
 
 
+_SAVED_DIR_RE = re.compile(r"结果保存至\s+(\S+?)/?\s*$", re.MULTILINE)
+
+
+def _recover_model(job: dict) -> str | None:
+    """脚本没正常走完时，看看模型其实存好了没有。存好了返回模型的绝对路径。
+
+    为什么要有：2026-09-23 第一次跑通网页训练，方案 A 已经训完存好，脚本却在
+    收尾时卡死（等一个永远不退的 tail），「模型路径:」那两行永远没打出来。重启
+    之后把它一律标成失败，等于把一个训好的模型扔了。
+
+    先认脚本最后那两行（纯标注/带合成）；没有就认 train.py 自己打的「结果保存至
+    <目录>」，拼出 ml_<模型>.pkl，**文件真在才算**。有带合成的就用带合成的，跟
+    正常结束时的取法一致。
+    """
+    try:
+        with open(_log_path(job["job_id"]), encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+
+    def _abs(p: str) -> str:
+        return p if os.path.isabs(p) else os.path.join(config.REPO_ROOT, p)
+
+    mp = parse_model_path(text)
+    if mp and os.path.isfile(_abs(mp)):
+        return _abs(mp)
+    found = []
+    for d in _SAVED_DIR_RE.findall(text):
+        cand = _abs(os.path.join(d.rstrip("/"), f"ml_{job.get('model_type') or 'rf'}.pkl"))
+        if os.path.isfile(cand):
+            found.append(cand)
+    if not found:
+        return None
+    syn = [p for p in found if "_syn" + os.sep in p or "_syn/" in p]
+    return (syn or found)[-1]
+
+
+def _finish_or_fail(job: dict, reason: str) -> None:
+    """异常结束的收尾：模型其实存好了就按成功算，没有才标失败。"""
+    mp = _recover_model(job)
+    if mp is None:
+        _mark_failed(job, reason)
+        return
+    job["status"] = STATUS_DONE
+    job["model_path"] = mp
+    job["model_version"] = job.get("tag") or f"{job.get('model_type')}_{job.get('created_at')}"
+    job["metrics"] = _load_metrics(mp)
+    job["error"] = None
+    job["finished_at"] = int(time.time())
+    _save(job)
+    try:
+        with open(_log_path(job["job_id"]), "a", encoding="utf-8") as f:
+            f.write(f"\n▶ 模型已经存好了（{reason}，但不影响结果）：{os.path.relpath(mp, config.REPO_ROOT)}\n")
+    except OSError:
+        pass
+    log.warning("训练任务 #%d %s，但模型已存好，按完成处理：%s", job["job_id"], reason, mp)
+
+
 def _mark_failed(job: dict, reason: str) -> None:
     job["status"] = STATUS_FAILED
     job["error"] = reason
@@ -574,7 +654,9 @@ def cancel_job(job_id: int) -> dict | None:
                 time.sleep(0.1)
             if not _alive(pid):
                 break
-    _mark_failed(job, "手动停止")
+    # 停之前模型已经存好了（比如方案 A 训完、脚本卡在收尾）：按完成算，别把训好
+    # 的模型跟着扔了
+    _finish_or_fail(job, "手动停止")
     log.info("训练任务 #%d 已手动停止", job_id)
     return job
 
@@ -600,7 +682,7 @@ def reconcile_orphans() -> list[int]:
             continue
         if _alive(job.get("pid")):
             continue        # 真还活着（极少见：服务没随容器一起重启）就别碰
-        _mark_failed(job, "训练服务重启了，这个任务当时还在跑，已经中断——重新提交就行")
+        _finish_or_fail(job, "训练服务重启了，这个任务当时还在跑，已经中断——重新提交就行")
         fixed.append(job["job_id"])
     if fixed:
         log.warning("启动时发现 %d 个中断的训练任务，已标成失败: %s", len(fixed), fixed)

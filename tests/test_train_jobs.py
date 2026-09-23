@@ -269,3 +269,103 @@ def test_一开跑就有日志_不是一直等日志(repo):
     i_first_write = src.index("▶ 整理数据集")
     i_prepare = src.index("await asyncio.to_thread(prepare_export")
     assert i_first_write < i_prepare, "得先往日志里写一句，再去整理数据集"
+
+
+# ── 任务号只增不减 ──────────────────────────────────────────────────────
+
+
+def test_删光了也不会从1重来(repo):
+    """以前是"现有最大号 + 1"：删光就从 1 重来（2026-09-23：平台第 4 版，这边是 job1）。
+    平台记录里存的就是这个号，复用了的话旧记录会指到别人的任务上。"""
+    a = jobs._next_job_id()
+    b = jobs._next_job_id()
+    assert b == a + 1
+    for n in os.listdir(repo / "jobs"):
+        if n.endswith(".json"):
+            os.remove(repo / "jobs" / n)
+    assert jobs._next_job_id() == b + 1
+
+
+def test_删掉最新那个_号也不复用(repo):
+    _job(repo, 1)
+    _job(repo, 2)
+    n = jobs._next_job_id()
+    assert n == 3
+    os.remove(repo / "jobs" / "2.json")
+    assert jobs._next_job_id() == 4
+
+
+def test_计数器文件丢了_退回按现有最大号(repo):
+    """至少不比原来差。"""
+    _job(repo, 7)
+    counter = repo / "jobs" / ".next_id"
+    if counter.exists():
+        counter.unlink()
+    assert jobs._next_job_id() == 8
+
+
+def test_脚本里的tail要带pid_不能靠事后kill():
+    """$! 拿到的是管道最后一个进程（sed）。kill 它只杀了 sed，前头的 tail -f 永远
+    不退，后面 wait 整条管道就卡死——脚本停在「方案 A 完成」之后，模型路径打不
+    出来，任务永远「训练中」。"""
+    src = open("train_custom.sh", encoding="utf-8").read()
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if s.startswith("tail ") and " -f " in f" {s} ":
+            assert "--pid=" in s, f"tail -f 没带 --pid，训练结束后会一直跟着文件不退：{s}"
+    assert 'kill "$TAIL_A"' not in src
+
+
+# ── 模型其实存好了，别扔 ────────────────────────────────────────────────
+
+
+def _saved_model(repo, jid):
+    d = repo / "results" / f"processed_ds_a__job{jid}_missing_none_acc3" / "16hz_remap_ui_job1" / "rf"
+    _touch(d / "ml_rf.pkl")
+    (d / "ml_rf.json").write_text(json.dumps({"macro_f1": 0.53, "classes": ["抓挠-头颈耳"]}), encoding="utf-8")
+    return d
+
+
+def test_重启时模型已经存好了_按完成算(repo):
+    """2026-09-23：方案 A 训完存好，脚本在收尾时卡死，「模型路径:」没打出来。
+    重启后一律标成失败，等于把训好的模型扔了。"""
+    d = _saved_model(repo, 30)
+    (repo / "jobs" / "30.log").write_text(
+        f"[A] [ml/train] 结果保存至 {os.path.relpath(d, repo)}/\n  ✅ 方案 A 完成\n", encoding="utf-8")
+    _job(repo, 30, status="running", pid=_dead_pid())
+    jobs.reconcile_orphans()
+    j = jobs.get_job(30)
+    assert j["status"] == "done"
+    assert j["model_path"].endswith("ml_rf.pkl")
+    assert j["metrics"]["macro_f1"] == 0.53, "指标也要带上，网页上才有 F1"
+
+
+def test_日志说存了但文件不在_照样算失败(repo):
+    """只认真存在的文件——日志里写了、文件被删了的，不能当成功。"""
+    (repo / "jobs" / "31.log").write_text("[A] [ml/train] 结果保存至 results/nope/rf/\n", encoding="utf-8")
+    _job(repo, 31, status="running", pid=_dead_pid())
+    jobs.reconcile_orphans()
+    assert jobs.get_job(31)["status"] == "failed"
+
+
+def test_手动停止时模型已经存好了_也按完成算(repo):
+    d = _saved_model(repo, 32)
+    (repo / "jobs" / "32.log").write_text(f"结果保存至 {os.path.relpath(d, repo)}/\n", encoding="utf-8")
+    _job(repo, 32, status="running", pid=_dead_pid())
+    j = jobs.cancel_job(32)
+    assert j["status"] == "done" and j["model_path"].endswith("ml_rf.pkl")
+
+
+def test_有带合成的就用带合成的(repo):
+    """跟正常结束时的取法一致。"""
+    a = repo / "results" / "p" / "16hz_r" / "rf"
+    b = repo / "results" / "p" / "16hz_r_syn" / "rf"
+    for d in (a, b):
+        _touch(d / "ml_rf.pkl")
+    (repo / "jobs" / "33.log").write_text(
+        f"[B] 结果保存至 {os.path.relpath(b, repo)}/\n[A] 结果保存至 {os.path.relpath(a, repo)}/\n", encoding="utf-8")
+    _job(repo, 33, status="running", pid=_dead_pid())
+    jobs.reconcile_orphans()
+    assert "_syn" in jobs.get_job(33)["model_path"]
