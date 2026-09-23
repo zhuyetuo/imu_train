@@ -38,15 +38,13 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 
 # torch 先单独装 CPU 版：ultralytics 依赖它，但容器里没有 GPU，装默认版会连带
 # 拉 nvidia_cu* 那一堆 CUDA 轮子（好几个 G，全是用不上的）。CPU 版约 200MB。
-# --mount=type=cache：下过的轮子留在构建机的缓存里。这一层哪天被迫重跑
-# （上面某层变了），也不用再从网上拉几百 MB 的 torch/CUDA 包
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --index-url "${TORCH_INDEX_URL}" torch torchvision
+# **这两行别动**：改一个字符这一层就作废，torch 那几百 MB 的 CUDA 包又要重下。
+# 要加东西加在最后那层 apt 里
+RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch torchvision
 
 # 依赖单独一层：仓库代码变了不会让 pip 重装一遍
 COPY label_service/requirements-docker.txt /tmp/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # gcc：端侧那条线（algo_tinyml）把板上那份 C 现场编成 .so 跑——端侧服务和
 # 「导出到端侧」都在这个镜像里，没有 gcc 两样都起不来。
