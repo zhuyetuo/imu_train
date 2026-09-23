@@ -112,7 +112,22 @@ def apply_label_remap(tasks: list, remap: dict) -> int:
     return n
 
 
-def prepare_export(dataset_spec: dict) -> None:
+def run_date(date: str, job_id: int | None) -> str:
+    """这个任务在 data/raw_custom、data/processed_*、results/ 底下用的名字。
+
+    **每个任务一份，互不相干。** 以前直接用数据集名，于是：
+      - 同一份数据集再训一次，train_custom.sh 的 --clean 先 rm -rf 掉上一版
+        的模型——训出来的每一版都只活到下一次提交为止
+      - 提交训练是并发跑的，两次用不同归并表的训练同时整理同一份数据集，
+        后一个会在前一个读到一半时把 merged_tmp.json 改写掉
+    带上任务号之后这两件事都不会发生，删某一版也只删它自己那一摊。
+
+    job_id 为 None（命令行手动跑、老调用方）时就是原来的数据集名。
+    """
+    return f"{date}__job{job_id}" if job_id is not None else date
+
+
+def prepare_export(dataset_spec: dict, job_id: int | None = None) -> None:
     """把 label_infra 导出的数据集整理成 train_custom.sh 认的样子。
 
     NAS 上是一份 Label Studio 格式 JSON，csv 字段是 NAS_ROOT 下的相对路径。
@@ -123,10 +138,12 @@ def prepare_export(dataset_spec: dict) -> None:
     **主数据集和一起训练的那几份走同一条路。** 以前只整理主的，额外批次得事先
     自己躺在 data/raw_custom/ 下——界面上根本没法选，多数据集训练等于用不了。
     """
-    _prepare_one(dataset_spec.get("export_json"), dataset_spec["date"],
+    _prepare_one(dataset_spec.get("export_json"), run_date(dataset_spec["date"], job_id),
                  dataset_spec.get("label_remap") or {})
     for extra in dataset_spec.get("extra_datasets") or []:
-        _prepare_one(extra.get("export_json"), extra["date"],
+        # 一起训练的那几份也要按任务隔离：归并表是按任务给的，同一份老数据集
+        # 被两个任务用不同的归并表同时整理，会互相改写
+        _prepare_one(extra.get("export_json"), run_date(extra["date"], job_id),
                      dataset_spec.get("label_remap") or {})
 
 
@@ -164,7 +181,7 @@ def _prepare_one(export_json: str | None, date: str, label_remap: dict) -> None:
              f"（按类别映射改写了 {n_remapped} 段）" if n_remapped else "")
 
 
-def write_runtime_remap(dataset_spec: dict) -> str | None:
+def write_runtime_remap(dataset_spec: dict, job_id: int | None = None) -> str | None:
     """把界面那张归并表落成一份 remap 配置，返回相对仓库根的路径。没有就 None。
 
     ## 为什么这一步是"能不能识别二级标签"的关键
@@ -188,11 +205,15 @@ def write_runtime_remap(dataset_spec: dict) -> str | None:
     classes = list(dict.fromkeys(remap.values()))
     if not classes:
         return None
-    safe = re.sub(r"[^0-9A-Za-z_.-]", "_", dataset_spec["date"])[:60]
-    rel = os.path.join("configs", f"remap_ui_{safe}.yaml")
+    # 按任务号起名：每一版模型都能对回当初用的是哪张表，而不是"每次提交都
+    # 覆盖同一个文件"——那样训完第二版，第一版用的归并表就再也找不回来了
+    safe = re.sub(r"[^0-9A-Za-z_.-]", "_", str(job_id) if job_id is not None else dataset_spec["date"])[:60]
+    rel = os.path.join("configs", f"remap_ui_job{safe}.yaml" if job_id is not None else f"remap_ui_{safe}.yaml")
     path = os.path.join(config.REPO_ROOT, rel)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("# 由标注平台「提交训练」里的归并表生成，每次提交都会覆盖。\n")
+        f.write("# 由标注平台「提交训练」里的归并表生成。\n")
+        if job_id is not None:
+            f.write(f"# 训练任务 #{job_id}\n")
         f.write(f"# 数据集: {dataset_spec['date']}\n")
         f.write("# 左边是归并之后的类别名，右边是训练类别——映射到自己就是自成一类。\n")
         for c in classes:
@@ -201,8 +222,9 @@ def write_runtime_remap(dataset_spec: dict) -> str | None:
     return rel
 
 
-def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[str]:
-    cmd = ["bash", "train_custom.sh", "--date", dataset_spec["date"]]
+def build_command(dataset_spec: dict, model_type: str, tag: str | None,
+                  job_id: int | None = None) -> list[str]:
+    cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
     if dataset_spec.get("source_hz"):
         cmd += ["--source_hz", str(dataset_spec["source_hz"])]
     if dataset_spec.get("hz"):
@@ -213,14 +235,14 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[
     # extra_date 是老的手写形式（DATE:HZ，数据已经在 data/raw_custom 下），留着
     for extra in dataset_spec.get("extra_datasets") or []:
         hz = extra.get("source_hz") or dataset_spec.get("source_hz") or 50
-        cmd += ["--extra_date", f"{extra['date']}:{hz}"]
+        cmd += ["--extra_date", f"{run_date(extra['date'], job_id)}:{hz}"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
     # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
     if int(dataset_spec.get("axes") or 6) == 3:
         cmd += ["--axes", "3"]
     # 界面给了归并表就用它生成的那份，没给还是默认的 3 类表
-    runtime_remap = write_runtime_remap(dataset_spec)
+    runtime_remap = write_runtime_remap(dataset_spec, job_id)
     if runtime_remap:
         cmd += ["--remap", runtime_remap]
     if dataset_spec.get("missing_strategy"):
@@ -253,13 +275,16 @@ def _load_metrics(pkl_path: str) -> dict:
 
 
 def create_job(dataset_spec: dict, model_type: str, tag: str | None) -> dict:
+    job_id = _next_job_id()
     job = {
-        "job_id": _next_job_id(),
+        "job_id": job_id,
+        # 这个任务在磁盘上用的名字。删某一版时照着它清，别的版本碰不到
+        "run_date": run_date(dataset_spec["date"], job_id),
         "status": STATUS_QUEUED,
         "dataset_spec": dataset_spec,
         "model_type": model_type,
         "tag": tag,
-        "command": " ".join(build_command(dataset_spec, model_type, tag)),
+        "command": " ".join(build_command(dataset_spec, model_type, tag, job_id)),
         "model_version": None,
         "model_path": None,
         "metrics": None,
@@ -281,12 +306,18 @@ async def run_job(job_id: int) -> None:
     _save(job)
     log.info("训练任务 #%d 开始，训练输出见 %s", job_id, _log_path(job_id))
 
-    cmd = build_command(job["dataset_spec"], job["model_type"], job["tag"])
+    # 老任务的 json 里没有 run_date：照旧用数据集名，不去猜
+    jid = job_id if job.get("run_date") else None
+    cmd = build_command(job["dataset_spec"], job["model_type"], job["tag"], jid)
     try:
-        await asyncio.to_thread(prepare_export, job["dataset_spec"])
+        await asyncio.to_thread(prepare_export, job["dataset_spec"], jid)
         with open(_log_path(job_id), "wb") as log_f:
+            # PYTHONUNBUFFERED：脚本里那几个 python 步骤的输出写进文件时默认是
+            # 攒满一块才落盘，网页上看日志就是半天不动、然后一下子蹦出一大截。
+            # 关掉缓冲，日志才是真的"实时"
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=config.REPO_ROOT, stdout=log_f, stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
             await proc.wait()
         with open(_log_path(job_id), encoding="utf-8", errors="replace") as f:
@@ -312,3 +343,158 @@ async def run_job(job_id: int) -> None:
         log.error("训练任务 #%d 失败: %s", job_id, str(e)[:500])
     job["finished_at"] = int(time.time())
     _save(job)
+
+
+# ── 实时日志 ─────────────────────────────────────────────────────────────
+
+# 一次最多回这么多字节。训练日志一跑就是几万行，一口全吐给浏览器会卡住；
+# 前端按 offset 一段段接着要，每 2 秒一次，追得上
+_LOG_CHUNK = 256 * 1024
+
+
+def read_log(job_id: int, offset: int = 0) -> dict | None:
+    """从 offset 往后读这个任务的训练日志。任务不存在返回 None。
+
+    返回的 offset 是**下次该从哪儿接着读**。前端只管把 text 追加到屏幕上、
+    把 offset 存下来下回带上——不用每次拉全量，也不会重复。
+
+    stage 是日志里最后一行 ▶ 开头的，也就是"现在跑到哪一步了"。训练动辄
+    几十分钟，只给一堆滚动的日志的话，人看不出离完还有多远。
+    """
+    job = get_job(job_id)
+    if job is None:
+        return None
+    path = _log_path(job_id)
+    text, size, stage = "", 0, None
+    if os.path.exists(path):
+        size = os.path.getsize(path)
+        offset = max(0, min(int(offset), size))
+        with open(path, "rb") as f:
+            f.seek(offset)
+            raw = f.read(_LOG_CHUNK)
+        # 可能正好切在一个多字节汉字中间：把尾巴上不完整的那几个字节留到下一次
+        cut = len(raw)
+        while cut > 0:
+            try:
+                text = raw[:cut].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                cut -= 1
+        offset += cut
+        stage = _last_stage(path)
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "offset": offset,
+        "size": size,
+        "text": text,
+        "stage": stage,
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "error": job.get("error"),
+    }
+
+
+def _last_stage(path: str) -> str | None:
+    """日志里最后一行 ▶ 开头的。只看文件末尾一段，日志再长也是常数时间。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 64 * 1024))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        s = line.strip()
+        if s.startswith("▶"):
+            return s.lstrip("▶ ").strip()
+    return None
+
+
+# ── 删除某一版 ───────────────────────────────────────────────────────────
+
+
+class JobBusy(Exception):
+    """任务还在跑，或者它的模型正是现在推理在用的那个——不能删。"""
+
+
+def _under_repo(p: str) -> bool:
+    root = os.path.realpath(config.REPO_ROOT)
+    rp = os.path.realpath(p)
+    return rp == root or rp.startswith(root + os.sep)
+
+
+def delete_job(job_id: int, active_model_path: str | None) -> dict:
+    """删掉这一版训练的全部产物。返回删了哪些路径。任务不存在返回 {"deleted": []}。
+
+    ## 删什么
+
+    新任务（有 run_date，形如 ds_x__job12）：它在磁盘上的那一整摊——整理出来的
+    数据、预处理产物、模型、合成数据、日志、它自己那张归并表。**因为每个任务
+    本来就各用各的目录，删它碰不到别的版本。**
+
+    老任务（没有 run_date）：那时候同一份数据集的各版本共用目录，按目录删会连
+    别的版本一起带走。所以只删它那个模型文件所在的目录，别的不动。
+
+    ## 不能删的
+
+    - 还在跑的（删了它的目录，脚本还在往里写，只会留下一堆半截文件）
+    - 模型正是现在推理在用的那个（删了之后下次重启服务就起不来）
+
+    ## 为什么要这么多护栏
+
+    这里是 rm -rf。run_date 要是空的或者不带 __job，拼出来的通配符就是
+    data/processed_* ——**所有训练数据一次清光**。所以只认带 __job<本任务号>
+    的名字，并且每个路径都要落在仓库里面。
+    """
+    import glob
+    import shutil
+
+    job = get_job(job_id)
+    if job is None:
+        return {"deleted": []}
+    if job.get("status") in (STATUS_QUEUED, STATUS_RUNNING):
+        raise JobBusy(f"训练任务 #{job_id} 还在{'排队' if job['status'] == STATUS_QUEUED else '跑'}，等它结束再删")
+    mp = job.get("model_path")
+    if mp and active_model_path and os.path.realpath(mp) == os.path.realpath(active_model_path):
+        raise JobBusy(f"训练任务 #{job_id} 的模型正是现在推理在用的那个，先切到别的模型再删")
+
+    targets: list[str] = []
+    rd = job.get("run_date") or ""
+    marker = f"__job{job_id}"
+    if rd and rd.endswith(marker):
+        repo = config.REPO_ROOT
+        for pat in (
+            f"data/raw_custom/{rd}",
+            f"data/processed_{rd}_*",
+            f"data/processed_{rd}",
+            f"results/processed_{rd}_*",
+            f"results/processed_{rd}",
+            f"data/synthetic/*_{rd}_*",
+            f"tmp/train_full_processed_{rd}_*",
+            f"configs/remap_ui_job{job_id}.yaml",
+            # 一起训练的那几份，同样带着本任务号
+            f"data/raw_custom/*{marker}",
+        ):
+            targets += glob.glob(os.path.join(repo, pat))
+    elif mp:
+        # 老任务：只删模型自己那一层目录（.../rf/），它的兄弟版本不动
+        targets.append(os.path.dirname(mp))
+
+    deleted: list[str] = []
+    for t in sorted(set(targets)):
+        if not _under_repo(t) or os.path.realpath(t) == os.path.realpath(config.REPO_ROOT):
+            log.warning("删除训练任务 #%d：跳过仓库外的路径 %s", job_id, t)
+            continue
+        if os.path.isdir(t) and not os.path.islink(t):
+            shutil.rmtree(t, ignore_errors=True)
+        elif os.path.lexists(t):
+            os.remove(t)
+        else:
+            continue
+        deleted.append(os.path.relpath(t, config.REPO_ROOT))
+    for p in (_job_path(job_id), _log_path(job_id)):
+        if os.path.exists(p):
+            os.remove(p)
+    log.info("训练任务 #%d 已删除：%s", job_id, deleted)
+    return {"deleted": deleted}

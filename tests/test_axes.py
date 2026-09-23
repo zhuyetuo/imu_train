@@ -28,8 +28,24 @@ def test_脚本语法没坏():
 def test_预处理目录按轴数分开():
     """同一份数据、同一个标签，3 轴和 6 轴要落到不同目录。"""
     src = open("train_custom.sh", encoding="utf-8").read()
+    assert '_axes_suffix="_acc3"' in src, "3 轴没有单独的目录后缀，会跟 6 轴互相覆盖"
     line = next(l for l in src.splitlines() if l.startswith("PROCESSED_DIR="))
-    assert "_acc3" in line, "3 轴没有单独的目录后缀，会跟 6 轴互相覆盖"
+    assert "${_axes_suffix}" in line
+
+
+def test_赋值里不能用会失败的命令替换():
+    """脚本开着 set -e。VAR="$( [[ 条件 ]] && echo x )" 在条件为假时，命令替换
+    返回 1，赋值语句就继承这个 1——整个脚本在这一行悄无声息地退出（此时输出
+    还没 tee 进日志，一个字都不打）。
+
+    第一版 3 轴就是这么写的，结果默认 6 轴的训练全都起不来。当命令参数用
+    （cmd $( [[ ]] && echo --x )）不受影响，只查赋值。"""
+    import re
+
+    src = open("train_custom.sh", encoding="utf-8").read()
+    bad = [l for l in src.splitlines()
+           if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*=.*\$\(\s*\[\[", l) and not l.lstrip().startswith("#")]
+    assert not bad, f"赋值里用了会失败的命令替换，set -e 下会让脚本静默退出：{bad}"
 
 
 def test_姿态角取最后两列而不是写死的六到八():
