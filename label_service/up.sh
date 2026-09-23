@@ -78,7 +78,9 @@ fi
 
 # 构建前挑最快的 PyPI / torch 源，钉进 .env（挑过就不再测，见 pick_mirrors.sh）
 bash pick_mirrors.sh || true
-"${COMPOSE[@]}" up -d --build "$@"
+# --progress plain：构建日志一行行原样打出来（默认那种只留最后几行的折叠视图看不到
+# pip 的下载进度，几个 G 的 torch 下几分钟像卡死了）
+"${COMPOSE[@]}" --progress plain up -d --build "$@"
 
 [ -f .env ] && set -a && source .env && set +a
 PORT="${LABEL_SERVICE_PORT:-8383}"
