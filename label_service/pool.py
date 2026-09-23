@@ -181,6 +181,10 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
 def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     from infer_csv_scratch import infer_file  # worker 进程里 src/ 已在 sys.path
     b = _bundle
+    # 要输出哪些类别的片段。**默认跟着模型自己的类别走**——配置里写死一串的话，
+    # 模型输出「抓挠-头颈耳」这种拆了二级的新类别时一个片段都不会出来，
+    # 而平台那边看到的就是"模型什么都没检出"，完全看不出是配置挡的
+    target_labels = config.TARGET_LABELS or list(b["classes"])
     model_hz = b["hz"]
     window_size = int(b["window_s"] * model_hz)
     stride = int(b["stride_s"] * model_hz)
@@ -190,13 +194,13 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
             float(device_hz or config.DEVICE_HZ), model_hz, b["gravity_aligned"],
             quiet=True, scratch_only=True, label_mode=b["label_mode"], output_dir=tmp,
             resample_method=config.RESAMPLE_METHOD,
-            target_labels=config.TARGET_LABELS, is_dl=b["is_dl"],
+            target_labels=target_labels, is_dl=b["is_dl"],
             # 3 轴模型只能喂加速度——喂 6 轴进去特征维数对不上
             n_channels=b.get("n_channels", 8),
         )
         stem = os.path.splitext(os.path.basename(full_path))[0]
         segments, windows, n_windows = {}, [], 0
-        for label in config.TARGET_LABELS:
+        for label in target_labels:
             p = os.path.join(tmp, label, "_infer", f"{stem}_infer.json")
             if not os.path.exists(p):
                 segments[label] = []

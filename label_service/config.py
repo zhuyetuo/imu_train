@@ -6,7 +6,9 @@ label_service 的配置——全部走环境变量，跟 run_review_bins_all_day
                     默认是当前在用的 drop_window rf 模型，换模型改这里或者传环境变量
   DEVICE_HZ         样本 CSV 的采样率（默认 50）
   RESAMPLE_METHOD   降采样算法 poly / training_match（默认 training_match）
-  TARGET_LABELS     逗号分隔（默认 活动,睡觉,抓挠,未佩戴,甩身体）
+  TARGET_LABELS     逗号分隔。**留空（默认）= 跟着当前模型自己的类别走**，
+                    换了模型不用改这里。写死一串的话，模型输出「抓挠-头颈耳」
+                    这种新类别时一个片段都不会出来
   NAS_ROOT          NAS 根目录，/infer 里的 path 是相对它的相对路径（默认 /home/toky/ai_data）
   LABEL_SERVICE_PORT  监听端口（默认 8383）
   LABEL_JOBS_DIR    训练任务状态/日志落盘目录（默认 label_service/jobs，gitignore）
@@ -37,7 +39,10 @@ MODEL_GLOB       = _env("LABEL_MODEL", "results/processed_2026_8_11-2026_8_27_ra
 EXTRA_MODELS     = _env("LABEL_MODELS", "")
 DEVICE_HZ        = int(_env("DEVICE_HZ", "50"))
 RESAMPLE_METHOD  = _env("RESAMPLE_METHOD", "training_match")
-TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "活动,睡觉,抓挠,未佩戴,甩身体").split(",") if t.strip()]
+# 空列表 = 跟着模型的 classes 走（见 pool.py）。**不再写死**：写死的那串里
+# 「甩身体」当前模型根本不会输出（等于白列），而模型真能输出的新类别
+# （抓挠-头颈耳这种拆了二级的）反倒不在里面，一个片段都出不来
+TARGET_LABELS    = [t.strip() for t in _env("TARGET_LABELS", "").split(",") if t.strip()]
 NAS_ROOT         = _env("NAS_ROOT", "/home/toky/ai_data")
 PORT             = int(_env("LABEL_SERVICE_PORT", "8383"))
 JOBS_DIR         = _env("LABEL_JOBS_DIR", os.path.join(REPO_ROOT, "label_service", "jobs"))

@@ -234,15 +234,22 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
             cands = cands[: config.CAND_MAX]
         result["candidates"] = cands
         if config.REFINE_ENABLED:
-            for lab in config.STABLE_EVENT_LABELS:
-                postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)
+            # 按前缀认：拆了二级之后类别叫「抓挠-头颈耳」，只认精确相等的话
+            # 这些段就没人给它对齐边界了
+            for lab in list(result["segments"]):
+                if any(lab == e or lab.startswith(e + "-") for e in config.STABLE_EVENT_LABELS):
+                    postprocess.refine_boundaries(result["segments"].get(lab) or [], envelope, params)
             postprocess.refine_boundaries(result["candidates"], envelope, params)
         # 疑似舔/啃：加在边界微调**之后**——那一步是拿陀螺仪能量把抓挠边界对齐的，
         # 对姿态类候选没意义。跟抓挠（正式片段 + 疑似抓挠）重叠的去掉：抓挠时
         # 头也会歪过去，姿态判据会把它当成理毛，而那段已经有人在看了
         if grooming_cands:
             from label_service import grooming as _grooming
-            taken = list(result["segments"].get(config.STABLE_EVENT_LABELS[0]) or []) + list(result["candidates"])
+            # 抓挠（含拆了二级的那些）已经占掉的时间：舔/啃候选不要再重复给
+            scratch_head = config.STABLE_EVENT_LABELS[0] if config.STABLE_EVENT_LABELS else "抓挠"
+            taken = [seg for lab, segs in result["segments"].items()
+                     if lab == scratch_head or lab.startswith(scratch_head + "-")
+                     for seg in (segs or [])] + list(result["candidates"])
             gc = _grooming.drop_overlapping(grooming_cands, taken)
             if len(gc) > config.GROOM_MAX:
                 log.info("疑似舔/啃候选 %d 条，只保留分最高的 %d 条（%s）",
