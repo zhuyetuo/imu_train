@@ -390,6 +390,8 @@ class DatasetSpec(BaseModel):
     export_json: str | None = Field(None, description="label_infra 导出的 Label Studio 格式 JSON 在 NAS_ROOT 下的相对路径；"
                                                     "csv 字段是 NAS_ROOT 下的相对路径，服务会整理成 data/raw_custom/<date>/merged_tmp.json")
     clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")
+    edge_size: bool = Field(False, description="端侧尺寸：用 configs/ml_edge.yaml（限深限棵数），"
+                                               "模型塞得进板子约 128KB 的 flash。端侧主力是 xgb")
     axes: int = Field(6, description="用几轴：6=加速度+陀螺仪（默认），3=只用加速度。"
                                      "端侧只有加速度计时用 3，否则模型学的是板上没有的信号")
     extra_datasets: list[ExtraDataset] = Field(default_factory=list,

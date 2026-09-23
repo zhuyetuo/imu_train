@@ -169,3 +169,16 @@ def test_默认6轴不传参数():
 def test_选3轴才传():
     cmd = jobs.build_command({"date": "d", "axes": 3}, "rf", None)
     assert cmd[cmd.index("--axes") + 1] == "3"
+
+
+def test_端侧尺寸用ml_edge配置():
+    """默认那份 200 棵不限深的森林是几十 MB，板子给模型留约 128KB。"""
+    cmd = jobs.build_command({"date": "d", "edge_size": True}, "xgb", None)
+    assert cmd[cmd.index("--ml_config") + 1] == "configs/ml_edge.yaml"
+    assert "--ml_config" not in jobs.build_command({"date": "d"}, "rf", None)
+
+
+def test_训练脚本把ml_config转给两个train_py():
+    """以前 train_custom.sh 不转发 --config，端侧那份配置只能绕开脚本手动跑。"""
+    src = open("train_custom.sh", encoding="utf-8").read()
+    assert src.count('--config "$ML_CONFIG"') == 2, "方案 A 和方案 B 都得用同一份超参"

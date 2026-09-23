@@ -85,6 +85,9 @@ LABELS=()                 # 要合成的类别，--label可重复传（比如--l
                            # 同时给两个类别都补合成数据）。不传时默认只合成"抓挠"（见下面
                            # 解析完参数后的默认值兜底）
 REMAP="configs/remap_custom_3class.yaml"
+ML_CONFIG="configs/ml.yaml"  # 模型超参。端侧用 configs/ml_edge.yaml：树限深/限棵数，
+                           # 让模型塞进 GR5513 给模型留的约 128KB flash（默认那份
+                           # 200 棵不限深的森林是几十 MB，差两三个数量级）
 AXES=6                     # 用几轴：6=加速度+陀螺仪（默认），3=只用加速度。
                            # **端侧只有加速度计时要用 3**——否则模型学的是板上
                            # 根本没有的信号，服务端指标再好也代表不了端上表现。
@@ -139,6 +142,8 @@ _print_help() {
 全部参数:
   --date DATE            必填，主批次日期目录名（data/raw_custom/<DATE>/）
   --extra_date DATE:HZ   可重复传，额外合并的批次，HZ填该批次自己真实采样率
+  --ml_config FILE       模型超参（默认 configs/ml.yaml）。要上端侧用 configs/ml_edge.yaml：
+                         限深限棵数，模型才塞得进板子的 flash。端侧主力是 --model xgb
   --axes 3|6             用几轴（默认6=加速度+陀螺仪）。端侧只有加速度计时用3，
                          否则模型学的是板上没有的信号。3轴的预处理产物单独存
                          （目录带_acc3后缀），跟6轴互不覆盖
@@ -206,6 +211,7 @@ while [[ $# -gt 0 ]]; do
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     --remap)          REMAP="$2";          shift 2 ;;
     --axes)           AXES="$2";           shift 2 ;;
+    --ml_config)      ML_CONFIG="$2";      shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
   esac
 done
@@ -567,6 +573,7 @@ fi
 echo ""
 echo "▶ 方案 A：纯标注模型（后台运行）..."
 python src/ml/train.py --hz "$HZ" --model "$MODEL_TYPE" \
+  --config "$ML_CONFIG" \
   --processed_dir "$PROCESSED_DIR" \
   --remap "$REMAP" \
   --results_dir "$RESULTS_DIR" \
@@ -605,6 +612,7 @@ else
   echo ""
   echo "▶ 方案 B：带合成数据模型（后台运行，合成类别: ${LABELS[*]}）..."
   python src/ml/train.py --hz "$HZ" --model "$MODEL_TYPE" \
+    --config "$ML_CONFIG" \
     --processed_dir "$PROCESSED_DIR" \
     --remap "$REMAP" \
     "${SYNTHETIC_SPEC_ARGS[@]}" \
