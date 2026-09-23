@@ -369,3 +369,53 @@ def test_有带合成的就用带合成的(repo):
     _job(repo, 33, status="running", pid=_dead_pid())
     jobs.reconcile_orphans()
     assert "_syn" in jobs.get_job(33)["model_path"]
+
+
+# ── 训练出来的模型直接能选 ──────────────────────────────────────────────
+
+
+def test_跑完且文件在的才算(repo):
+    mp = repo / "results" / "x" / "rf" / "ml_rf.pkl"
+    _touch(mp)
+    _job(repo, 40, status="done", model_path=str(mp),
+         dataset_spec={"date": "ds_a", "axes": 3}, metrics={"classes": ["抓挠-头颈耳"], "macro_f1": 0.53})
+    _job(repo, 41, status="done", model_path=str(repo / "gone.pkl"))     # 文件没了
+    _job(repo, 42, status="failed")
+    got = jobs.done_models()
+    assert [g[0] for g in got] == [40]
+    jid, path, meta = got[0]
+    assert meta["axes"] == 3 and meta["dataset"] == "ds_a" and meta["classes"] == ["抓挠-头颈耳"]
+
+
+def test_模型名跟任务号对得上():
+    """平台靠这个名字对回训练记录（把 train1 显示成「训练记录 #5」）。"""
+    assert jobs.model_tag(7) == "train7"
+
+
+def test_注册表能登记能撤销_撤销时关掉进程池():
+    registry_mod = pytest.importorskip("label_service.registry")
+    r = registry_mod.Registry()
+    r.register("train1", "/x/ml_rf.pkl", {"job_id": 1, "axes": 3})
+    assert "train1" in r.tags()
+    d = next(m for m in r.describe() if m["tag"] == "train1")
+    assert d["train"]["axes"] == 3 and d["loaded"] is False, "登记不等于加载，第一次用才加载"
+
+    class _Pool:
+        closed = False
+
+        def shutdown(self, **kw):
+            _Pool.closed = True
+
+    r._pools["train1"] = _Pool()
+    r.unregister("train1")
+    assert "train1" not in r.tags()
+    assert _Pool.closed, "撤掉模型时它的进程池要关，不然一直占着内存"
+
+
+def test_默认模型不能被登记覆盖或撤掉():
+    registry_mod = pytest.importorskip("label_service.registry")
+    r = registry_mod.Registry()
+    r.set_default("/d.pkl", {}, None)
+    r.register(registry_mod.DEFAULT_TAG, "/evil.pkl")
+    r.unregister(registry_mod.DEFAULT_TAG)
+    assert r.path_of(registry_mod.DEFAULT_TAG) == "/d.pkl"

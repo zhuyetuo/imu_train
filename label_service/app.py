@@ -70,6 +70,9 @@ async def lifespan(app: FastAPI):
     # 上次服务停的时候还在跑的训练，进程已经跟着没了。不收拾的话它们永远
     # 「训练中」，网页上删不掉也停不了
     jobs.reconcile_orphans()
+    # 训练出来的每一版都登记进来（不加载，第一次用到才加载），平台「版本」
+    # 下拉里就能直接选——不用改配置重启，也不用「启用」把默认模型换掉
+    _register_trained()
     yield
     log.info("关闭")
     registry.shutdown()
@@ -437,11 +440,24 @@ def get_remap():
     }
 
 
+def _register_trained(job_id: int | None = None) -> None:
+    """把跑完了的训练模型登记进注册表。给了任务号就只登记那一个。"""
+    for jid, path, meta in jobs.done_models():
+        if job_id is None or jid == job_id:
+            registry.register(jobs.model_tag(jid), path, meta)
+            log.info("训练模型 %s 已登记：%s", jobs.model_tag(jid), path)
+
+
+async def _run_and_register(job_id: int) -> None:
+    await jobs.run_job(job_id)
+    _register_trained(job_id)
+
+
 @app.post("/api/v1/label/train")
 async def submit_train(req: TrainRequest):
     job = jobs.create_job(req.dataset.model_dump(), req.model_type, req.tag)
     log.info("训练任务 #%d 提交: %s", job["job_id"], job["command"])
-    asyncio.create_task(jobs.run_job(job["job_id"]))
+    asyncio.create_task(_run_and_register(job["job_id"]))
     return job
 
 
@@ -504,6 +520,8 @@ async def cancel_train_job(job_id: int):
     job = await asyncio.to_thread(jobs.cancel_job, job_id)
     if job is None:
         raise HTTPException(404, f"训练任务 #{job_id} 不存在")
+    # 停之前模型已经存好了的，按完成收尾——那它也该能选
+    _register_trained(job_id)
     return job
 
 
@@ -514,9 +532,13 @@ async def delete_train_job(job_id: int):
     还在跑的、以及模型正是现在推理在用的那个，不让删（409）。
     """
     try:
-        return await asyncio.to_thread(jobs.delete_job, job_id, _bundle.get("model_path"))
+        out = await asyncio.to_thread(jobs.delete_job, job_id, _bundle.get("model_path"))
     except jobs.JobBusy as e:
         raise HTTPException(409, str(e)) from e
+    # 文件都删了，注册表里那一项也得撤：不撤的话下拉里还能选到它，选了才报
+    # "模型文件不存在"
+    registry.unregister(jobs.model_tag(job_id))
+    return out
 
 
 # ── /tooth ──────────────────────────────────────────────────────────────
