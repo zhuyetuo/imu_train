@@ -113,3 +113,14 @@ def resolve_model_path() -> str:
     if len(matches) > 1:
         raise RuntimeError(f"LABEL_MODEL 通配符 {pattern} 匹配到多个文件，请写具体一点: {matches}")
     return matches[0]
+
+
+def target_labels_for(classes) -> list[str]:
+    """这个模型要输出哪些类别的片段。**所有地方都必须走这一个函数。**
+
+    TARGET_LABELS 留空 = 跟着模型自己的类别走。这个"留空就用模型类别"的规矩
+    以前是在用到的地方各写一遍——推理池那里写了，稳定版后处理那里漏了，于是
+    后处理拿到一个空列表、一个片段都不出：**所有「稳定版 / 稳定版 v2」的预标注
+    都写不出片段**，只有走另一条路的「疑似抓挠」候选还在（2026-09-23）。
+    """
+    return list(TARGET_LABELS) or list(classes or [])

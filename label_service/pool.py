@@ -184,7 +184,7 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     # 要输出哪些类别的片段。**默认跟着模型自己的类别走**——配置里写死一串的话，
     # 模型输出「抓挠-头颈耳」这种拆了二级的新类别时一个片段都不会出来，
     # 而平台那边看到的就是"模型什么都没检出"，完全看不出是配置挡的
-    target_labels = config.TARGET_LABELS or list(b["classes"])
+    target_labels = config.target_labels_for(b["classes"])
     model_hz = b["hz"]
     window_size = int(b["window_s"] * model_hz)
     stride = int(b["stride_s"] * model_hz)

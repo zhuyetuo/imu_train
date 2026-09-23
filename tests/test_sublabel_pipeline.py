@@ -46,8 +46,9 @@ def test_目标类别默认跟着模型走():
     from label_service import config
 
     assert config.TARGET_LABELS == [], "默认该是空的（= 跟着模型的 classes 走）"
+    assert config.target_labels_for(["抓挠-头颈耳", "活动"]) == ["抓挠-头颈耳", "活动"]
     src = open("label_service/pool.py", encoding="utf-8").read()
-    assert 'config.TARGET_LABELS or list(b["classes"])' in src
+    assert 'config.target_labels_for(b["classes"])' in src
 
 
 def test_环境变量写了还是听环境变量(monkeypatch):
@@ -63,3 +64,41 @@ def test_环境变量写了还是听环境变量(monkeypatch):
     finally:
         monkeypatch.delenv("TARGET_LABELS")
         importlib.reload(c)
+
+
+def test_稳定版后处理拿到的目标类别不能是空的():
+    """TARGET_LABELS 留空 = 跟着模型类别走。这条规矩以前在用到的地方各写一遍：
+    推理池写了、稳定版后处理漏了——后处理拿到空列表，一个片段都不出。所有
+    「稳定版 / 稳定版 v2」的预标注都写不出片段，只剩走另一条路的「疑似抓挠」
+    候选（2026-09-23，项目 196：437 个任务，片段全空，候选 2458 条）。"""
+    import datetime as dt
+
+    from label_service import config, postprocess as pp
+
+    classes = ["静止/休息", "抓挠-头颈耳", "活动"]
+    t0 = dt.datetime(2026, 9, 21)
+
+    def win(i, top):
+        p = {c: 0.02 for c in classes}
+        p[top] = 0.95
+        return {"ts": (t0 + dt.timedelta(seconds=i)).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "probs": p, "label": top, "spec": 0.4}
+
+    wins = [win(i, "静止/休息") for i in range(40)] + [win(i, "抓挠-头颈耳") for i in range(40, 50)] \
+        + [win(i, "活动") for i in range(50, 90)]
+    params = pp.StableParams(event_labels=tuple(config.STABLE_EVENT_LABELS))
+    for algo in ("stable", "viterbi"):
+        seg = pp.stabilize(wins, classes, config.target_labels_for(classes), 2.0, 1.0, "majority", params, algo=algo)
+        assert seg.get("抓挠-头颈耳"), f"{algo}：抓挠-头颈耳一段都没出"
+        assert seg.get("静止/休息") and seg.get("活动")
+
+
+def test_不许再绕开统一的取法():
+    """这个"留空就用模型类别"只能有一份。"""
+    import pathlib
+
+    for f in ("label_service/app.py", "label_service/pool.py"):
+        src = pathlib.Path(f).read_text(encoding="utf-8")
+        for line in src.splitlines():
+            if "config.TARGET_LABELS" in line and "log" not in line and "config.RESAMPLE_METHOD" not in line:
+                raise AssertionError(f"{f} 里直接用了 config.TARGET_LABELS，得走 target_labels_for()：{line.strip()}")
