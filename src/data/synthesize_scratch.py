@@ -96,7 +96,44 @@ def _load_sensor(url, csv_dir, name):
     return df, acc_cols, gyro_cols
 
 
-def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbose=True, axes=6):
+def _seg_hz(ts) -> float | None:
+    """这一段原始数据的**真实**采样率，按它自己的时间戳算。
+
+    为什么不用一个全局的 source_hz：合成数据是从所有批次里抠片段的，老批次
+    16Hz、新的 NAS 原始数据 50Hz，混在同一份 JSON 里——传一个数进来必然有一半
+    是错的。时间戳是每段自带的，按它算就对。
+    """
+    import pandas as pd
+
+    ts = pd.to_datetime(ts)
+    if len(ts) < 3:
+        return None
+    span = (ts.max() - ts.min()).total_seconds()
+    if span <= 0:
+        return None
+    return (len(ts) - 1) / span
+
+
+def _to_hz(seg: np.ndarray, src_hz: float | None, target_hz: int | None, method: str) -> np.ndarray:
+    """把一段降到目标采样率。算法必须跟推理一致（label_service 默认 training_match）。
+
+    差不到 10% 当成同一个采样率，不动——真实 BLE 流有抖动，16Hz 的数据算出来是
+    15.8 也是常事，为这点差别去插值只会引入误差。
+    """
+    if not target_hz or not src_hz or abs(src_hz - target_hz) / target_hz < 0.10:
+        return seg
+    if method == "training_match":
+        from resample_training_match import resample_training_match
+
+        return resample_training_match(seg, src_hz, target_hz)
+    from scipy.signal import resample as _resample
+
+    n = max(1, int(round(len(seg) * target_hz / src_hz)))
+    return _resample(seg, n, axis=0).astype(np.float32)
+
+
+def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbose=True, axes=6,
+                               target_hz=None, resample_method="training_match"):
     """从 Label Studio JSON 中提取所有 target_label 的原始片段，返回 list of (N,6) ndarray。
     verbose=True 时打印每一类跳过原因的计数，方便核对"标注里明明有N段，怎么只提取出M个"。"""
     segments = []
@@ -185,16 +222,20 @@ def extract_segments_from_json(tasks, csv_dir, target_label, min_rows=16, verbos
                     print(f"  [跳过] task{task_id} {t0_str} 只有 {len(sub)} 行")
                     continue
                 acc  = sub[acc_cols].values.astype(np.float32)
+                # **先降到训练采样率再说。** 以前直接按 --hz 切窗口，可原始片段是 50Hz
+                # 的：32 个点其实只有 0.64 秒，合成出来的"抓挠"比真的快 3 倍——而推理
+                # 那边是正确降到 16Hz 再切的，两边对不上（2026-09-23 网页训练的几版）
+                src_hz = _seg_hz(sub["_ts"]) if target_hz else None
                 # 3 轴：只要加速度。**必须跟真实数据一致**——真实数据按 --axes 3
                 # 预处理成了 3 路，这里还吐 6 路的话，train.py 把两边拼起来时
                 # 通道数对不上直接崩（2026-09-23 第一次 3 轴训练，「带合成」那一
                 # 版就是这么挂的；「纯标注」那一版没用合成数据，所以训完了）
                 if axes == 3:
-                    segments.append(acc)
+                    segments.append(_to_hz(acc, src_hz, target_hz, resample_method))
                     continue
                 gyro = sub[gyro_cols].values.astype(np.float32) if gyro_cols \
                        else np.zeros((len(sub), 3), dtype=np.float32)
-                segments.append(np.concatenate([acc, gyro], axis=1))
+                segments.append(_to_hz(np.concatenate([acc, gyro], axis=1), src_hz, target_hz, resample_method))
 
     if verbose:
         print(f"\n  [提取明细] 标签='{target_label}' 匹配到的标注段: {n_matched_label}")
@@ -327,6 +368,8 @@ def main():
                         help="已预处理的数据目录，用于自动推算 target_windows（默认：自动推算时必填）")
     parser.add_argument("--remap",    default="",   help="remap YAML 路径（用于自动推算时的类别映射）")
     parser.add_argument("--seed",     type=int,   default=42)
+    parser.add_argument("--resample_method", default="training_match", choices=["training_match", "poly"],
+                        help="把原始片段降到 --hz 用的算法，必须跟推理一致")
     parser.add_argument("--axes",     type=int,   default=6, choices=[3, 6],
                         help="用几轴，必须跟真实数据的预处理一致（6=加速度+陀螺仪，3=只用加速度）")
     args = parser.parse_args()
@@ -359,7 +402,8 @@ def main():
     print(f"\n加载 JSON: {len(tasks)} 个 task")
 
     print(f"\n── 提取 '{args.label}' 片段 ──")
-    segments = extract_segments_from_json(tasks, args.csv_dir, args.label, axes=args.axes)
+    segments = extract_segments_from_json(tasks, args.csv_dir, args.label, axes=args.axes,
+                                          target_hz=args.hz, resample_method=args.resample_method)
     print(f"\n共提取 {len(segments)} 个原始片段")
     if not segments:
         print("[错误] 未找到任何片段，请检查 --label 名称和 JSON 内容")

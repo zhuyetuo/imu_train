@@ -129,6 +129,7 @@ CLEAN=0                    # 1=跑之前先删掉这个DATE+TAG对应的旧缓�
                            # 强烈建议加这个参数，保证是从头全新生成、不会跟旧缓存混着用
 EXTRA_DATES=()             # --extra_date DATE:HZ，可重复传，跟主--date合并一起训练。
                            # HZ跟目标--hz不一样的批次会先重采样对齐（见上面用法示例）
+RESAMPLE_METHOD="training_match"  # 降采样算法，必须跟 label_service 推理的 RESAMPLE_METHOD 一致
 SOURCE_HZ=""               # 主--date数据自己真实的采样率，留空默认等于--hz（当成"已经
                            # 是目标采样率不用重采样"）。只有加了--extra_date合并多批次、
                            # 且主数据的原始采样率跟--hz不一样时才需要显式传（比如主数据
@@ -209,6 +210,7 @@ while [[ $# -gt 0 ]]; do
     --skip_ml)        SKIP_ML=1;           shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
+    --resample_method) RESAMPLE_METHOD="$2"; shift 2 ;;
     --remap)          REMAP="$2";          shift 2 ;;
     --axes)           AXES="$2";           shift 2 ;;
     --ml_config)      ML_CONFIG="$2";      shift 2 ;;
@@ -488,11 +490,10 @@ import sys
 sys.path.insert(0, 'src/data')
 import pandas as pd
 from resample_csv_hz import SENSOR_COLS
-from preprocess import downsample
-import numpy as np
+from resample_csv_hz import resample_df
 
 target_hz = int(sys.argv[1])
-parts = sys.argv[2:]
+parts = sys.argv[3:]
 frames = []
 for part in parts:
     date_tag, path, src_hz = part.split(':')
@@ -505,17 +506,9 @@ for part in parts:
     # timestamp，这里统一丢掉，两边保持列一致
     df = df.drop(columns=['timestamp'], errors='ignore')
     if src_hz != target_hz:
-        print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz')
-        out_rows = []
-        for rid, g in df.groupby('record_id', sort=False):
-            data = g[SENSOR_COLS].to_numpy(dtype=np.float64)
-            labels = g['label'].to_numpy()
-            data_ds, labels_ds = downsample(data, labels, src_hz, target_hz)
-            out = pd.DataFrame(data_ds, columns=SENSOR_COLS)
-            out.insert(0, 'label', labels_ds)
-            out.insert(0, 'record_id', rid)
-            out_rows.append(out)
-        df = pd.concat(out_rows, ignore_index=True)
+        # 跟推理用同一种降采样（label_service 的 RESAMPLE_METHOD），不然两边特征对不上
+        print(f'  重采样 {path}: {src_hz}Hz -> {target_hz}Hz ({sys.argv[2]})')
+        df = resample_df(df, src_hz, target_hz, method=sys.argv[2])
     else:
         print(f'  {path}: 已经是{target_hz}Hz，跳过重采样')
     df['record_id'] = date_tag + '_' + df['record_id'].astype(str)
@@ -524,9 +517,24 @@ for part in parts:
 merged = pd.concat(frames, ignore_index=True)
 merged.to_csv('${MERGED_CSV}', index=False)
 print(f'合并完成: {len(frames)}个批次, 共{len(merged)}行 -> ${MERGED_CSV}')
-" "$HZ" "${CSV_PARTS[@]}"
+" "$HZ" "$RESAMPLE_METHOD" "${CSV_PARTS[@]}"
   fi
   CSV="$MERGED_CSV"
+fi
+
+# 只训一份数据集时也得降采样。以前只有上面"带额外批次"的分支看 --source_hz，
+# 单份数据集直接进预处理，而预处理按 configs/data.yaml 的 custom.source_hz=16
+# 当它已经是 16Hz —— 50Hz 的原始数据没降就切窗口，一个"2 秒"窗口实际只有
+# 0.64 秒；推理那边却是正确降到 16Hz 再切的，训练和推理完全对不上
+# （2026-09-23 网页训练日志：静止/休息 训练时长 10.65h，整个数据集才 6.52h）
+if [[ ${#EXTRA_DATES[@]} -eq 0 && -n "$SOURCE_HZ" && "$SOURCE_HZ" != "$HZ" ]]; then
+  RESAMPLED_CSV="${CSV%.csv}_${HZ}hz.csv"
+  if [[ ! -f "$RESAMPLED_CSV" || "$CLEAN" == "1" || "$CSV" -nt "$RESAMPLED_CSV" ]]; then
+    echo "▶ 降采样 ${SOURCE_HZ}Hz -> ${HZ}Hz（${RESAMPLE_METHOD}，跟推理一致）"
+    python src/data/resample_csv_hz.py --input "$CSV" --output "$RESAMPLED_CSV" \
+      --source_hz "$SOURCE_HZ" --target_hz "$HZ" --method "$RESAMPLE_METHOD"
+  fi
+  CSV="$RESAMPLED_CSV"
 fi
 
 # ── 预处理（复用已有缓存，--clean才强制重新生成）─────────────────
@@ -603,6 +611,7 @@ else
       --hz "$HZ" \
       --n_aug "$N_AUG" \
       --axes "$AXES" \
+      --resample_method "$RESAMPLE_METHOD" \
       $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
       $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" )
     SYNTHETIC_SPEC_ARGS+=(--synthetic_spec "${_lbl}:${_sp}")
