@@ -83,3 +83,72 @@ def test_空链和缺字段不会炸():
         {"value": {"timeserieslabels": []}}, {"value": {}}, {},
     ]}]}, {"annotations": []}, {}]
     assert jobs.apply_label_remap(tasks, {"舔": "活动"}) == 0
+
+
+# ── 归并表 → 训练类别 ────────────────────────────────────────────────────
+#
+# 这一段管的是「能不能识别出是什么抓挠」。训练取链的第 0 个，所以把
+# 「抓挠-头颈耳」收成独立一段还不够——train.py 后面那张 remap 表里没有这个
+# 名字的话，样本照样被丢掉。训练类别就是归并表里那些目标名。
+
+
+def _spec(tmp_path, remap, date="ds_x"):
+    return {"date": date, "label_remap": remap}
+
+
+def test_把细类映射成自己就能自成一类(tmp_path, monkeypatch):
+    """这就是「除了识别抓挠，还能识别是什么抓挠」的做法。"""
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    rel = jobs.write_runtime_remap(_spec(tmp_path, {
+        "抓挠-头颈耳": "抓挠-头颈耳",
+        "抓挠-躯干": "抓挠-躯干",
+        "舔": "活动",
+        "睡觉": "睡觉",
+    }))
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+    body = [l for l in text.splitlines() if l and not l.startswith("#")]
+    assert body == ["抓挠-头颈耳: 抓挠-头颈耳", "抓挠-躯干: 抓挠-躯干",
+                    "活动: 活动", "睡觉: 睡觉"]
+
+
+def test_只按用到的目标建类_不留空类(tmp_path, monkeypatch):
+    """抓挠全拆成部位之后「抓挠」自己一个样本都没有，不该还占一个类别。"""
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    rel = jobs.write_runtime_remap(_spec(tmp_path, {
+        "抓挠-头颈耳": "抓挠-头颈耳", "抓挠-躯干": "抓挠-躯干", "活动": "活动",
+    }))
+    body = [l for l in (tmp_path / rel).read_text(encoding="utf-8").splitlines()
+            if l and not l.startswith("#")]
+    assert "抓挠: 抓挠" not in body
+
+
+def test_没给归并表就不写文件_走默认那张(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    assert jobs.write_runtime_remap({"date": "ds_x"}) is None
+    assert jobs.write_runtime_remap({"date": "ds_x", "label_remap": {}}) is None
+
+
+def test_文件名里的数据集名要洗干净(tmp_path, monkeypatch):
+    """数据集名会进文件名，再进 results/ 的目录名——带斜杠就写到别处去了。"""
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    rel = jobs.write_runtime_remap(_spec(tmp_path, {"活动": "活动"}, date="../../etc/ds x"))
+    assert rel.startswith("configs/remap_ui_")
+    assert "/" not in rel[len("configs/"):]
+    assert (tmp_path / rel).is_file()
+
+
+def test_命令里带上生成的那张表(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    cmd = jobs.build_command(_spec(tmp_path, {"抓挠-躯干": "抓挠-躯干"}), "rf", None)
+    assert "--remap" in cmd
+    assert cmd[cmd.index("--remap") + 1].startswith("configs/remap_ui_")
+
+
+def test_没归并表时命令里不带remap(tmp_path, monkeypatch):
+    """默认那张 3 类表是 train_custom.sh 自己的默认值，别多此一举地传一遍。"""
+    monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
+    assert "--remap" not in jobs.build_command({"date": "ds_x"}, "rf", None)
