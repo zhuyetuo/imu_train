@@ -115,6 +115,13 @@ if [ "$SUB" = "deploy" ]; then
                 || FAILED+=("algo_tinyml clone 失败，端侧服务起不来")
         fi
         export ALGO_TINYML_HOST
+        # 以前端侧服务是在宿主机上用 algo_tinyml/serve.sh 起的，现在改由 compose 起。
+        # 旧的还在跑就占着 8900，新容器起不来（2026-09-24：健康检查还是通的——通的是
+        # 旧那个，看着一切正常）。有 pidfile 就停掉它
+        if [ -f "$ALGO_TINYML_HOST/.edge_service.pid" ]; then
+            echo "  停掉宿主机上旧的端侧服务（现在由 compose 起）"
+            deploy_run bash "$ALGO_TINYML_HOST/serve.sh" stop || true
+        fi
 
         line "label_service（端口 8383）+ edge-service（端口 8900）"
         if [ "$OLD_REV" != "$NEW_REV" ] && [ -n "$(git diff --name-only "$OLD_REV" "$NEW_REV" -- label_service/Dockerfile label_service/requirements-docker.txt 2>/dev/null)" ]; then
@@ -155,8 +162,13 @@ if [ "$SUB" = "deploy" ]; then
     if want label; then
         deploy_probe "label_service " "http://127.0.0.1:${LABEL_SERVICE_PORT:-8383}/health" 30 || FAILED+=("label_service 不通")
         # 起来要把每个端侧模型的 C 编一遍再过自检，比 label_service 慢
-        deploy_probe "edge-service  " "http://127.0.0.1:${EDGE_SERVICE_PORT:-8900}/health" 90 \
-            || FAILED+=("edge-service 不通（bash label_service/up.sh logs edge-service 看自检哪里没过）")
+        # 探端口不够：旧的宿主机端侧服务也答 /health。要确认是容器在答
+        if [ "${DRY_RUN:-0}" != "1" ] && ! (cd label_service && docker compose -f docker-compose.yml ps --status running 2>/dev/null | grep -q edge-service); then
+            FAILED+=("edge-service 容器没起来（bash label_service/up.sh logs edge-service；8900 被占的话 ss -ltnp | grep 8900 看是谁）")
+        else
+            deploy_probe "edge-service  " "http://127.0.0.1:${EDGE_SERVICE_PORT:-8900}/health" 90 \
+                || FAILED+=("edge-service 不通（bash label_service/up.sh logs edge-service 看自检哪里没过）")
+        fi
     fi
     if want vision; then
         VB_PORT="${VISION_SERVICE_PORT:-8385}"
