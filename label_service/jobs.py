@@ -60,14 +60,77 @@ def _next_job_id() -> int:
     return (max(ids) + 1) if ids else 1
 
 
+def apply_label_remap(tasks: list, remap: dict) -> int:
+    """按 {原名: 新名} 改写标注的类别名，返回改了多少段。
+
+    ## 为什么要有这一步
+
+    训练那边取的是整条链的**第 0 个**（labels[0]，见
+    src/data/labelstudio_to_custom.py），所以「抓挠-肩胸」进训练时本来就是
+    「抓挠」。但人想做的归并不止这一种：
+
+      - 某个细类太少（肩胸 1 段 9 秒）→ 并进兄弟类别里
+      - 某个大类不是要训的目标（舔、甩头/抖身）→ 折进「活动」当负样本
+
+    第二种尤其要紧：configs/remap_custom_3class.yaml 用的还是旧模板的名字
+    （舔身体 / 甩身体 / 蹭擦身体），现在模板发出来的是「舔」「甩头/抖身」
+    「蹭」——对不上，apply_remap() 就把这些样本**静默丢掉**了。
+
+    ## 为什么放在训练时、不放在导出时
+
+    导出时改的话，那份数据集就永远是改过的，想换一种归并得重导一遍；而归并
+    方案是要反复试的（这次把舔当负样本，下次单独训它）。放这里，同一份数据集
+    能喂给不同的归并跑。
+
+    ## 匹配规则：先叶子后根
+
+    一段的链是 [抓挠, 抓挠-躯干]。先拿最后一级去查表（能精确到细类），查不到
+    再拿第一级（整个大类一起搬）。命中就把整条链换成 [新名]——留着旧的父级
+    没有意义，训练只看第 0 个。
+
+    链已经正好是 [新名] 才算没事干；只比第 0 个是不够的，那样「抓挠-头颈耳
+    → 抓挠」会被当成没变，二级标签留在链上不收。
+    """
+    if not remap:
+        return 0
+    n = 0
+    for t in tasks:
+        for ann in t.get("annotations") or []:
+            for seg in ann.get("result") or []:
+                v = seg.get("value") or {}
+                labels = v.get("timeserieslabels") or []
+                if not labels:
+                    continue
+                target = remap.get(labels[-1]) or remap.get(labels[0])
+                # 已经正好就是这一个名字才算没事干。**不能只比第 0 个**：
+                # 把「抓挠-头颈耳」并成「抓挠」时第 0 个本来就是抓挠，那样判
+                # 就会跳过，二级标签留在链上没被收掉，人在界面上明明选了合并
+                if not target or labels == [target]:
+                    continue
+                v["timeserieslabels"] = [target]
+                n += 1
+    return n
+
+
 def prepare_export(dataset_spec: dict) -> None:
+    """把 label_infra 导出的数据集整理成 train_custom.sh 认的样子。
+
+    NAS 上是一份 Label Studio 格式 JSON，csv 字段是 NAS_ROOT 下的相对路径。
+    train_custom.sh 只认 data/raw_custom/<date>/merged_tmp.json + 固定的
+    data/raw_wit/ 当 CSV 目录（按文件名找），所以这里把 JSON 抄过去、csv 改成
+    文件名，并把 NAS 上的 CSV 软链进 data/raw_wit/（文件名带日期时间，不会撞）。
+
+    **主数据集和一起训练的那几份走同一条路。** 以前只整理主的，额外批次得事先
+    自己躺在 data/raw_custom/ 下——界面上根本没法选，多数据集训练等于用不了。
     """
-    label_infra 导出的数据集：NAS 上一份 Label Studio 格式 JSON，csv 字段是 NAS_ROOT
-    下的相对路径。train_custom.sh 只认 data/raw_custom/<date>/merged_tmp.json + 固定的
-    data/raw_wit/ 当 CSV 目录（按文件名找），所以这里把 JSON 抄过去、csv 改成文件名，
-    并把 NAS 上的 CSV 软链进 data/raw_wit/（文件名带日期时间，不会撞）。
-    """
-    export_json = dataset_spec.get("export_json")
+    _prepare_one(dataset_spec.get("export_json"), dataset_spec["date"],
+                 dataset_spec.get("label_remap") or {})
+    for extra in dataset_spec.get("extra_datasets") or []:
+        _prepare_one(extra.get("export_json"), extra["date"],
+                     dataset_spec.get("label_remap") or {})
+
+
+def _prepare_one(export_json: str | None, date: str, label_remap: dict) -> None:
     if not export_json:
         return
     src = os.path.join(config.NAS_ROOT, export_json)
@@ -92,11 +155,13 @@ def prepare_export(dataset_spec: dict) -> None:
         elif not os.path.exists(link):
             os.symlink(full, link)
         t["data"]["csv"] = os.path.basename(full)
-    data_dir = os.path.join(config.REPO_ROOT, "data", "raw_custom", dataset_spec["date"])
+    n_remapped = apply_label_remap(tasks, label_remap)
+    data_dir = os.path.join(config.REPO_ROOT, "data", "raw_custom", date)
     os.makedirs(data_dir, exist_ok=True)
     with open(os.path.join(data_dir, "merged_tmp.json"), "w", encoding="utf-8") as f:
         json.dump(tasks, f, ensure_ascii=False)
-    log.info("数据集 %s 已整理: %d 个任务 → %s", dataset_spec["date"], len(tasks), data_dir)
+    log.info("数据集 %s 已整理: %d 个任务 → %s%s", date, len(tasks), data_dir,
+             f"（按类别映射改写了 {n_remapped} 段）" if n_remapped else "")
 
 
 def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[str]:
@@ -107,6 +172,11 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[
         cmd += ["--hz", str(dataset_spec["hz"])]
     if dataset_spec.get("clean"):
         cmd += ["--clean"]
+    # 一起训练的那几份。界面选的走 extra_datasets（带各自的 json 和采样率），
+    # extra_date 是老的手写形式（DATE:HZ，数据已经在 data/raw_custom 下），留着
+    for extra in dataset_spec.get("extra_datasets") or []:
+        hz = extra.get("source_hz") or dataset_spec.get("source_hz") or 50
+        cmd += ["--extra_date", f"{extra['date']}:{hz}"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
     if dataset_spec.get("missing_strategy"):
