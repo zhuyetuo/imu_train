@@ -377,6 +377,8 @@ class DatasetSpec(BaseModel):
     export_json: str | None = Field(None, description="label_infra 导出的 Label Studio 格式 JSON 在 NAS_ROOT 下的相对路径；"
                                                     "csv 字段是 NAS_ROOT 下的相对路径，服务会整理成 data/raw_custom/<date>/merged_tmp.json")
     clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")
+    axes: int = Field(6, description="用几轴：6=加速度+陀螺仪（默认），3=只用加速度。"
+                                     "端侧只有加速度计时用 3，否则模型学的是板上没有的信号")
     extra_datasets: list[ExtraDataset] = Field(default_factory=list,
         description="一起训练的其它数据集。跟主数据集走同一条整理流程，然后按 --extra_date DATE:HZ 合并")
     label_remap: dict[str, str] = Field(default_factory=dict,

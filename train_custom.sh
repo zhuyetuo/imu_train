@@ -85,6 +85,11 @@ LABELS=()                 # 要合成的类别，--label可重复传（比如--l
                            # 同时给两个类别都补合成数据）。不传时默认只合成"抓挠"（见下面
                            # 解析完参数后的默认值兜底）
 REMAP="configs/remap_custom_3class.yaml"
+AXES=6                     # 用几轴：6=加速度+陀螺仪（默认），3=只用加速度。
+                           # **端侧只有加速度计时要用 3**——否则模型学的是板上
+                           # 根本没有的信号，服务端指标再好也代表不了端上表现。
+                           # 3 轴的预处理产物跟 6 轴不能混，所以下面 PROCESSED_DIR
+                           # 会带上 _acc3 后缀，两者各存各的
 CSV_DIR="data/raw_wit/"
 RESULTS_DIR="results"
 SPLIT_STRATEGY="random"   # random=混合所有狗后按片段分组划分（默认），subject=按狗ID划分，label_concat=按类别拼接
@@ -134,6 +139,9 @@ _print_help() {
 全部参数:
   --date DATE            必填，主批次日期目录名（data/raw_custom/<DATE>/）
   --extra_date DATE:HZ   可重复传，额外合并的批次，HZ填该批次自己真实采样率
+  --axes 3|6             用几轴（默认6=加速度+陀螺仪）。端侧只有加速度计时用3，
+                         否则模型学的是板上没有的信号。3轴的预处理产物单独存
+                         （目录带_acc3后缀），跟6轴互不覆盖
   --remap FILE           类别重映射表（默认 configs/remap_custom_3class.yaml）。
                          换一张表就能换训练目标——比如把抓挠拆成
                          抓挠-头颈耳/抓挠-躯干各自一类。输出目录跟着表名走
@@ -197,6 +205,7 @@ while [[ $# -gt 0 ]]; do
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
     --remap)          REMAP="$2";          shift 2 ;;
+    --axes)           AXES="$2";           shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
   esac
 done
@@ -238,7 +247,10 @@ if [[ "$MISSING_STRATEGY" == "drop_window" ]]; then
   DROP_NAN_WINDOWS_FLAG="--drop_nan_windows"
 fi
 
-PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}"
+# 3 轴和 6 轴的窗口张量通道数不同，**绝不能共用一个目录**：先跑 6 轴再跑 3 轴
+# 的话，没加 --clean 就会直接拿旧的 6 轴 npz 接着训，训出来的模型标着 3 轴、
+# 实际吃的是 6 轴数据，而且一点报错都没有
+PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}$( [[ "$AXES" == "3" ]] && echo "_acc3" )"
 DATA_DIR="data/raw_custom/${DATE}"
 CSV="${DATA_DIR}/merged_${DATE}.csv"
 JSON="${DATA_DIR}/merged_tmp.json"
@@ -519,6 +531,7 @@ else
     $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
     $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
     $DROP_NAN_WINDOWS_FLAG \
+    --axes "$AXES" \
     --hz "$HZ"
 fi
 

@@ -216,6 +216,9 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[
         cmd += ["--extra_date", f"{extra['date']}:{hz}"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
+    # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
+    if int(dataset_spec.get("axes") or 6) == 3:
+        cmd += ["--axes", "3"]
     # 界面给了归并表就用它生成的那份，没给还是默认的 3 类表
     runtime_remap = write_runtime_remap(dataset_spec)
     if runtime_remap:

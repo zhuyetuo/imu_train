@@ -432,6 +432,10 @@ def main(args):
         "window_s": window_s,
         "stride_s": stride_s,
         "label_mode": meta.get("label_mode", "majority"),  # 训练时窗口怎么打标签，推理侧重建事件要对齐这个
+        # 这个模型吃几个通道。**推理侧必须照着喂**：拿 6 轴的数据喂 3 轴模型
+        # （或反过来）特征维数就对不上，轻则报错，重则悄悄算出一串没意义的数。
+        # 值含姿态角那两列：6 轴 → 8，3 轴 → 5
+        "n_channels": int(meta.get("n_channels", 8)),
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},

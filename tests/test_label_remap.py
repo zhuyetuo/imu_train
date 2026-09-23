@@ -152,3 +152,20 @@ def test_没归并表时命令里不带remap(tmp_path, monkeypatch):
     """默认那张 3 类表是 train_custom.sh 自己的默认值，别多此一举地传一遍。"""
     monkeypatch.setattr(jobs.config, "REPO_ROOT", str(tmp_path))
     assert "--remap" not in jobs.build_command({"date": "ds_x"}, "rf", None)
+
+
+# ── 3 轴 / 6 轴 ─────────────────────────────────────────────────────────
+#
+# 什么时候用 3 轴：**端侧只有加速度计的时候**。那种情况下用 6 轴训出来的模型，
+# 服务端指标再好也代表不了端上的表现——那是拿一块板子上根本没有的信号在学。
+
+
+def test_默认6轴不传参数():
+    """默认就是原来的行为，命令里不该多出东西。"""
+    assert "--axes" not in jobs.build_command({"date": "d"}, "rf", None)
+    assert "--axes" not in jobs.build_command({"date": "d", "axes": 6}, "rf", None)
+
+
+def test_选3轴才传():
+    cmd = jobs.build_command({"date": "d", "axes": 3}, "rf", None)
+    assert cmd[cmd.index("--axes") + 1] == "3"

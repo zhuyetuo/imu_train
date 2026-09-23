@@ -107,6 +107,12 @@ def _corr_batch(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.where((sa > 1e-8) & (sb > 1e-8), c, 0.0)
 
 
+def _n_sensor(n_channels: int) -> int:
+    """总通道里有几个是传感器通道（最后两个是追加的 pitch/roll）。
+    跟 features.n_sensor_channels 必须一致——两份实现的输出要逐位对得上。"""
+    return max(3, int(n_channels) - 2)
+
+
 def extract_features_vec(X: np.ndarray, hz: int) -> np.ndarray:
     """
     X: (N, window_size, n_channels)，返回 (N, n_features)。
@@ -131,8 +137,11 @@ def extract_features_vec(X: np.ndarray, hz: int) -> np.ndarray:
     # 时域：全部通道
     for ch in range(c):
         cols.extend(_time_stats_batch(X[:, :, ch]))
-    # 频域：只有 acc+gyro 这 6 路（姿态角不是振荡信号）
-    for ch in range(min(6, c)):
+    # 频域：只有传感器那几路（姿态角是慢变量，不是振荡信号，做 FFT 没意义）。
+    # **不能写死 6**：6 轴时总通道 8、传感器 6，正好对上看不出问题；
+    # 3 轴时总通道 5，写死 6 就把 pitch/roll 也当振荡信号算进去了
+    n_sensor = _n_sensor(c)
+    for ch in range(min(n_sensor, c)):
         cols.extend(_freq_stats_batch(X[:, :, ch], hz))
 
     if c >= 6:
