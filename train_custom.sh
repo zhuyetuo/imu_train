@@ -134,6 +134,9 @@ _print_help() {
 全部参数:
   --date DATE            必填，主批次日期目录名（data/raw_custom/<DATE>/）
   --extra_date DATE:HZ   可重复传，额外合并的批次，HZ填该批次自己真实采样率
+  --remap FILE           类别重映射表（默认 configs/remap_custom_3class.yaml）。
+                         换一张表就能换训练目标——比如把抓挠拆成
+                         抓挠-头颈耳/抓挠-躯干各自一类。输出目录跟着表名走
   --source_hz HZ         主批次自己真实的采样率（跟--extra_date配合用，不传
                           默认等于--hz，见上面用法示例的说明）
   --hz HZ                训练目标采样率（默认16）
@@ -193,6 +196,7 @@ while [[ $# -gt 0 ]]; do
     --skip_ml)        SKIP_ML=1;           shift 1 ;;
     --extra_date)     EXTRA_DATES+=("$2"); shift 2 ;;
     --source_hz)      SOURCE_HZ="$2";       shift 2 ;;
+    --remap)          REMAP="$2";          shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
   esac
 done
@@ -649,7 +653,12 @@ fi
 
 echo ""
 echo "模型路径:"
-echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
+# 这两行不能把 remap 文件名写死：train.py 的输出目录是按 remap 文件名拼的
+# （{hz}hz_{remap文件名}），--remap 换成别的表之后写死的路径就指向一个不存在的
+# 目录。而 label_service/jobs.py 正是从这两行里解析模型路径存进训练记录的——
+# 写死的后果是训练成功了、记录里那个路径却打不开。
+_remap_stem=$(basename "$REMAP" .yaml)
+echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_${_remap_stem}/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
 if [[ "$SKIP_SYN" != "1" ]]; then
-  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_remap_custom_3class_syn/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
+  echo "  带合成: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_${_remap_stem}_syn/${MODEL_TYPE}/ml_${MODEL_TYPE}.pkl"
 fi

@@ -164,6 +164,43 @@ def _prepare_one(export_json: str | None, date: str, label_remap: dict) -> None:
              f"（按类别映射改写了 {n_remapped} 段）" if n_remapped else "")
 
 
+def write_runtime_remap(dataset_spec: dict) -> str | None:
+    """把界面那张归并表落成一份 remap 配置，返回相对仓库根的路径。没有就 None。
+
+    ## 为什么这一步是"能不能识别二级标签"的关键
+
+    训练取的是链的第 0 个（labels[0]）。想让「抓挠-头颈耳」成为一个独立类别，
+    光在 apply_label_remap 里把链收成 ["抓挠-头颈耳"] 还不够——train.py 后面
+    还要过一张 remap 表，表里没有这个名字的样本会被**直接丢掉**。
+
+    所以训练类别就是**归并表里那些目标名**：映射到自己 = 自成一类，映射到
+    「活动」= 折进活动当负样本。表由界面给，这里落成文件传给 --remap。
+
+    只按用到的目标建类，不并进默认那张表：并进去会多出几个一个样本都没有的
+    类别（比如把抓挠全拆成部位之后，「抓挠」自己就空了），指标上看着莫名其妙。
+
+    文件名带数据集名，这样 results/ 下的目录名能对上是哪一次训的
+    （train.py 的输出目录是 {hz}hz_{remap文件名}）。
+    """
+    remap = dataset_spec.get("label_remap") or {}
+    if not remap:
+        return None
+    classes = list(dict.fromkeys(remap.values()))
+    if not classes:
+        return None
+    safe = re.sub(r"[^0-9A-Za-z_.-]", "_", dataset_spec["date"])[:60]
+    rel = os.path.join("configs", f"remap_ui_{safe}.yaml")
+    path = os.path.join(config.REPO_ROOT, rel)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# 由标注平台「提交训练」里的归并表生成，每次提交都会覆盖。\n")
+        f.write(f"# 数据集: {dataset_spec['date']}\n")
+        f.write("# 左边是归并之后的类别名，右边是训练类别——映射到自己就是自成一类。\n")
+        for c in classes:
+            f.write(f"{c}: {c}\n")
+    log.info("归并表已写入 %s：%d 个训练类别 %s", rel, len(classes), classes)
+    return rel
+
+
 def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[str]:
     cmd = ["bash", "train_custom.sh", "--date", dataset_spec["date"]]
     if dataset_spec.get("source_hz"):
@@ -179,6 +216,10 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None) -> list[
         cmd += ["--extra_date", f"{extra['date']}:{hz}"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
+    # 界面给了归并表就用它生成的那份，没给还是默认的 3 类表
+    runtime_remap = write_runtime_remap(dataset_spec)
+    if runtime_remap:
+        cmd += ["--remap", runtime_remap]
     if dataset_spec.get("missing_strategy"):
         cmd += ["--missing_strategy", dataset_spec["missing_strategy"]]
     if model_type:
