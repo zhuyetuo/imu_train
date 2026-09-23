@@ -14,20 +14,29 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ENV_FILE=.env
 FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
 
-# 各测一个几 MB 的真实文件，看 speed_download。只拿首页测的话全是延迟，看不出带宽
-speed() {   # $1 url → 字节/秒（整数），失败 0
-    curl -fsSL -o /dev/null --max-time 12 -w '%{speed_download}' "$1" 2>/dev/null \
+# 测速要下**真实的轮子**，不能只拿索引页测：索引页几十 KB，测出来的是延迟不是带宽
+# （第一版就是这么测的，把 0.4 MB/s 的源当成了最快的，torch 下了一个小时）。
+# 各源的轮子文件名一样，先从索引页里找到一个 cp311 的 linux 轮子，再下 10 秒看速度
+speed() {   # $1 索引根  $2 包名  $3 文件名要含的模式 → 字节/秒，失败 0
+    local idx="${1%/}/$2/" href
+    href=$(curl -fsSL --max-time 12 "$idx" 2>/dev/null \
+           | grep -o 'href="[^"]*' | sed 's/href="//' | grep -- "$3" | grep -v 'sha256=.*sha256' | tail -1)
+    [ -n "$href" ] || { echo 0; return; }
+    href="${href%%#*}"
+    case "$href" in http*) ;; /*) href="$(echo "$1" | sed -E 's#(https?://[^/]+).*#\1#')$href" ;; *) href="$idx$href" ;; esac
+    # 只下 10 秒就断，看这 10 秒的平均速度（超时退出码不影响 -w 的输出）
+    curl -sSL -o /dev/null --max-time 10 -w '%{speed_download}' "$href" 2>/dev/null \
         | awk '{printf "%d", $1+0}' || echo 0
 }
-pick() {    # $1 变量名  $2 测速用的相对路径  $3.. 候选源
-    local var=$1 probe=$2; shift 2
+pick() {    # $1 变量名  $2 包名  $3 轮子文件名模式  $4.. 候选源
+    local var=$1 pkg=$2 pat=$3; shift 3
     if [ "$FORCE" = "0" ] && grep -q "^${var}=" "$ENV_FILE" 2>/dev/null; then
         echo "  $var 已钉住：$(grep "^${var}=" "$ENV_FILE" | cut -d= -f2-)（要重测加 --force）"
         return
     fi
     local best="" best_s=0 u s
     for u in "$@"; do
-        s=$(speed "${u%/}/$probe")
+        s=$(speed "$u" "$pkg" "$pat")
         printf '  %-58s %6.1f MB/s\n' "$u" "$(awk "BEGIN{print $s/1048576}")"
         [ "$s" -gt "$best_s" ] && { best=$u; best_s=$s; }
     done
@@ -39,19 +48,15 @@ pick() {    # $1 变量名  $2 测速用的相对路径  $3.. 候选源
 }
 
 echo "▶ 挑最快的源（只在没钉住时测）"
-# 测速文件：numpy 的轮子（PyPI 各镜像路径一样）；torch 源测 torch 目录索引页
-# 没法拿"同一个轮子"（各版本文件名带 hash），改测 filelock 这种小包的索引 + 首个轮子
-pick PIP_INDEX_URL "numpy/" \
+pick PIP_INDEX_URL numpy 'cp311-cp311-manylinux.*x86_64.whl' \
     https://pypi.tuna.tsinghua.edu.cn/simple \
     https://mirrors.aliyun.com/pypi/simple \
     https://mirrors.cloud.tencent.com/pypi/simple \
     https://mirrors.ustc.edu.cn/pypi/simple \
     https://pypi.org/simple
-pick TORCH_INDEX_URL "torch/" \
-    https://mirrors.aliyun.com/pytorch-wheels/cpu \
+pick TORCH_INDEX_URL torch 'cpu-cp311-cp311-manylinux.*x86_64.whl' \
     https://mirror.nju.edu.cn/pytorch/whl/cpu \
     https://download.pytorch.org/whl/cpu
-pick TORCH_CUDA_INDEX_URL "torch/" \
-    https://mirrors.aliyun.com/pytorch-wheels/cu128 \
+pick TORCH_CUDA_INDEX_URL torch 'cu128-cp311-cp311-manylinux.*x86_64.whl' \
     https://mirror.nju.edu.cn/pytorch/whl/cu128 \
     https://download.pytorch.org/whl/cu128
