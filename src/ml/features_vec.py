@@ -110,7 +110,8 @@ def _corr_batch(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _n_sensor(n_channels: int) -> int:
     """总通道里有几个是传感器通道（最后两个是追加的 pitch/roll）。
     跟 features.n_sensor_channels 必须一致——两份实现的输出要逐位对得上。"""
-    return max(3, int(n_channels) - 2)
+    n = int(n_channels)
+    return n - 2 if n % 3 == 2 else n
 
 
 def extract_features_vec(X: np.ndarray, hz: int) -> np.ndarray:

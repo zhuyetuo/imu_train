@@ -17,6 +17,7 @@ label_service 的配置——全部走环境变量，跟 run_review_bins_all_day
                     口腔验证/ 子目录下；/tooth/detect 里的 path 可以相对它，也可以相对 NAS_ROOT
   TOOTH_WEIGHTS     牙齿 YOLO 权重（默认 tooth_health/data/runs/tooth_detect/weights/best.pt，不在仓库里）
   TOOTH_CONF / TOOTH_IMGSZ  检测阈值 0.5 / 输入尺寸 960，跟 tooth_health/code/web_app.py 默认一致
+  ALGO_TINYML_DIR   algo_tinyml 仓库路径（默认 ~/algo_tinyml），「导出到端侧」要用它的导出脚本
   LABEL_INFER_WORKERS  推理进程数（默认 CPU 核数-2，跟 run_review_bins_all_days.sh 的 WORKERS=-1 一个意思）
 """
 
@@ -51,6 +52,8 @@ MATERIAL_ROOT    = _env("MATERIAL_ROOT", "/home/toky/alg_material")
 TOOTH_WEIGHTS    = _env("TOOTH_WEIGHTS", os.path.join(REPO_ROOT, "tooth_health", "data", "runs", "tooth_detect", "weights", "best.pt"))
 TOOTH_CONF       = float(_env("TOOTH_CONF", "0.5"))
 TOOTH_IMGSZ      = int(_env("TOOTH_IMGSZ", "960"))
+# 端侧那套（algo_tinyml 仓库）在哪。训练记录「导出到端侧」调它的 service/export_train.py
+ALGO_TINYML_DIR  = os.path.expanduser(_env("ALGO_TINYML_DIR", "~/algo_tinyml"))
 INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count() or 2) - 2)
 # 给交互式推理（工作台点「AI预标注」）留几个槽位，批量预标注最多占 INFER_WORKERS - 这个数，
 # 免得标注员点一下要排在几十个批量文件后面
