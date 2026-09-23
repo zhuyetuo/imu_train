@@ -437,3 +437,41 @@ def test_edge_export_inputs(tmp_path, monkeypatch):
     mp2.parent.mkdir(parents=True)
     mp2.write_bytes(b"x")
     assert jobs.edge_export_inputs(str(mp2))[1] is None
+
+
+def test_export_edge_reloads_edge_service(tmp_path, monkeypatch):
+    """导完要让端侧服务 reload；连不上不算导出失败，但要把原因带回去。"""
+    import subprocess
+    from label_service import config, jobs
+
+    monkeypatch.setattr(config, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(config, "REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(config, "ALGO_TINYML_DIR", str(tmp_path / "tinyml"))
+    monkeypatch.setattr(config, "EDGE_SERVICE_URL", "http://127.0.0.1:1")   # 没人听
+    (tmp_path / "tinyml" / "service").mkdir(parents=True)
+    (tmp_path / "tinyml" / "service" / "export_train.py").write_text("")
+    mp = tmp_path / "results" / "processed_d__job1" / "16hz_x" / "rf" / "ml_rf.pkl"
+    mp.parent.mkdir(parents=True)
+    mp.write_bytes(b"x")
+    job = jobs.create_job({"date": "d"}, "rf", None)
+    job.update(status=jobs.STATUS_DONE, model_path=str(mp))
+    jobs._save(job)
+
+    class R:
+        returncode = 0
+        stdout = 'blah\nEXPORT_RESULT {"tag": "train1", "edge": {"macro_f1": 0.5}}\n'
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    out = jobs.export_edge(job["job_id"])
+    assert out["tag"] == "train1" and out["reloaded"] is False and "连不上" in out["reload_error"]
+    assert (jobs.get_job(job["job_id"]).get("edge") or {}).get("tag") == "train1"
+
+
+def test_compose_has_edge_service():
+    import yaml
+    from label_service import config
+    y = yaml.safe_load(open(os.path.join(config.REPO_ROOT, "label_service", "docker-compose.yml")))
+    assert "edge-service" in y["services"]
+    assert "/algo_tinyml" in str(y["services"]["label-service"]["volumes"])
+    assert y["services"]["label-service"]["environment"]["EDGE_SERVICE_URL"] == "http://edge-service:8900"

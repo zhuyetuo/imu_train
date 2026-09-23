@@ -768,10 +768,29 @@ def export_edge(job_id: int) -> dict:
     if r.returncode != 0 or not line:
         raise RuntimeError(f"导出失败（退出码 {r.returncode}）：{tail}")
     result = json.loads(line[len("EXPORT_RESULT "):])
+    # 让端侧服务把新模型挂上。挂不上不算导出失败——文件已经导好了，服务下次起来也会挂
+    result["reloaded"], result["reload_error"] = reload_edge_service()
     job = get_job(job_id) or job
     job["edge"] = result
     _save(job)
     return result
+
+
+def reload_edge_service() -> tuple[bool, str | None]:
+    import urllib.error
+    import urllib.request
+
+    url = f"{config.EDGE_SERVICE_URL}/api/v1/label/reload"
+    try:
+        req = urllib.request.Request(url, data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            data = json.loads(r.read() or b"{}")
+        if data.get("ok"):
+            return True, None
+        return False, f"端侧服务 reload 失败：{data.get('error')} {data.get('errors') or ''}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return False, f"连不上端侧服务（{url}）：{e}"
 
 
 def remove_edge(job_id: int) -> None:

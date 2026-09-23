@@ -9,7 +9,10 @@
 #                        才重建镜像、否则重建容器+重启 → vision_service 停了再起 → 逐个探健康检查。
 #                        只管这个仓库（IMU 推理、SAM、狗检测、找片段、向量索引、本地大模型）；
 #                        web 平台是 label_infra 自己的 deploy_all.sh，两边各发各的
-#   ./up.sh status       两个分别在不在跑
+#   ./up.sh status       都在不在跑（label_service 那栏里有 edge-service）
+#
+#   端侧模型服务（端口 8900）跟 label_service 在同一个 compose 里，一起起停。
+#   代码在 ~/algo_tinyml（deploy 会自动 clone / pull），那个仓库不单独起服务。
 #   ./up.sh down         两个都停
 #
 #   ./up.sh --only label     只动 label_service
@@ -102,7 +105,18 @@ if [ "$SUB" = "deploy" ]; then
     NEW_REV="$(git rev-parse HEAD 2>/dev/null || echo none)"
 
     if want label; then
-        line "label_service（端口 8383）"
+        # 端侧那套代码。挂进容器给 edge-service 和「导出到端侧」用；不在就 clone
+        line "algo_tinyml（端侧模型代码，~/algo_tinyml）"
+        ALGO_TINYML_HOST="${ALGO_TINYML_HOST:-$HOME/algo_tinyml}"
+        if [ -d "$ALGO_TINYML_HOST/.git" ]; then
+            deploy_run git -C "$ALGO_TINYML_HOST" pull --ff-only || FAILED+=("algo_tinyml 拉不动（本地有改动？）")
+        else
+            deploy_run git clone "${ALGO_TINYML_REPO:-https://github.com/zhuyetuo/algo_tinyml.git}" "$ALGO_TINYML_HOST" \
+                || FAILED+=("algo_tinyml clone 失败，端侧服务起不来")
+        fi
+        export ALGO_TINYML_HOST
+
+        line "label_service（端口 8383）+ edge-service（端口 8900）"
         if [ "$OLD_REV" != "$NEW_REV" ] && [ -n "$(git diff --name-only "$OLD_REV" "$NEW_REV" -- label_service/Dockerfile label_service/requirements-docker.txt 2>/dev/null)" ]; then
             echo "  依赖变了 → 重建镜像（冷缓存十几分钟）"
             deploy_run bash label_service/up.sh $GPU_FLAG || FAILED+=("label_service 重建没成")
@@ -132,6 +146,9 @@ if [ "$SUB" = "deploy" ]; then
     line "都通了吗"
     if want label; then
         deploy_probe "label_service " "http://127.0.0.1:${LABEL_SERVICE_PORT:-8383}/health" 30 || FAILED+=("label_service 不通")
+        # 起来要把每个端侧模型的 C 编一遍再过自检，比 label_service 慢
+        deploy_probe "edge-service  " "http://127.0.0.1:${EDGE_SERVICE_PORT:-8900}/health" 90 \
+            || FAILED+=("edge-service 不通（bash label_service/up.sh logs edge-service 看自检哪里没过）")
     fi
     if want vision; then
         VB_PORT="${VISION_SERVICE_PORT:-8385}"

@@ -36,6 +36,10 @@ services:
       # 非空默认值，透传一个空字符串进来会把默认模型路径清掉，服务直接起不来。
       # 要改默认模型就写进 .env（env_file 那条已经读了）。
       LABEL_MODELS: ${LABEL_MODELS:-}
+      # 端侧那条线：algo_tinyml 挂在 /algo_tinyml（下面 volumes），「导出到端侧」调
+      # 它的导出脚本，导完让旁边的 edge-service 重新加载
+      ALGO_TINYML_DIR: /algo_tinyml
+      EDGE_SERVICE_URL: http://edge-service:8900
     ports:
       - "${LABEL_SERVICE_PORT:-8383}:8383"
     volumes:
@@ -45,6 +49,9 @@ services:
       - ${NAS_ROOT_HOST:-/home/toky/ai_data}:${NAS_ROOT:-/home/toky/ai_data}
       # 素材库（牙齿/皮肤照片），只读
       - ${MATERIAL_ROOT_HOST:-/home/toky/alg_material}:${MATERIAL_ROOT:-/home/toky/alg_material}:ro
+      # 端侧那套代码（上层 up.sh deploy 会 clone / pull）。导出目录和本地模型清单
+      # 都写在里面，edge-service 挂的是同一个目录，所以它 reload 就看得到
+      - ${ALGO_TINYML_HOST:-/home/toky/algo_tinyml}:/algo_tinyml
     # 推理是多进程池（默认 CPU 核数 - 2），训练更吃 CPU，别限制得太死
     shm_size: "2gb"
     healthcheck:
@@ -53,4 +60,39 @@ services:
       timeout: 10s
       retries: 5
       # 模型加载 + 进程池预热要一会儿，给足启动时间再开始判健康
+      start_period: 120s
+
+  # ── 端侧模型服务（端口 8900）────────────────────────────────────────────
+  # 跑的是板上那份 C（algo_tinyml），给平台回答"这个模型烧到项圈上会是什么效果"。
+  # 现在还没有板子，所以要有这么个服务；有了板子它也还是模型对比那页的依据。
+  #
+  # 为什么放在这里、用同一个镜像：它复用 imu_train 的整条预处理链和 label_service
+  # 的后处理（同一份代码），依赖跟 label-service 一模一样；分开管的话就是两套
+  # 启停、两份日志、两处要记得部署。algo_tinyml 只是代码库，不单独起服务。
+  edge-service:
+    image: ${LABEL_IMAGE:-imu-train-label-service}
+    restart: unless-stopped
+    depends_on:
+      - label-service
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    command: >
+      python -u /algo_tinyml/service/edge_service.py
+        --models /algo_tinyml/edge_models.json
+        --imu-train /app
+        --nas-root ${NAS_ROOT:-/home/toky/ai_data}
+        --resample training_match
+        --host 0.0.0.0 --port 8900 --strict-port
+    ports:
+      - "${EDGE_SERVICE_PORT:-8900}:8900"
+    volumes:
+      - ..:/app
+      - ${NAS_ROOT_HOST:-/home/toky/ai_data}:${NAS_ROOT:-/home/toky/ai_data}
+      - ${ALGO_TINYML_HOST:-/home/toky/algo_tinyml}:/algo_tinyml
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8900/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # 起来要先把每个模型的 C 编一遍、过 golden 自检
       start_period: 120s
