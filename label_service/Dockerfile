@@ -34,10 +34,13 @@ WORKDIR /app
 
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_DEFAULT_TIMEOUT=120 \
-    PIP_PROGRESS_BAR=raw
+    PIP_DEFAULT_TIMEOUT=120
+
+# 基础镜像自带的 pip 太老，没有 raw 进度模式（--progress-bar 只认 on/off）。先升级
+RUN pip install --no-cache-dir -U "pip>=24.1"
 # PIP_PROGRESS_BAR=raw：构建日志不是终端，pip 默认一个字都不打，几个 G 的 torch
 # 下几分钟看起来像卡死了。raw 模式每隔一会儿打一行"下到多少 MB / 共多少"
+ENV PIP_PROGRESS_BAR=raw
 
 # torch 先单独装 CPU 版：ultralytics 依赖它，但容器里没有 GPU，装默认版会连带
 # 拉 nvidia_cu* 那一堆 CUDA 轮子（好几个 G，全是用不上的）。CPU 版约 200MB。
