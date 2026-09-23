@@ -244,8 +244,10 @@ def write_runtime_remap(dataset_spec: dict, job_id: int | None = None) -> str | 
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
     cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
-    if dataset_spec.get("source_hz"):
-        cmd += ["--source_hz", str(dataset_spec["source_hz"])]
+    # 原始数据的采样率一定要传：不传的话 train_custom.sh 当它已经是 --hz，不降采样，
+    # 训练和推理（推理按 DEVICE_HZ 降到 16Hz）就对不上了
+    cmd += ["--source_hz", str(dataset_spec.get("source_hz") or config.DEVICE_HZ)]
+    cmd += ["--resample_method", config.RESAMPLE_METHOD]
     if dataset_spec.get("hz"):
         cmd += ["--hz", str(dataset_spec["hz"])]
     if dataset_spec.get("clean"):
