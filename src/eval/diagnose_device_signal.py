@@ -93,7 +93,7 @@ def report_predictions(csv_path, model_path, device_hz, model_hz):
         print("  [警告] 数据太短，切不出一个完整窗口")
         return
 
-    tilt = append_raw_tilt_batch(X)[:, :, 6:8]
+    tilt = append_raw_tilt_batch(X)[:, :, -2:]
     X_aligned = gravity_align_batch(X)
     X_aligned = np.concatenate([X_aligned, tilt], axis=2)
     feats = extract_features(X_aligned, model_hz, show_progress=False)

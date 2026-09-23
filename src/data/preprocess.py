@@ -241,7 +241,7 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
         if not wins:
             continue
         arr = np.array(wins, dtype=np.float32)
-        tilt = append_raw_tilt_batch(arr)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
+        tilt = append_raw_tilt_batch(arr)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             arr = gravity_align_batch(arr)
         arr = np.concatenate([arr, tilt], axis=2)
@@ -275,7 +275,7 @@ def process_split(records, record_ids_set, window_size, stride, le, keep_label_s
                                             label_mode, seg_id_labels, drop_nan_windows)
         if len(X) == 0:
             continue
-        tilt = append_raw_tilt_batch(X)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
+        tilt = append_raw_tilt_batch(X)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             X = gravity_align_batch(X)
         X = np.concatenate([X, tilt], axis=2)

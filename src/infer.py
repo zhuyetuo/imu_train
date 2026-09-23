@@ -263,7 +263,7 @@ def main(args):
             print(f"  [跳过] {fname}: 数据太短，无法生成窗口（需至少 {window_size} 帧）")
             continue
 
-        tilt = append_raw_tilt_batch(windows)[:, :, 6:8]  # 原始（未对齐）姿态角，须在重力对齐前算
+        tilt = append_raw_tilt_batch(windows)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
         if use_gravity_align:
             windows = gravity_align_batch(windows)
         windows = np.concatenate([windows, tilt], axis=2)

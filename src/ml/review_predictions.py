@@ -266,7 +266,7 @@ def main():
                 X = _window_data(data, window_size, stride)
                 if len(X) == 0:
                     continue
-                tilt = append_raw_tilt_batch(X)[:, :, 6:8]
+                tilt = append_raw_tilt_batch(X)[:, :, -2:]
                 if gravity_aligned:
                     X = gravity_align_batch(X)
                 X = np.concatenate([X, tilt], axis=2)

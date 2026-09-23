@@ -242,7 +242,7 @@ def predict_record(data6, model, classes, window_size, stride, hz):
     X, starts = sliding_windows(data6, window_size, stride)
     if len(X) == 0:
         return [], [], []
-    tilt = append_raw_tilt_batch(X)[:, :, 6:8]
+    tilt = append_raw_tilt_batch(X)[:, :, -2:]
     X_aligned = gravity_align_batch(X)
     X_full = np.concatenate([X_aligned, tilt], axis=2)
     feats = extract_features(X_full, hz, show_progress=False)

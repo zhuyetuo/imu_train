@@ -48,12 +48,44 @@ def test_赋值里不能用会失败的命令替换():
     assert not bad, f"赋值里用了会失败的命令替换，set -e 下会让脚本静默退出：{bad}"
 
 
-def test_姿态角取最后两列而不是写死的六到八():
-    """append_raw_tilt_batch 是追加在最后两列的。写死 6:8 只在 6 轴时对，
-    3 轴时追加的是 3:5，取 6:8 会越界。"""
-    src = open("src/infer_csv_scratch.py", encoding="utf-8").read()
-    assert "append_raw_tilt_batch(X)[:, :, -2:]" in src
-    assert "[:, :, 6:8]" not in src
+def test_整个仓库都不许写死六到八():
+    """append_raw_tilt_batch 是把姿态角追加在**最后两列**的：6 轴时是 6:8，3 轴时是 3:5。
+
+    写死 6:8 最阴的地方是**numpy 不报错**：5 通道的数组取 [:, :, 6:8] 返回的是
+    一个宽度为 0 的空数组。于是 3 轴时姿态角被悄悄丢掉，训练照样跑完、模型照样
+    保存——2026-09-23 第一次 3 轴训练，「纯标注」那一版就是这么训出来的，
+    只有 3 路、没有 pitch/roll。
+
+    这个坑前后踩了三回（推理、训练里的合成数据、预处理），所以扫整个仓库。
+    统一写 -2:，6 轴时跟 6:8 取的是同一列，一个数都不变。"""
+    import pathlib
+
+    bad = []
+    for root in ("src", "label_service"):
+        for f in pathlib.Path(root).rglob("*.py"):
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if "[:, :, 6:8]" in line and not line.lstrip().startswith("#"):
+                    bad.append(f"{f}:{i}")
+    assert not bad, f"又写死了 6:8，3 轴时会悄悄变成空数组：{bad}"
+
+
+def test_写死六到八在三轴时确实是悄悄变空():
+    """上面那条规矩的依据——numpy 越界切片不报错。它哪天变了要能知道。"""
+    X5 = np.zeros((2, 4, 5), dtype=np.float32)
+    assert X5[:, :, 6:8].shape[2] == 0
+    assert X5[:, :, -2:].shape[2] == 2
+
+
+def test_预处理后三轴是五通道六轴是八通道():
+    """姿态角两列必须在。3 轴时不在的话，模型是在只有 3 路的数据上训的。"""
+    from src.data.gravity_align import append_raw_tilt_batch, gravity_align_batch
+
+    for c, want in ((3, 5), (6, 8)):
+        X = np.zeros((2, 16, c), dtype=np.float32)
+        X[:, :, 2] = 1.0
+        tilt = append_raw_tilt_batch(X)[:, :, -2:]
+        out = np.concatenate([gravity_align_batch(X), tilt], axis=2)
+        assert out.shape[2] == want, f"{c} 轴预处理后该有 {want} 通道，实际 {out.shape[2]}"
 
 
 def test_姿态角函数本来就支持三通道():
@@ -120,3 +152,21 @@ def test_两份特征实现逐位一致():
         assert slow.shape == fast.shape
         assert np.allclose(slow, fast, atol=1e-5, rtol=1e-4), f"{c} 通道时两份实现对不上"
         assert len(feature_names(c)) == slow.shape[1], f"{c} 通道的特征名数量对不上特征维数"
+
+
+def test_合成数据按轴数生成(monkeypatch):
+    """合成数据的通道数必须跟真实数据一致。3 轴时还吐 6 路的话，train.py 把两边
+    拼起来直接崩——2026-09-23 第一次 3 轴训练，「带合成」那一版就是这么挂的。"""
+    src = open("src/data/synthesize_scratch.py", encoding="utf-8").read()
+    assert "if axes == 3:" in src
+    sh = open("train_custom.sh", encoding="utf-8").read()
+    # 调合成脚本那一段里要把 --axes 传过去
+    seg = sh[sh.index("python src/data/synthesize_scratch.py"):]
+    seg = seg[: seg.index("SYNTHETIC_SPEC_ARGS")]
+    assert '--axes "$AXES"' in seg, "train_custom.sh 调合成脚本时没传 --axes"
+
+
+def test_训练时合成数据路数多了就切_少了说人话():
+    src = open("src/ml/train.py", encoding="utf-8").read()
+    assert "X_syn = X_syn[:, :, :want_sensor]" in src
+    assert "合成数据是按 3 轴生成的" in src
