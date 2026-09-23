@@ -550,6 +550,9 @@ def delete_job(job_id: int, active_model_path: str | None) -> dict:
         if os.path.exists(p):
             os.remove(p)
     log.info("训练任务 #%d 已删除：%s", job_id, deleted)
+    # 端侧那份（导出过的话）一起撤，不然端侧服务里还挂着一个没了来源的模型
+    if job.get("edge"):
+        remove_edge(job_id)
     return {"deleted": deleted}
 
 
@@ -698,6 +701,94 @@ def reconcile_orphans() -> list[int]:
     return fixed
 
 
+# ── 导出到端侧 ───────────────────────────────────────────────────────────
+
+
+def edge_export_inputs(model_path: str) -> tuple[str, str | None]:
+    """从模型路径反推这次训练的预处理目录和 remap 配置。
+
+    train_custom.sh 的产出约定（train.py 的 out_dir）：
+        results/processed_<X>/<hz>hz_<remap名>[_syn]/<model>/ml_<model>.pkl
+        data/processed_<X>/<hz>hz/{train,val,test}.npz
+        configs/<remap名>.yaml
+    留出集在 data 那边，remap 是 train.py 训练时套的那张表——导出脚本要用同一张
+    表把留出集的标签对到模型的类别上。
+    """
+    rel = os.path.relpath(os.path.realpath(model_path), os.path.realpath(config.REPO_ROOT))
+    parts = rel.split(os.sep)
+    # [..., "results", "processed_X", "16hz_remap_y[_syn]", "rf", "ml_rf.pkl"]
+    if len(parts) < 4 or not parts[-4].startswith("processed_"):
+        raise ValueError(f"模型路径不是 train_custom.sh 的产出约定：{model_path}")
+    # results/ 换成 data/（同级）；results_xxx 这种别的根目录一律退回 data/
+    head = parts[:-5] if parts[-5:-4] == ["results"] else []
+    processed_dir = os.path.join(config.REPO_ROOT, *head, "data", parts[-4])
+    hz_remap = parts[-3]
+    remap = None
+    if "hz_" in hz_remap:
+        stem = hz_remap.split("hz_", 1)[1]
+        if stem.endswith("_syn"):
+            stem = stem[:-4]
+        cand = os.path.join(config.REPO_ROOT, "configs", f"{stem}.yaml")
+        if os.path.exists(cand):
+            remap = cand
+    return processed_dir, remap
+
+
+def export_edge(job_id: int) -> dict:
+    """把这一版的随机森林导成端侧模型（调 algo_tinyml 的 export_train.py）。
+    结果（端侧 F1 等）存进任务文件的 edge 字段。"""
+    import subprocess
+    import sys as _sys
+
+    job = get_job(job_id)
+    if job is None:
+        raise FileNotFoundError(f"训练任务 #{job_id} 不存在")
+    if job.get("status") != STATUS_DONE or not job.get("model_path"):
+        raise JobBusy("这一版还没训完，没有模型可导")
+    if (job.get("model_type") or "rf") != "rf":
+        raise JobBusy(f"端侧只收随机森林（rf），这一版是 {job.get('model_type')}")
+    script = os.path.join(config.ALGO_TINYML_DIR, "service", "export_train.py")
+    if not os.path.exists(script):
+        raise FileNotFoundError(
+            f"找不到 {script}。算法机上要有 algo_tinyml 仓库（ALGO_TINYML_DIR={config.ALGO_TINYML_DIR}）")
+    processed_dir, remap = edge_export_inputs(job["model_path"])
+    cmd = [_sys.executable, script, "--tag", model_tag(job_id), "--model", job["model_path"],
+           "--processed-dir", processed_dir, "--imu-train", config.REPO_ROOT]
+    if remap:
+        cmd += ["--remap", remap]
+    log.info("导出到端侧：%s", " ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=config.ALGO_TINYML_DIR, timeout=1800)
+    tail = (r.stdout + "\n" + r.stderr)[-4000:]
+    try:
+        with open(_log_path(job_id), "a", encoding="utf-8") as f:
+            f.write("\n▶ 导出到端侧\n" + r.stdout + r.stderr)
+    except OSError:
+        pass
+    line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("EXPORT_RESULT ")), None)
+    if r.returncode != 0 or not line:
+        raise RuntimeError(f"导出失败（退出码 {r.returncode}）：{tail}")
+    result = json.loads(line[len("EXPORT_RESULT "):])
+    job = get_job(job_id) or job
+    job["edge"] = result
+    _save(job)
+    return result
+
+
+def remove_edge(job_id: int) -> None:
+    """删训练记录时把端侧那份也撤了。撤不掉不算错（algo_tinyml 不在这台机器上之类）。"""
+    import subprocess
+    import sys as _sys
+
+    script = os.path.join(config.ALGO_TINYML_DIR, "service", "export_train.py")
+    if not os.path.exists(script):
+        return
+    try:
+        subprocess.run([_sys.executable, script, "--remove", "--tag", model_tag(job_id)],
+                       capture_output=True, text=True, cwd=config.ALGO_TINYML_DIR, timeout=60)
+    except Exception:  # noqa: BLE001
+        log.exception("撤端侧模型 %s 失败", model_tag(job_id))
+
+
 # ── 训练出来的模型登记进推理服务 ─────────────────────────────────────────
 
 
@@ -727,5 +818,6 @@ def done_models() -> list[tuple[int, str, dict]]:
             "axes": int(spec.get("axes") or 6),
             "classes": (job.get("metrics") or {}).get("classes"),
             "macro_f1": (job.get("metrics") or {}).get("macro_f1"),
+            "edge": (job.get("edge") or {}).get("edge"),
         }))
     return out

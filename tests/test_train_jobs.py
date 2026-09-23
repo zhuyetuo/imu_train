@@ -419,3 +419,21 @@ def test_默认模型不能被登记覆盖或撤掉():
     r.register(registry_mod.DEFAULT_TAG, "/evil.pkl")
     r.unregister(registry_mod.DEFAULT_TAG)
     assert r.path_of(registry_mod.DEFAULT_TAG) == "/d.pkl"
+
+
+def test_edge_export_inputs(tmp_path, monkeypatch):
+    from label_service import config, jobs
+    monkeypatch.setattr(config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "remap_ui_job6.yaml").write_text("a: a\n")
+    mp = tmp_path / "results" / "processed_ds__job6_acc3" / "16hz_remap_ui_job6_syn" / "rf" / "ml_rf.pkl"
+    mp.parent.mkdir(parents=True)
+    mp.write_bytes(b"x")
+    pdir, remap = jobs.edge_export_inputs(str(mp))
+    assert pdir == str(tmp_path / "data" / "processed_ds__job6_acc3")
+    assert remap == str(tmp_path / "configs" / "remap_ui_job6.yaml")
+    # 没有 remap 文件就是 None，而不是瞎猜一个
+    mp2 = tmp_path / "results" / "processed_x" / "16hz_remap_nope" / "rf" / "ml_rf.pkl"
+    mp2.parent.mkdir(parents=True)
+    mp2.write_bytes(b"x")
+    assert jobs.edge_export_inputs(str(mp2))[1] is None

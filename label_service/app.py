@@ -527,6 +527,20 @@ async def cancel_train_job(job_id: int):
     return job
 
 
+@app.post("/api/v1/label/train/{job_id}/export_edge")
+async def export_train_edge(job_id: int):
+    """把这一版导成端侧模型（板上那份 C），并算端侧 F1。要几十秒到一两分钟：
+    要编译 C、在留出集上跑一遍。导完端侧服务要 reload 才挂得上——平台那边负责。"""
+    try:
+        return await asyncio.to_thread(jobs.export_edge, job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except jobs.JobBusy as e:
+        raise HTTPException(409, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"导出失败：{e}") from e
+
+
 @app.delete("/api/v1/label/train/{job_id}")
 async def delete_train_job(job_id: int):
     """删掉这一版训练的全部产物（模型、预处理数据、日志……）。

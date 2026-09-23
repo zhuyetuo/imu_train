@@ -153,7 +153,11 @@ def n_sensor_channels(n_channels: int) -> int:
     看不出问题；一上 3 轴（5 通道）就变成"把 pitch/roll 也当振荡信号算了"，
     而且特征名还会把它们叫成 gyr_x/gyr_y。
     """
-    return max(3, int(n_channels) - 2)
+    # 传感器通道是按三个一组来的（acc3 / acc3+gyro3），余 2 就是后面追加了
+    # pitch/roll：5 → 3，8 → 6。6（老的纯 6 轴、没追加姿态角）→ 6，别把它当
+    # 成 4 个传感器 + 2 个姿态角——那会让老 6 轴模型少算两个通道的频域特征
+    n = int(n_channels)
+    return n - 2 if n % 3 == 2 else n
 
 
 def _extract_one(window: np.ndarray, hz: int) -> np.ndarray:
