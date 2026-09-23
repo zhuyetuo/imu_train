@@ -160,7 +160,8 @@ def test_老任务只删模型那一层(repo):
 
 
 def test_还在跑的不能删(repo):
-    _job(repo, 8, status="running", run_date="ds_a__job8")
+    # pid 用测试进程自己的——它肯定活着，模拟"真的还在跑"
+    _job(repo, 8, status="running", run_date="ds_a__job8", pid=os.getpid())
     with pytest.raises(jobs.JobBusy):
         jobs.delete_job(8, active_model_path=None)
     _job(repo, 9, status="queued", run_date="ds_a__job9")
@@ -180,3 +181,91 @@ def test_正在用的模型不能删(repo):
 
 def test_不存在的任务_删了也不报错(repo):
     assert jobs.delete_job(404, active_model_path=None) == {"deleted": []}
+
+
+# ── 孤儿任务 / 停止 ─────────────────────────────────────────────────────
+#
+# 训练是在服务进程里拉起来的。服务一重启（部署就会重启）它们就跟着没了，可任务
+# 文件里还写着 running——永远不会变。2026-09-23：两版失败的调试任务一直
+# 「训练中」，删除按钮一直灰着，怎么都删不掉。
+
+
+def _dead_pid():
+    """一个肯定已经不在了的 pid。"""
+    import subprocess
+
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def test_启动时把孤儿任务标成失败(repo):
+    _job(repo, 20, status="running", pid=_dead_pid())
+    _job(repo, 21, status="queued")
+    _job(repo, 22, status="done")
+    fixed = jobs.reconcile_orphans()
+    assert sorted(fixed) == [20, 21]
+    assert jobs.get_job(20)["status"] == "failed"
+    assert "重启" in jobs.get_job(20)["error"]
+    assert jobs.get_job(22)["status"] == "done", "跑完的别碰"
+
+
+def test_启动时真还活着的不碰(repo):
+    """极少见（服务没随容器一起重启），但真活着的标成失败就是错杀。"""
+    _job(repo, 23, status="running", pid=os.getpid())
+    assert jobs.reconcile_orphans() == []
+    assert jobs.get_job(23)["status"] == "running"
+
+
+def test_标着在跑但进程没了_能直接删(repo):
+    """不用等下次重启——删的时候发现进程不在了，就当孤儿处理。"""
+    _touch(repo / "data" / "raw_custom" / "ds_a__job24" / "merged_tmp.json")
+    _job(repo, 24, status="running", run_date="ds_a__job24", pid=_dead_pid())
+    out = jobs.delete_job(24, active_model_path=None)
+    assert out["deleted"]
+    assert not (repo / "data" / "raw_custom" / "ds_a__job24").exists()
+
+
+def test_停止要把整个进程组一起停(repo):
+    """脚本会再拉起一堆 python，「带合成」那一版还是后台 & 跑的。只停 bash 那一个
+    的话，孩子们照样在后台吃 CPU、往目录里写文件。
+
+    这里真的起一个 bash，让它在后台再拉一个 sleep，然后停——两个都得没了。"""
+    import subprocess
+    import time
+
+    child_file = repo / "child.pid"
+    proc = subprocess.Popen(
+        ["bash", "-c", f"sleep 60 & echo $! > {child_file}; wait"],
+        start_new_session=True,
+    )
+    for _ in range(50):
+        if child_file.exists() and child_file.read_text().strip():
+            break
+        time.sleep(0.05)
+    child = int(child_file.read_text().strip())
+    assert jobs._alive(proc.pid) and jobs._alive(child)
+
+    _job(repo, 25, status="running", pid=proc.pid)
+    jobs.cancel_job(25)
+    proc.wait(timeout=5)
+    for _ in range(50):
+        if not jobs._alive(child):
+            break
+        time.sleep(0.05)
+    assert not jobs._alive(child), "后台那个孩子还活着——只停了 bash 没停整组"
+    assert jobs.get_job(25)["status"] == "failed"
+    assert jobs.get_job(25)["error"] == "手动停止"
+
+
+def test_停已经结束的_原样返回不改(repo):
+    _job(repo, 26, status="done")
+    assert jobs.cancel_job(26)["status"] == "done"
+
+
+def test_一开跑就有日志_不是一直等日志(repo):
+    """整理数据集要一会儿，以前这段时间日志文件还不存在，网页上一直「等日志…」。"""
+    src = open("label_service/jobs.py", encoding="utf-8").read()
+    i_first_write = src.index("▶ 整理数据集")
+    i_prepare = src.index("await asyncio.to_thread(prepare_export")
+    assert i_first_write < i_prepare, "得先往日志里写一句，再去整理数据集"
