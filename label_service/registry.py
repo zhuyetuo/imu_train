@@ -94,6 +94,8 @@ class Registry:
         self._paths: dict[str, str] = {}
         self._pools: dict[str, object] = {}
         self._bundles: dict[str, dict] = {}
+        # 训练出来的那几版带的说明（数据集、轴数、类别），给平台下拉起名字用
+        self._meta: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     # -- 登记 ---------------------------------------------------------
@@ -112,6 +114,35 @@ class Registry:
                 continue
             self._paths[tag] = path
             log.info("额外模型 %s = %s（第一次用到时才加载）", tag, path)
+
+    def register(self, tag: str, path: str, meta: dict | None = None) -> None:
+        """运行时登记一个模型（训练刚跑完的那一版）。**不加载**，第一次用到才加载。
+
+        以前额外模型只能靠启动时的 LABEL_MODELS 环境变量配，训练记录里那一版
+        想拿来给项目预标注，要么去算法机改配置重启，要么点「启用」把默认模型整个
+        换掉（影响所有人）。登记之后它直接出现在平台的「版本」下拉里。
+        """
+        if tag == DEFAULT_TAG:
+            return
+        with self._lock:
+            self._paths[tag] = path
+            if meta:
+                self._meta[tag] = dict(meta)
+
+    def unregister(self, tag: str) -> None:
+        """撤掉一个模型（训练记录删掉了）。加载过的话，它的进程池一并关掉。"""
+        if tag == DEFAULT_TAG:
+            return
+        with self._lock:
+            self._paths.pop(tag, None)
+            self._bundles.pop(tag, None)
+            self._meta.pop(tag, None)
+            p = self._pools.pop(tag, None)
+        if p is not None:
+            try:
+                p.shutdown(wait=False, cancel_futures=True)
+            except Exception:   # noqa: BLE001
+                log.exception("关闭模型 %s 的进程池失败", tag)
 
     # -- 取用 ---------------------------------------------------------
 
@@ -165,6 +196,7 @@ class Registry:
                 "hz": b.get("hz"),
                 "window_s": b.get("window_s"),
                 "stride_s": b.get("stride_s"),
+                **({"train": self._meta[tag]} if tag in self._meta else {}),
             })
         return out
 

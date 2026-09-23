@@ -687,3 +687,36 @@ def reconcile_orphans() -> list[int]:
     if fixed:
         log.warning("启动时发现 %d 个中断的训练任务，已标成失败: %s", len(fixed), fixed)
     return fixed
+
+
+# ── 训练出来的模型登记进推理服务 ─────────────────────────────────────────
+
+
+def model_tag(job_id: int) -> str:
+    """训练出来的模型在推理服务里的名字。平台拿它对回训练记录。"""
+    return f"train{job_id}"
+
+
+def done_models() -> list[tuple[int, str, dict]]:
+    """跑完了、模型文件也还在的那几版：(任务号, 模型路径, 说明)。"""
+    out: list[tuple[int, str, dict]] = []
+    if not os.path.isdir(config.JOBS_DIR):
+        return out
+    for name in sorted(os.listdir(config.JOBS_DIR)):
+        if not name.endswith(".json") or not name[:-5].isdigit():
+            continue
+        job = get_job(int(name[:-5]))
+        if not job or job.get("status") != STATUS_DONE:
+            continue
+        mp = job.get("model_path")
+        if not mp or not os.path.isfile(mp):
+            continue
+        spec = job.get("dataset_spec") or {}
+        out.append((job["job_id"], mp, {
+            "job_id": job["job_id"],
+            "dataset": spec.get("date"),
+            "axes": int(spec.get("axes") or 6),
+            "classes": (job.get("metrics") or {}).get("classes"),
+            "macro_f1": (job.get("metrics") or {}).get("macro_f1"),
+        }))
+    return out
