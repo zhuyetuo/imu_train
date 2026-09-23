@@ -67,6 +67,9 @@ async def lifespan(app: FastAPI):
     registry.set_default(model_path, _bundle, _pool)
     registry.load_extra(config.EXTRA_MODELS)
     infer_queue.setup(config.INFER_WORKERS, config.INFER_RESERVE)
+    # 上次服务停的时候还在跑的训练，进程已经跟着没了。不收拾的话它们永远
+    # 「训练中」，网页上删不掉也停不了
+    jobs.reconcile_orphans()
     yield
     log.info("关闭")
     registry.shutdown()
@@ -493,6 +496,15 @@ async def get_train_log(job_id: int, offset: int = 0):
     if r is None:
         raise HTTPException(404, f"训练任务 #{job_id} 不存在")
     return r
+
+
+@app.post("/api/v1/label/train/{job_id}/cancel")
+async def cancel_train_job(job_id: int):
+    """停掉一个排队中/在跑的训练（整个进程组一起停）。已经结束的原样返回。"""
+    job = await asyncio.to_thread(jobs.cancel_job, job_id)
+    if job is None:
+        raise HTTPException(404, f"训练任务 #{job_id} 不存在")
+    return job
 
 
 @app.delete("/api/v1/label/train/{job_id}")

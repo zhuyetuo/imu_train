@@ -310,16 +310,32 @@ async def run_job(job_id: int) -> None:
     jid = job_id if job.get("run_date") else None
     cmd = build_command(job["dataset_spec"], job["model_type"], job["tag"], jid)
     try:
+        # **一开跑就往日志里写。** 整理数据集（软链上百个 CSV、改写类别名）要
+        # 一会儿，以前这段时间日志文件还不存在，网页上一直是「等日志…」，看起来
+        # 就像卡住了
+        with open(_log_path(job_id), "w", encoding="utf-8") as f:
+            f.write(f"▶ 整理数据集：{job['dataset_spec'].get('date')}"
+                    f"（{len(job['dataset_spec'].get('extra_datasets') or [])} 份一起训练）…\n")
         await asyncio.to_thread(prepare_export, job["dataset_spec"], jid)
-        with open(_log_path(job_id), "wb") as log_f:
+        with open(_log_path(job_id), "a", encoding="utf-8") as f:
+            f.write("  整理完成\n\n")
+        with open(_log_path(job_id), "ab") as log_f:
             # PYTHONUNBUFFERED：脚本里那几个 python 步骤的输出写进文件时默认是
             # 攒满一块才落盘，网页上看日志就是半天不动、然后一下子蹦出一大截。
             # 关掉缓冲，日志才是真的"实时"
+            # start_new_session：自己一个进程组。脚本会再拉起一堆 python，
+            # 「带合成」那一版还是后台 & 跑的——要停就得整组一起停，只杀 bash
+            # 那一个的话，孩子们照样在后台吃 CPU、往目录里写文件
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=config.REPO_ROOT, stdout=log_f, stderr=asyncio.subprocess.STDOUT,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                start_new_session=True,
             )
+            job["pid"] = proc.pid
+            _save(job)
             await proc.wait()
+        if get_job(job_id) and get_job(job_id).get("status") == STATUS_FAILED:
+            return      # 人手动停掉的，cancel_job 已经把状态和原因写好了
         with open(_log_path(job_id), encoding="utf-8", errors="replace") as f:
             stdout = f.read()
 
@@ -454,7 +470,13 @@ def delete_job(job_id: int, active_model_path: str | None) -> dict:
     if job is None:
         return {"deleted": []}
     if job.get("status") in (STATUS_QUEUED, STATUS_RUNNING):
-        raise JobBusy(f"训练任务 #{job_id} 还在{'排队' if job['status'] == STATUS_QUEUED else '跑'}，等它结束再删")
+        # 标着在跑、进程其实已经没了：孤儿，先标成失败再往下删。不这么做的话
+        # 它永远删不掉——状态不会再变了
+        if job.get("status") == STATUS_RUNNING and not _alive(job.get("pid")):
+            _mark_failed(job, "进程已经不在了")
+        else:
+            raise JobBusy(f"训练任务 #{job_id} 还在{'排队' if job['status'] == STATUS_QUEUED else '跑'}"
+                          f"，先点「停止」再删")
     mp = job.get("model_path")
     if mp and active_model_path and os.path.realpath(mp) == os.path.realpath(active_model_path):
         raise JobBusy(f"训练任务 #{job_id} 的模型正是现在推理在用的那个，先切到别的模型再删")
@@ -498,3 +520,88 @@ def delete_job(job_id: int, active_model_path: str | None) -> dict:
             os.remove(p)
     log.info("训练任务 #%d 已删除：%s", job_id, deleted)
     return {"deleted": deleted}
+
+
+# ── 停止 / 孤儿任务 ─────────────────────────────────────────────────────
+
+
+def _alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, PermissionError, ValueError):
+        return False
+
+
+def _mark_failed(job: dict, reason: str) -> None:
+    job["status"] = STATUS_FAILED
+    job["error"] = reason
+    job["finished_at"] = int(time.time())
+    _save(job)
+    try:
+        with open(_log_path(job["job_id"]), "a", encoding="utf-8") as f:
+            f.write(f"\n▶ {reason}\n")
+    except OSError:
+        pass
+
+
+def cancel_job(job_id: int) -> dict | None:
+    """停掉一个排队中/在跑的训练。任务不存在返回 None；已经结束了原样返回。
+
+    整个进程组一起停：脚本会拉起一堆 python，「带合成」那一版还是后台 & 跑的，
+    只停 bash 那一个的话孩子们照样在后台吃 CPU、往目录里写文件。先 TERM 给它
+    收尾的机会，3 秒还没走再 KILL。
+    """
+    import signal
+
+    job = get_job(job_id)
+    if job is None:
+        return None
+    if job.get("status") not in (STATUS_QUEUED, STATUS_RUNNING):
+        return job
+    pid = job.get("pid")
+    if _alive(pid):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(int(pid), sig)
+            except (ProcessLookupError, PermissionError):
+                break
+            for _ in range(30):
+                if not _alive(pid):
+                    break
+                time.sleep(0.1)
+            if not _alive(pid):
+                break
+    _mark_failed(job, "手动停止")
+    log.info("训练任务 #%d 已手动停止", job_id)
+    return job
+
+
+def reconcile_orphans() -> list[int]:
+    """服务启动时调：还标着「排队中/在跑」的任务，进程其实已经没了。
+
+    训练是在服务进程里拉起来的，服务一重启（部署就会重启）它们就跟着没了，
+    可任务文件里还写着 running——**永远不会变**，网页上一直「训练中」，删除
+    按钮一直灰着（2026-09-23 就是这样，两版失败的调试任务怎么都删不掉）。
+    """
+    fixed: list[int] = []
+    if not os.path.isdir(config.JOBS_DIR):
+        return fixed
+    for name in os.listdir(config.JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            job = get_job(int(name[:-5]))
+        except ValueError:
+            continue
+        if not job or job.get("status") not in (STATUS_QUEUED, STATUS_RUNNING):
+            continue
+        if _alive(job.get("pid")):
+            continue        # 真还活着（极少见：服务没随容器一起重启）就别碰
+        _mark_failed(job, "训练服务重启了，这个任务当时还在跑，已经中断——重新提交就行")
+        fixed.append(job["job_id"])
+    if fixed:
+        log.warning("启动时发现 %d 个中断的训练任务，已标成失败: %s", len(fixed), fixed)
+    return fixed
