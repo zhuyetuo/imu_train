@@ -354,6 +354,18 @@ async def infer_batch(req: InferBatchRequest):
 
 # ── /train ──────────────────────────────────────────────────────────────
 
+class ExtraDataset(BaseModel):
+    """一起训练的另一份数据集。
+
+    为什么要带 export_json：以前 extra_date 只是个名字，那份数据得事先自己躺在
+    data/raw_custom/ 下——界面上没法选，等于用不了。带上 json 路径，它就跟主
+    数据集走同一条整理流程（软链 CSV、改写类别名、落 merged_tmp.json）。
+    """
+    date: str = Field(..., description="数据集名，会成为 data/raw_custom/<date>/")
+    export_json: str = Field(..., description="NAS_ROOT 下的相对路径")
+    source_hz: int | None = Field(None, description="这一批自己真实的采样率；不传跟主批次一样")
+
+
 class DatasetSpec(BaseModel):
     date: str = Field(..., description="跟 train_custom.sh --date 一致，如 2026_8_20")
     extra_date: list[str] = Field(default_factory=list, description="跟 --extra_date 一致，格式 DATE:HZ")
@@ -365,12 +377,52 @@ class DatasetSpec(BaseModel):
     export_json: str | None = Field(None, description="label_infra 导出的 Label Studio 格式 JSON 在 NAS_ROOT 下的相对路径；"
                                                     "csv 字段是 NAS_ROOT 下的相对路径，服务会整理成 data/raw_custom/<date>/merged_tmp.json")
     clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")
+    extra_datasets: list[ExtraDataset] = Field(default_factory=list,
+        description="一起训练的其它数据集。跟主数据集走同一条整理流程，然后按 --extra_date DATE:HZ 合并")
+    label_remap: dict[str, str] = Field(default_factory=dict,
+        description="类别归并 {原名: 新名}，整理数据时改写。先按链的最后一级（细类）查，"
+                    "查不到再按第一级（大类）。用来把太少的细类并进兄弟类别，"
+                    "或者把不训的行为折进「活动」当负样本")
 
 
 class TrainRequest(BaseModel):
     dataset: DatasetSpec
     model_type: str = Field("rf", description="跟 train_custom.sh --model 一致")
     tag: str | None = None
+
+
+@app.get("/api/v1/label/remap")
+def get_remap():
+    """训练时那张类别重映射表（configs/remap_custom_3class.yaml）。
+
+    **给界面用来说清"这一类最后会变成什么"。** 表里没有的类别，
+    src/data/remap_utils.py 的 apply_remap() 会直接把那些样本丢掉（keep_mask
+    过滤），只在训练日志里打一句"丢弃了 N 个 remap 配置没覆盖到的样本"——
+    在界面上看不到的话，人只会以为数据都进去了。
+
+    实测 2026-09-23：这张表用的还是旧模板的名字（舔身体/甩身体/蹭擦身体），
+    现在模板发出来的是「舔」「甩头/抖身」「蹭」，对不上，全被丢了。
+    """
+    path = os.path.join(config.REPO_ROOT, "configs", "remap_custom_3class.yaml")
+    table: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                if k.strip() and v.strip():
+                    table[k.strip()] = v.strip()
+    except OSError as e:
+        return {"available": False, "error": f"读不到 {path}：{e}", "table": {}, "classes": []}
+    return {
+        "available": True,
+        "path": os.path.relpath(path, config.REPO_ROOT),
+        "table": table,
+        # 训练最终的那几类，按表里出现的顺序去重——界面拿它当"映射到"的候选
+        "classes": list(dict.fromkeys(table.values())),
+    }
 
 
 @app.post("/api/v1/label/train")
