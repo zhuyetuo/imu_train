@@ -422,7 +422,14 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
         return {lab: [] for lab in target_labels}
     zones = _zones(ts, window_s, stride_s, label_mode)  # type: ignore[arg-type]
 
-    events = [lab for lab in p.event_labels if lab in classes]
+    # 哪些类别按"事件"处理（滞回、最短窗口数那一套），哪些按"状态"。
+    # **按前缀认，不是精确相等**：把抓挠拆成二级之后类别叫「抓挠-头颈耳」，
+    # 精确匹配的话它就掉进 states，走的是状态那套平滑——一段几秒的抓挠会被
+    # 直接抹掉，而且看起来就像模型没检出来
+    def _is_event(lab: str) -> bool:
+        return any(lab == e or lab.startswith(e + "-") for e in p.event_labels)
+
+    events = [lab for lab in classes if _is_event(lab)]
     states = [lab for lab in classes if lab not in events]
     probs = [w.get("probs") or {} for w in windows]
     spec = [w.get("spec") for w in windows]
