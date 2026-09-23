@@ -24,10 +24,8 @@ ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 # apt 也换国内源，不然装 ffmpeg 那一步就要几分钟
 RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
     apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg libglib2.0-0 tzdata gcc libc6-dev \
+        ffmpeg libglib2.0-0 tzdata \
     && rm -rf /var/lib/apt/lists/*
-# gcc：端侧那条线（algo_tinyml）把板上那份 C 现场编成 .so 跑——端侧服务和
-# 「导出到端侧」都在这个镜像里，没有 gcc 两样都起不来
 # ffmpeg：src/extract_clips.py 在 import 时就会探测它
 # libglib2.0-0：opencv-python-headless 的运行时依赖（headless 版不需要 libgl1）
 # tzdata：容器时区跟宿主机一致（compose 里设 TZ）
@@ -40,11 +38,23 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 
 # torch 先单独装 CPU 版：ultralytics 依赖它，但容器里没有 GPU，装默认版会连带
 # 拉 nvidia_cu* 那一堆 CUDA 轮子（好几个 G，全是用不上的）。CPU 版约 200MB。
-RUN pip install --no-cache-dir --index-url "${TORCH_INDEX_URL}" torch torchvision
+# --mount=type=cache：下过的轮子留在构建机的缓存里。这一层哪天被迫重跑
+# （上面某层变了），也不用再从网上拉几百 MB 的 torch/CUDA 包
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url "${TORCH_INDEX_URL}" torch torchvision
 
 # 依赖单独一层：仓库代码变了不会让 pip 重装一遍
 COPY label_service/requirements-docker.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/requirements.txt
+
+# gcc：端侧那条线（algo_tinyml）把板上那份 C 现场编成 .so 跑——端侧服务和
+# 「导出到端侧」都在这个镜像里，没有 gcc 两样都起不来。
+# **放在 pip 那两层之后、单独一层**：docker 的层缓存是按顺序的，加进上面那条
+# apt 里的话，后面 torch（几百 MB 的 CUDA 包）和全部依赖都得重装一遍
+# （2026-09-24 就是这么多等了十几分钟）。以后再加系统工具也加在这里
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
