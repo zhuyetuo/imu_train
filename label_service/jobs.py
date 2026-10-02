@@ -325,6 +325,11 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
         cmd += ["--remap", runtime_remap]
     if dataset_spec.get("missing_strategy"):
         cmd += ["--missing_strategy", dataset_spec["missing_strategy"]]
+    elif model_type == "cnn":
+        # CNN 吃不了 NaN：蓝牙断联留下的空行一进 z-score 就整列传染，train.py 直接拒绝
+        # （2026-10-03 job7：老批次 1.6 万个 NaN）。树模型默认 none 照旧；cnn 默认把含 NaN 的
+        # 窗口整个丢掉——这是预处理本来就有的策略，不是补零造假
+        cmd += ["--missing_strategy", "drop_window"]
     if model_type:
         cmd += ["--model", model_type]
     if tag:

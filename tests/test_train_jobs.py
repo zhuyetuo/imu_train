@@ -520,3 +520,12 @@ def test_edge_export_inputs_dl(tmp_path, monkeypatch):
     pdir, remap = jobs.edge_export_inputs(str(mp))
     assert pdir == str(tmp_path / "data" / "processed_ds__job3_acc3")
     assert remap == str(tmp_path / "configs" / "remap_ui_job3.yaml")
+
+
+def test_cnn_defaults_to_drop_window():
+    from label_service import jobs
+    cmd = jobs.build_command({"date": "d"}, "cnn", None, 5)
+    assert cmd[cmd.index("--missing_strategy") + 1] == "drop_window"
+    assert "--missing_strategy" not in jobs.build_command({"date": "d"}, "rf", None, 5)
+    cmd = jobs.build_command({"date": "d", "missing_strategy": "ffill"}, "cnn", None, 5)
+    assert cmd[cmd.index("--missing_strategy") + 1] == "ffill"
