@@ -22,6 +22,7 @@
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -384,6 +385,7 @@ class DatasetSpec(BaseModel):
     extra_date: list[str] = Field(default_factory=list, description="跟 --extra_date 一致，格式 DATE:HZ")
     missing_strategy: str | None = Field(None, description="none/drop/ffill/drop_window")
     skip_syn: bool = Field(False, description="只训练方案A，跳过合成数据")
+    balance: str | None = Field(None, description="类别均衡：none/min（多的砍到跟最少的一样多）/cap:N（每类最多 N 个训练窗口）。只砍训练集")
     feat_workers: int | None = Field(None, description="特征提取并行数，-1=全部CPU")
     source_hz: int | None = Field(None, description="主批次真实采样率（NAS 原始 50Hz 数据必须传 50）")
     hz: int | None = Field(None, description="训练目标采样率，默认脚本里的 16")
@@ -456,6 +458,44 @@ def _register_trained(job_id: int | None = None) -> None:
 async def _run_and_register(job_id: int) -> None:
     await jobs.run_job(job_id)
     _register_trained(job_id)
+    await _review_trained(job_id)
+
+
+async def _review_trained(job_id: int) -> None:
+    """训练完回放：用这一版把训练集再预测一遍，错例写进训练记录（见 review.py）。
+    失败只记日志，不动训练记录的状态——模型已经训好了，回放只是附加的检查。"""
+    job = jobs.get_job(job_id)
+    if not job or job.get("status") != jobs.STATUS_DONE:
+        return
+    from label_service import review as review_mod
+    tag = jobs.model_tag(job_id)
+    try:
+        b, px = registry.get(tag)
+    except Exception as e:  # noqa: BLE001
+        log.warning("训练任务 #%d 回放跳过：模型加载失败 %s", job_id, e)
+        return
+    t0 = time.time()
+    with open(jobs._log_path(job_id), "a", encoding="utf-8") as f:
+        f.write("\n▶ 回放：用这一版模型把训练集再预测一遍，挑出跟人标的对不上的段…\n")
+    try:
+        async def infer(full_path: str, hz: float) -> dict:
+            return await _infer_in_pool(full_path, "raw", infer_queue.PRIORITY_BATCH, hz, bundle=b, pool_obj=px)
+
+        full = await review_mod.run(job, jobs.run_dates_of(job), infer, b["window_s"], b["stride_s"], b["classes"])
+        with open(review_mod.review_path(job_id), "w", encoding="utf-8") as f:
+            json.dump(full, f, ensure_ascii=False)
+        job = jobs.get_job(job_id) or job
+        job["metrics"] = {**(job.get("metrics") or {}), "review": review_mod.summary(full)}
+        jobs._save(job)
+        with open(jobs._log_path(job_id), "a", encoding="utf-8") as f:
+            f.write(f"  回放完成 {time.time() - t0:.0f}s：{full['n_tasks_ok']}/{full['n_tasks']} 个任务，"
+                    f"{full['n_segments']} 段里 {full['n_wrong']} 段对不上 {full['by_kind']}\n")
+        log.info("训练任务 #%d 回放完成 %.0fs：%d 段里 %d 段对不上", job_id, time.time() - t0,
+                 full["n_segments"], full["n_wrong"])
+    except Exception as e:  # noqa: BLE001
+        log.exception("训练任务 #%d 回放失败", job_id)
+        with open(jobs._log_path(job_id), "a", encoding="utf-8") as f:
+            f.write(f"  回放失败：{type(e).__name__}: {e}\n")
 
 
 @app.post("/api/v1/label/train")
@@ -504,6 +544,29 @@ async def get_train_status(job_id: int):
     if job is None:
         raise HTTPException(404, f"训练任务 #{job_id} 不存在")
     return job
+
+
+@app.get("/api/v1/label/train/{job_id}/review")
+async def get_train_review(job_id: int):
+    """训练完回放的完整结果（训练记录 metrics.review 里只带前几百条错例）。"""
+    from label_service import review as review_mod
+    p = review_mod.review_path(job_id)
+    if not os.path.exists(p):
+        raise HTTPException(404, f"训练任务 #{job_id} 还没有回放结果")
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.post("/api/v1/label/train/{job_id}/review")
+async def rerun_train_review(job_id: int):
+    """手动再跑一次回放（比如改完标注之后想看还剩多少错例——注意模型没重训，看的是旧模型对新标注）。"""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, f"训练任务 #{job_id} 不存在")
+    if job.get("status") != jobs.STATUS_DONE:
+        raise HTTPException(409, "训练还没完成")
+    asyncio.create_task(_review_trained(job_id))
+    return {"ok": True}
 
 
 @app.get("/api/v1/label/train/{job_id}/log")
