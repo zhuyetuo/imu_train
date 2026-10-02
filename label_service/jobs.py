@@ -903,6 +903,27 @@ def size_curve(job_id: int, trees: list[int] | None = None, depths: list[int] | 
     return result
 
 
+def edge_bundle(job_id: int) -> str:
+    """把这一版的端侧源码包打成 zip（algo_tinyml export_train.py --bundle），返回 zip 路径。"""
+    import subprocess
+    import sys as _sys
+
+    job = get_job(job_id)
+    if job is None:
+        raise FileNotFoundError(f"训练任务 #{job_id} 不存在")
+    if not job.get("edge"):
+        raise FileNotFoundError("这一版还没导出到端侧")
+    script = os.path.join(config.ALGO_TINYML_DIR, "service", "export_train.py")
+    out_dir = os.path.join(config.JOBS_DIR, "bundles")
+    os.makedirs(out_dir, exist_ok=True)
+    zip_path = os.path.join(out_dir, f"edge_{model_tag(job_id)}.zip")
+    r = subprocess.run([_sys.executable, script, "--tag", model_tag(job_id), "--bundle", zip_path],
+                       capture_output=True, text=True, cwd=config.ALGO_TINYML_DIR, timeout=300)
+    if r.returncode != 0 or not os.path.exists(zip_path):
+        raise RuntimeError((r.stdout + r.stderr)[-2000:])
+    return zip_path
+
+
 def remove_edge(job_id: int) -> None:
     """删训练记录时把端侧那份也撤了。撤不掉不算错（algo_tinyml 不在这台机器上之类）。"""
     import subprocess
