@@ -11,6 +11,7 @@ import argparse
 import json
 import yaml
 import numpy as np
+from balance import balance_train
 import joblib
 
 from dataset import load_all_splits
@@ -321,6 +322,11 @@ def main(args):
 
     print(f"[ml/train] 特征维度: {X_tr_f.shape[1]}")
 
+    # 类别均衡（可选）：只砍训练集，验证/测试集不动
+    X_tr_f, y_tr, balance_info = balance_train(X_tr_f, y_tr, classes, args.balance)
+    if balance_info:
+        print(f"[ml/train] 类别均衡 {args.balance}: {balance_info['before']} → {balance_info['after']}")
+
     # 类别权重：按频率倒数自动平衡（解决类别不均衡问题）
     counts = np.bincount(y_tr.astype(int), minlength=len(classes))
     weights = len(y_tr) / (len(classes) * counts.clip(min=1))
@@ -459,6 +465,7 @@ def main(args):
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},
+        "balance": balance_info,
     }
     with open(os.path.join(out_dir, f"ml_{args.model}.json"), "w") as f:
         json.dump(result, f, indent=2)
@@ -495,6 +502,8 @@ if __name__ == "__main__":
                              "传了这个就不再看--synthetic/--synthetic_label/--synthetic_hz。"
                              "例: --synthetic_spec 抓挠:data/synthetic/scratch.npz "
                              "--synthetic_spec 甩身体:data/synthetic/shake.npz")
+    parser.add_argument("--balance", default="none",
+                        help="类别均衡：none（默认）/min（多的类下采样到跟最少的一样）/cap:N（每类最多 N 个训练窗口）。只动训练集")
     parser.add_argument("--dry_run", action="store_true",
                         help="只打印数据集分布，不训练模型")
     main(parser.parse_args())

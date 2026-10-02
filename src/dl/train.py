@@ -176,6 +176,17 @@ def main(args):
         classes = classes_new
         print(f"[dl/train] 重映射后类别: {classes}")
 
+    # 类别均衡（可选）：只砍训练集。跟 ml/train.py 同一个函数
+    balance_info = None
+    if getattr(args, "balance", "none") and args.balance != "none":
+        from balance import balance_train
+        keep_idx = np.arange(len(y_tr))
+        _, keep_idx, balance_info = balance_train(keep_idx, y_tr, classes, args.balance)
+        X_tr, y_tr = X_tr[keep_idx], y_tr[keep_idx]
+        if y_seq_tr is not None:
+            y_seq_tr = y_seq_tr[keep_idx]
+        print(f"[dl/train] 类别均衡 {args.balance}: {balance_info['before']} → {balance_info['after']}")
+
     n_channels  = X_tr.shape[2]
     window_size = X_tr.shape[1]
     n_classes   = len(classes)
@@ -362,6 +373,7 @@ def main(args):
         "per_class": {k: {m: round(v, 4) for m, v in per_class[k].items()
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},
+        "balance": balance_info,
     }
     with open(os.path.join(out_dir, f"dl_{args.model}.json"), "w") as f:
         json.dump(result, f, indent=2)
@@ -405,4 +417,6 @@ if __name__ == "__main__":
     parser.add_argument("--window_s", type=float, default=0.0)
     parser.add_argument("--stride_s", type=float, default=0.0)
     parser.add_argument("--label_mode", default="")
+    parser.add_argument("--balance", default="none",
+                        help="类别均衡：none/min/cap:N，只砍训练集（同 src/ml/train.py）")
     main(parser.parse_args())

@@ -114,6 +114,8 @@ TAG=""                    # 输出目录后缀。留空时不是真的不加后�
                            # 还想同时保留majority/center等其它版本时，显式传
                            # --tag会覆盖这个自动值（两次跑的PROCESSED_DIR/结果
                            # 目录名都会带上最终生效的这个后缀）
+BALANCE="none"             # 类别均衡：none(默认)/min/cap:N，传给 src/ml/train.py 和 src/dl/train.py
+                           # 的 --balance。只砍训练集的窗口，验证集不动
 SKIP_SYN=0                 # 1=只训练方案A(纯标注)，跳过生成合成数据和方案B。
                            # 已经确认合成数据在短窗口下会让活动/甩身体的误判
                            # 变多（见pm_skin_scoring/docs或对话记录），不想用
@@ -176,6 +178,7 @@ _print_help() {
   --test_ratio R         测试集比例（默认0）
   --n_aug N              每个原始片段生成的合成增强数量（默认50，配合--label用）
   --label LABEL          可重复传，要合成数据的类别（不传默认只合成"抓挠"）
+  --balance SPEC         类别均衡：none(默认)/min(多的砍到跟最少的一样)/cap:N(每类最多N窗)，只砍训练集
   --skip_syn             跳过生成合成数据和方案B，只训练方案A(纯标注)
   --skip_ml               只做到预处理这步，不训练ML模型/不生成合成数据
                           （给src/dl/train.py按需触发预处理用）
@@ -207,6 +210,7 @@ while [[ $# -gt 0 ]]; do
     --window_s)       WINDOW_S="$2";       shift 2 ;;
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
+    --balance)        BALANCE="$2";        shift 2 ;;
     --clean)          CLEAN=1;             shift 1 ;;
     --skip_syn)       SKIP_SYN=1;          shift 1 ;;
     --skip_ml)        SKIP_ML=1;           shift 1 ;;
@@ -591,6 +595,7 @@ if [[ "$MODEL_TYPE" == "cnn" ]]; then
     --config "$DL_CONFIG" \
     --processed_dir "$PROCESSED_DIR" \
     --remap "$REMAP" \
+    --balance "$BALANCE" \
     --results_dir "$RESULTS_DIR" 2>&1 | tee "$LOG_NO_SYN"
   _rc=${PIPESTATUS[0]}
   if [[ "$_rc" != "0" ]]; then
@@ -612,6 +617,7 @@ python src/ml/train.py --hz "$HZ" --model "$MODEL_TYPE" \
   --processed_dir "$PROCESSED_DIR" \
   --remap "$REMAP" \
   --results_dir "$RESULTS_DIR" \
+  --balance "$BALANCE" \
   --feat_workers "$FEAT_WORKERS" \
   > "$LOG_NO_SYN" 2>&1 &
 PID_A=$!
@@ -653,6 +659,7 @@ else
     --remap "$REMAP" \
     "${SYNTHETIC_SPEC_ARGS[@]}" \
     --results_dir "$RESULTS_DIR" \
+    --balance "$BALANCE" \
     --feat_workers "$FEAT_WORKERS" \
     > "$LOG_WITH_SYN" 2>&1 &
   PID_B=$!

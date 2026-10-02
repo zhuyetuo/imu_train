@@ -146,6 +146,15 @@ def run_date(date: str, job_id: int | None) -> str:
     return f"{date}__job{job_id}" if job_id is not None else date
 
 
+def run_dates_of(job: dict) -> list[str]:
+    """这个任务用到的 data/raw_custom/ 目录名（主 + 一起训练的）。"""
+    spec = job.get("dataset_spec") or {}
+    jid = job["job_id"] if job.get("run_date") else None
+    out = [run_date(spec["date"], jid)]
+    out += [run_date(ex["date"], jid) for ex in spec.get("extra_datasets") or [] if ex.get("date")]
+    return out
+
+
 def prepare_export(dataset_spec: dict, job_id: int | None = None) -> None:
     """把 label_infra 导出的数据集整理成 train_custom.sh 认的样子。
 
@@ -339,6 +348,10 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
         cmd += ["--skip_syn"]
     if dataset_spec.get("feat_workers"):
         cmd += ["--feat_workers", str(dataset_spec["feat_workers"])]
+    # 类别均衡：none（默认，不动）/ min（把多的类砍到跟最少的一样）/ cap:N（每类最多 N 窗）。
+    # 只砍训练集的窗口，验证集不动——不然指标是在"砍过的"数据上算的，跟别的版本没法比
+    if dataset_spec.get("balance") and dataset_spec["balance"] != "none":
+        cmd += ["--balance", str(dataset_spec["balance"])]
     return cmd
 
 
@@ -415,6 +428,22 @@ async def run_job(job_id: int) -> None:
         await asyncio.to_thread(prepare_export, job["dataset_spec"], jid)
         with open(_log_path(job_id), "a", encoding="utf-8") as f:
             f.write("  整理完成\n\n")
+        # 训练集统计：这次到底喂了什么。先于训练写进 metrics，训练中就能看
+        try:
+            from label_service import dataset_stats
+            stats = await asyncio.to_thread(dataset_stats.compute, job["dataset_spec"], run_dates_of(job))
+            job["metrics"] = {**(job.get("metrics") or {}), "dataset": stats}
+            _save(job)
+            with open(_log_path(job_id), "a", encoding="utf-8") as f:
+                f.write("▶ 训练集统计：\n")
+                for r in stats["rows"]:
+                    f.write(f"  {r['label']:<10} {r['segments']:>5} 段 {r['seconds']:>8.0f} 秒 ≈{r['windows']:>6} 窗"
+                            f"  占 {r['share'] * 100:5.1f}%  来自 {r['n_tasks']} 个任务 / {r['n_days']} 天\n")
+                for h in stats["hints"]:
+                    f.write(f"  ⚠ {h}\n")
+                f.write("\n")
+        except Exception as e:  # noqa: BLE001 统计失败不该拦着训练
+            log.warning("训练任务 #%d 训练集统计失败: %s", job_id, e)
         with open(_log_path(job_id), "ab") as log_f:
             # PYTHONUNBUFFERED：脚本里那几个 python 步骤的输出写进文件时默认是
             # 攒满一块才落盘，网页上看日志就是半天不动、然后一下子蹦出一大截。
@@ -450,7 +479,7 @@ async def run_job(job_id: int) -> None:
         job["status"] = STATUS_DONE
         job["model_path"] = model_path
         job["model_version"] = job["tag"] or f"{job['model_type']}_{job['created_at']}"
-        job["metrics"] = _load_metrics(model_path)
+        job["metrics"] = {**(job.get("metrics") or {}), **_load_metrics(model_path)}
         log.info("训练任务 #%d 完成 %.0fs 模型=%s", job_id, time.time() - job["started_at"], model_path)
     except Exception as e:  # noqa: BLE001 后台任务异常不能让服务进程崩，落盘状态即可
         job["status"] = STATUS_FAILED
