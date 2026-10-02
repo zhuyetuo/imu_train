@@ -564,6 +564,20 @@ async def export_train_edge(job_id: int):
         raise HTTPException(500, f"导出失败：{e}") from e
 
 
+@app.get("/api/v1/label/train/{job_id}/edge_bundle")
+async def train_edge_bundle(job_id: int):
+    """这一版导出到端侧的源码包（core/ 运行时 + 模型导出 + README，zip）。给嵌入式打成 lib 用。"""
+    from fastapi.responses import FileResponse
+
+    try:
+        path = await asyncio.to_thread(jobs.edge_bundle, job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"打包失败：{e}") from e
+    return FileResponse(path, media_type="application/zip", filename=os.path.basename(path))
+
+
 @app.delete("/api/v1/label/train/{job_id}")
 async def delete_train_job(job_id: int):
     """删掉这一版训练的全部产物（模型、预处理数据、日志……）。
