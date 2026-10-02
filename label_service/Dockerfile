@@ -65,7 +65,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 # 交叉编译器：「导出到端侧」顺手按 Cortex-M4F 编一遍，报真的 flash/RAM 占用（不是 x86 估的）。
 # 不烧板、不要 SDK，只用来量体积。单独一层，装不上也不影响前面
-RUN apt-get update && apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
