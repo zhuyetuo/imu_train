@@ -27,7 +27,7 @@ STATUS_FAILED = "failed"
 
 # train_custom.sh 跑完会自己打印"模型路径:"下面的"纯标注: xxx.pkl"/"带合成: xxx.pkl"，
 # 从这里解析比自己重新拼一遍 DATASET_TAG/HZ/MODEL_TYPE 的目录规则可靠
-_MODEL_PATH_RE = re.compile(r"^\s*(纯标注|带合成):\s*(\S+\.pkl)\s*$", re.MULTILINE)
+_MODEL_PATH_RE = re.compile(r"^\s*(纯标注|带合成):\s*(\S+\.(?:pkl|pt))\s*$", re.MULTILINE)
 
 
 def _job_path(job_id: int) -> str:
@@ -241,6 +241,47 @@ def write_runtime_remap(dataset_spec: dict, job_id: int | None = None) -> str | 
     return rel
 
 
+def write_edge_config(dataset_spec: dict, model_type: str, job_id: int | None) -> str | None:
+    """「端侧尺寸」里人填了具体规格（rf 的棵数/深度、cnn 的 filters）就落成一份
+    本任务专用的超参文件，返回相对仓库根的路径；没填就 None（用默认那份）。
+
+    体积曲线那页点「按这个规格重训」就是走这里：曲线给的是剪枝估的点，真正
+    上线的要按那个规格重训一遍（分裂点会重新选，比剪枝准）。
+    """
+    import yaml
+
+    safe = job_id if job_id is not None else "manual"
+    if model_type == "cnn":
+        filters = dataset_spec.get("edge_filters")
+        if not filters:
+            return None
+        base = os.path.join(config.REPO_ROOT, "configs", "dl_edge.yaml")
+        with open(base, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        cfg["cnn"]["filters"] = [int(x) for x in filters]
+        rel = os.path.join("configs", f"dl_edge_job{safe}.yaml")
+    else:
+        trees, depth = dataset_spec.get("edge_trees"), dataset_spec.get("edge_depth")
+        if not trees and not depth:
+            return None
+        base = os.path.join(config.REPO_ROOT, "configs", "ml_edge_rf_d10.yaml")
+        with open(base, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        # 树模型都有 n_estimators / max_depth 这两个键（rf/extratrees/xgb/lgbm 都认）
+        for sect in cfg.values():
+            if isinstance(sect, dict):
+                if trees and "n_estimators" in sect:
+                    sect["n_estimators"] = int(trees)
+                if depth and "max_depth" in sect:
+                    sect["max_depth"] = int(depth)
+        rel = os.path.join("configs", f"ml_edge_job{safe}.yaml")
+    with open(os.path.join(config.REPO_ROOT, rel), "w", encoding="utf-8") as f:
+        f.write(f"# 训练任务 #{safe} 的端侧规格（界面上填的），由 label_service 生成\n")
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    log.info("端侧规格已写入 %s", rel)
+    return rel
+
+
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
     cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
@@ -262,10 +303,19 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     # 端侧尺寸：用 configs/ml_edge.yaml 的超参（限深限棵数），模型才塞得进
     # 板子给模型留的约 128KB flash。默认那份是 200 棵不限深的森林，几十 MB
     if dataset_spec.get("edge_size"):
-        # rf 用跟板上现役 edge_rf_d10 同规格的那份（20 棵 × 深 10，flash 装得下
-        # 是被验证过的）；别的模型（xgb 等）用 ml_edge.yaml
-        cmd += ["--ml_config",
-                "configs/ml_edge_rf_d10.yaml" if model_type == "rf" else "configs/ml_edge.yaml"]
+        custom = write_edge_config(dataset_spec, model_type, job_id)
+        if model_type == "cnn":
+            # 1D-CNN：filters 减半的那份（int8 约 32KB）
+            cmd += ["--dl_config", custom or "configs/dl_edge.yaml"]
+        else:
+            # rf 用跟板上现役 edge_rf_d10 同规格的那份（20 棵 × 深 10，flash 装得下
+            # 是被验证过的）；别的模型（xgb 等）用 ml_edge.yaml
+            cmd += ["--ml_config", custom or
+                    ("configs/ml_edge_rf_d10.yaml" if model_type == "rf" else "configs/ml_edge.yaml")]
+    elif model_type == "cnn" and dataset_spec.get("edge_filters"):
+        custom = write_edge_config(dataset_spec, model_type, job_id)
+        if custom:
+            cmd += ["--dl_config", custom]
     # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
     if int(dataset_spec.get("axes") or 6) == 3:
         cmd += ["--axes", "3"]
@@ -279,7 +329,8 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
         cmd += ["--model", model_type]
     if tag:
         cmd += ["--tag", tag]
-    if dataset_spec.get("skip_syn"):
+    # cnn 那条不用合成数据（train_custom.sh 里 cnn 分支本来就不跑方案 B）
+    if dataset_spec.get("skip_syn") or model_type == "cnn":
         cmd += ["--skip_syn"]
     if dataset_spec.get("feat_workers"):
         cmd += ["--feat_workers", str(dataset_spec["feat_workers"])]
@@ -291,15 +342,27 @@ def parse_model_path(stdout: str) -> str | None:
     return matches.get("带合成") or matches.get("纯标注")
 
 
-def _load_metrics(pkl_path: str) -> dict:
-    json_path = os.path.splitext(pkl_path)[0] + ".json"
-    if not os.path.exists(json_path):
-        return {}
-    try:
-        with open(json_path, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:  # noqa: BLE001 元数据读不出来不该让整个任务判失败
-        return {}
+def _load_metrics(model_path: str) -> dict:
+    """ML：ml_rf.json（指标 + 元数据一份）。DL：指标在 dl_cnn.json，元数据（通道/窗口）
+    在 dl_cnn_best.json，两份合一起给平台。"""
+    def _read(p: str) -> dict:
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:  # noqa: BLE001 元数据读不出来不该让整个任务判失败
+            return {}
+
+    if model_path.endswith(".pt"):
+        d = os.path.dirname(model_path)
+        stem = os.path.basename(model_path).replace("_best.pt", "")
+        meta = _read(os.path.join(d, f"{stem}_best.json"))
+        out = _read(os.path.join(d, f"{stem}.json"))
+        for k in ("n_channels", "window_size", "stride", "model_cfg", "gravity_aligned", "label_mode"):
+            if k in meta and k not in out:
+                out[k] = meta[k]
+        return out
+    json_path = os.path.splitext(model_path)[0] + ".json"
+    return _read(json_path) if os.path.exists(json_path) else {}
 
 
 def create_job(dataset_spec: dict, model_type: str, tag: str | None) -> dict:
@@ -526,6 +589,8 @@ def delete_job(job_id: int, active_model_path: str | None) -> dict:
             f"data/synthetic/*_{rd}_*",
             f"tmp/train_full_processed_{rd}_*",
             f"configs/remap_ui_job{job_id}.yaml",
+            f"configs/ml_edge_job{job_id}.yaml",
+            f"configs/dl_edge_job{job_id}.yaml",
             # 一起训练的那几份，同样带着本任务号
             f"data/raw_custom/*{marker}",
         ):
@@ -716,13 +781,15 @@ def edge_export_inputs(model_path: str) -> tuple[str, str | None]:
     """
     rel = os.path.relpath(os.path.realpath(model_path), os.path.realpath(config.REPO_ROOT))
     parts = rel.split(os.sep)
-    # [..., "results", "processed_X", "16hz_remap_y[_syn]", "rf", "ml_rf.pkl"]
-    if len(parts) < 4 or not parts[-4].startswith("processed_"):
+    # ML：[..., "results", "processed_X", "16hz_remap_y[_syn]", "rf", "ml_rf.pkl"]
+    # DL：[..., "results", "processed_X", "16hz_remap_y", "dl_cnn_best.pt"]（少一层模型目录）
+    up = 3 if model_path.endswith(".pt") else 4
+    if len(parts) < up or not parts[-up].startswith("processed_"):
         raise ValueError(f"模型路径不是 train_custom.sh 的产出约定：{model_path}")
     # results/ 换成 data/（同级）；results_xxx 这种别的根目录一律退回 data/
-    head = parts[:-5] if parts[-5:-4] == ["results"] else []
-    processed_dir = os.path.join(config.REPO_ROOT, *head, "data", parts[-4])
-    hz_remap = parts[-3]
+    head = parts[:-(up + 1)] if parts[-(up + 1):-up] == ["results"] else []
+    processed_dir = os.path.join(config.REPO_ROOT, *head, "data", parts[-up])
+    hz_remap = parts[-(up - 1)]
     remap = None
     if "hz_" in hz_remap:
         stem = hz_remap.split("hz_", 1)[1]
@@ -745,8 +812,8 @@ def export_edge(job_id: int) -> dict:
         raise FileNotFoundError(f"训练任务 #{job_id} 不存在")
     if job.get("status") != STATUS_DONE or not job.get("model_path"):
         raise JobBusy("这一版还没训完，没有模型可导")
-    if (job.get("model_type") or "rf") != "rf":
-        raise JobBusy(f"端侧只收随机森林（rf），这一版是 {job.get('model_type')}")
+    if (job.get("model_type") or "rf") not in ("rf", "cnn"):
+        raise JobBusy(f"端侧只收随机森林（rf）和 1D-CNN（cnn），这一版是 {job.get('model_type')}")
     script = os.path.join(config.ALGO_TINYML_DIR, "service", "export_train.py")
     if not os.path.exists(script):
         raise FileNotFoundError(
@@ -793,6 +860,49 @@ def reload_edge_service() -> tuple[bool, str | None]:
         return False, f"连不上端侧服务（{url}）：{e}"
 
 
+def size_curve(job_id: int, trees: list[int] | None = None, depths: list[int] | None = None) -> dict:
+    """体积曲线：rf 扫 棵数 × 深度（剪枝不重训，紧凑编码算 flash，留出集算每类 F1）；
+    cnn 按 filters 预设算 int8 体积（这个要重训才有 F1）。结果存进任务的 size_curve。"""
+    import subprocess
+    import sys as _sys
+
+    job = get_job(job_id)
+    if job is None:
+        raise FileNotFoundError(f"训练任务 #{job_id} 不存在")
+    if job.get("status") != STATUS_DONE or not job.get("model_path"):
+        raise JobBusy("这一版还没训完")
+    if (job.get("model_type") or "rf") not in ("rf", "cnn"):
+        raise JobBusy(f"体积曲线只支持 rf 和 cnn，这一版是 {job.get('model_type')}")
+    script = os.path.join(config.ALGO_TINYML_DIR, "service", "size_curve.py")
+    if not os.path.exists(script):
+        raise FileNotFoundError(f"找不到 {script}（ALGO_TINYML_DIR={config.ALGO_TINYML_DIR}）")
+    processed_dir, remap = edge_export_inputs(job["model_path"])
+    cmd = [_sys.executable, script, "--model", job["model_path"], "--processed-dir", processed_dir,
+           "--imu-train", config.REPO_ROOT]
+    if remap:
+        cmd += ["--remap", remap]
+    if trees:
+        cmd += ["--trees", ",".join(str(int(t)) for t in trees)]
+    if depths:
+        cmd += ["--depths", ",".join(str(int(d)) for d in depths)]
+    log.info("体积曲线：%s", " ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=config.ALGO_TINYML_DIR, timeout=3600)
+    try:
+        with open(_log_path(job_id), "a", encoding="utf-8") as f:
+            f.write("\n▶ 体积曲线\n" + r.stdout + r.stderr)
+    except OSError:
+        pass
+    line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("CURVE_RESULT ")), None)
+    if r.returncode != 0 or not line:
+        raise RuntimeError(f"体积曲线失败（退出码 {r.returncode}）：{(r.stdout + r.stderr)[-3000:]}")
+    result = json.loads(line[len("CURVE_RESULT "):])
+    result["computed_at"] = int(time.time())
+    job = get_job(job_id) or job
+    job["size_curve"] = result
+    _save(job)
+    return result
+
+
 def remove_edge(job_id: int) -> None:
     """删训练记录时把端侧那份也撤了。撤不掉不算错（algo_tinyml 不在这台机器上之类）。"""
     import subprocess
@@ -835,6 +945,7 @@ def done_models() -> list[tuple[int, str, dict]]:
             "job_id": job["job_id"],
             "dataset": spec.get("date"),
             "axes": int(spec.get("axes") or 6),
+            "model_type": job.get("model_type") or "rf",
             "classes": (job.get("metrics") or {}).get("classes"),
             "macro_f1": (job.get("metrics") or {}).get("macro_f1"),
             "edge": (job.get("edge") or {}).get("edge"),

@@ -392,6 +392,9 @@ class DatasetSpec(BaseModel):
     clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")
     edge_size: bool = Field(False, description="端侧尺寸：用 configs/ml_edge.yaml（限深限棵数），"
                                                "模型塞得进板子约 128KB 的 flash。端侧主力是 xgb")
+    edge_trees: int | None = Field(None, description="端侧尺寸里具体的棵数（树模型），不填用 20")
+    edge_depth: int | None = Field(None, description="端侧尺寸里具体的最大深度（树模型），不填用 10")
+    edge_filters: list[int] | None = Field(None, description="端侧尺寸里 1D-CNN 的三层 filters，不填用 [32,64,128]")
     axes: int = Field(6, description="用几轴：6=加速度+陀螺仪（默认），3=只用加速度。"
                                      "端侧只有加速度计时用 3，否则模型学的是板上没有的信号")
     extra_datasets: list[ExtraDataset] = Field(default_factory=list,
@@ -404,7 +407,7 @@ class DatasetSpec(BaseModel):
 
 class TrainRequest(BaseModel):
     dataset: DatasetSpec
-    model_type: str = Field("rf", description="跟 train_custom.sh --model 一致")
+    model_type: str = Field("rf", description="跟 train_custom.sh --model 一致；cnn = 1D-CNN（src/dl/train.py）")
     tag: str | None = None
 
 
@@ -525,6 +528,26 @@ async def cancel_train_job(job_id: int):
     # 停之前模型已经存好了的，按完成收尾——那它也该能选
     _register_trained(job_id)
     return job
+
+
+class SizeCurveRequest(BaseModel):
+    trees: list[int] | None = Field(None, description="rf：扫哪些棵数，默认 5,10,15,20")
+    depths: list[int] | None = Field(None, description="rf：扫哪些深度，默认 4,6,8,10")
+
+
+@app.post("/api/v1/label/train/{job_id}/size_curve")
+async def train_size_curve(job_id: int, req: SizeCurveRequest | None = None):
+    """体积曲线：rf 扫 棵数 × 深度（剪枝不重训）算 flash 和每类 F1；cnn 按 filters 预设算 int8 体积。
+    要几十秒到几分钟（留出集逐条过一遍树）。"""
+    req = req or SizeCurveRequest()
+    try:
+        return await asyncio.to_thread(jobs.size_curve, job_id, req.trees, req.depths)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except jobs.JobBusy as e:
+        raise HTTPException(409, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"体积曲线失败：{e}") from e
 
 
 @app.post("/api/v1/label/train/{job_id}/export_edge")
