@@ -475,3 +475,48 @@ def test_compose_has_edge_service():
     assert "edge-service" in y["services"]
     assert "/algo_tinyml" in str(y["services"]["label-service"]["volumes"])
     assert y["services"]["label-service"]["environment"]["EDGE_SERVICE_URL"] == "http://edge-service:8900"
+
+
+def test_build_command_cnn_and_edge_specs(tmp_path, monkeypatch):
+    from label_service import config, jobs
+    monkeypatch.setattr(config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    import shutil
+    for n in ("dl_edge.yaml", "ml_edge_rf_d10.yaml"):
+        shutil.copy(os.path.join(os.path.dirname(__file__), "..", "configs", n), tmp_path / "configs" / n)
+    cmd = jobs.build_command({"date": "d", "edge_size": True, "edge_filters": [16, 32, 64]}, "cnn", None, 7)
+    assert cmd[cmd.index("--model") + 1] == "cnn" and "--skip_syn" in cmd
+    assert cmd[cmd.index("--dl_config") + 1] == "configs/dl_edge_job7.yaml"
+    import yaml
+    assert yaml.safe_load(open(tmp_path / "configs" / "dl_edge_job7.yaml"))["cnn"]["filters"] == [16, 32, 64]
+    cmd = jobs.build_command({"date": "d", "edge_size": True}, "cnn", None, 8)
+    assert cmd[cmd.index("--dl_config") + 1] == "configs/dl_edge.yaml"
+    cmd = jobs.build_command({"date": "d", "edge_size": True, "edge_trees": 12, "edge_depth": 7}, "rf", None, 9)
+    assert cmd[cmd.index("--ml_config") + 1] == "configs/ml_edge_job9.yaml"
+    c = yaml.safe_load(open(tmp_path / "configs" / "ml_edge_job9.yaml"))
+    assert c["random_forest"]["n_estimators"] == 12 and c["random_forest"]["max_depth"] == 7
+
+
+def test_parse_and_metrics_for_dl(tmp_path):
+    from label_service import jobs
+    out = jobs.parse_model_path("模型路径:\n  纯标注: results/x/16hz_r/dl_cnn_best.pt\n")
+    assert out == "results/x/16hz_r/dl_cnn_best.pt"
+    d = tmp_path / "16hz_r"
+    d.mkdir()
+    (d / "dl_cnn_best.json").write_text(json.dumps({"n_channels": 5, "window_size": 32, "classes": ["a"]}))
+    (d / "dl_cnn.json").write_text(json.dumps({"macro_f1": 0.7, "classes": ["a"]}))
+    m = jobs._load_metrics(str(d / "dl_cnn_best.pt"))
+    assert m["macro_f1"] == 0.7 and m["n_channels"] == 5 and m["window_size"] == 32
+
+
+def test_edge_export_inputs_dl(tmp_path, monkeypatch):
+    from label_service import config, jobs
+    monkeypatch.setattr(config, "REPO_ROOT", str(tmp_path))
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "remap_ui_job3.yaml").write_text("a: a\n")
+    mp = tmp_path / "results" / "processed_ds__job3_acc3" / "16hz_remap_ui_job3" / "dl_cnn_best.pt"
+    mp.parent.mkdir(parents=True)
+    mp.write_bytes(b"x")
+    pdir, remap = jobs.edge_export_inputs(str(mp))
+    assert pdir == str(tmp_path / "data" / "processed_ds__job3_acc3")
+    assert remap == str(tmp_path / "configs" / "remap_ui_job3.yaml")

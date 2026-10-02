@@ -1,0 +1,54 @@
+# 端侧 1D-CNN：configs/dl.yaml 的 cnn 把 filters 减半。
+#
+# 为什么：默认 [64,128,256] 量化成 int8 是 124.9 KB，正好卡在板子给模型留的
+# 128KB 上；参数几乎全在第三层（conv 128→256 一层就占 77%）。减半之后 32.4 KB，
+# 只掉四分之三的参数（见 algo_tinyml/docs/dl_edge.md 那张表）。
+# 再减半 [16,32,64] 是 8.7 KB，要更小就在网页「端侧尺寸」里填 filters。
+#
+# 其它模型那几节照抄 dl.yaml——train.py 按 cfg[args.model] 取，少了会 KeyError。
+epochs: 200
+batch_size: 64
+learning_rate: 0.0005
+early_stopping_patience: 30
+num_classes: 7
+
+cnn:
+  filters: [32, 64, 128]
+  kernel_size: 3
+  dropout: 0.3
+
+collar_cnn:
+  filters: [64, 128, 256]
+  kernel_size: 5
+  pool_size: 4
+  fc_dim: 256
+  dropout: 0.5
+
+cnn_lstm:
+  cnn_filters: [64, 128]
+  cnn_kernel_size: 3
+  lstm_units: 128
+  dropout: 0.3
+
+transformer:
+  d_model: 128
+  nhead: 8
+  num_layers: 3
+  dropout: 0.1
+  dim_feedforward: 256
+
+filternet:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3
+  lstm_units: 100
+  lstm_layers: 2
+  dropout: 0.3
+
+filternet_m2m:
+  filters: 100
+  kernel_size: 5
+  n_downsample: 3
+  lstm_units: 100
+  lstm_layers: 2
+  dropout: 0.3

@@ -85,6 +85,7 @@ LABELS=()                 # 要合成的类别，--label可重复传（比如--l
                            # 同时给两个类别都补合成数据）。不传时默认只合成"抓挠"（见下面
                            # 解析完参数后的默认值兜底）
 REMAP="configs/remap_custom_3class.yaml"
+DL_CONFIG="configs/dl.yaml"  # --model cnn 用的超参。端侧用 configs/dl_edge.yaml（filters 减半，int8 约 32KB）
 ML_CONFIG="configs/ml.yaml"  # 模型超参。端侧用 configs/ml_edge.yaml：树限深/限棵数，
                            # 让模型塞进 GR5513 给模型留的约 128KB flash（默认那份
                            # 200 棵不限深的森林是几十 MB，差两三个数量级）
@@ -143,6 +144,7 @@ _print_help() {
 全部参数:
   --date DATE            必填，主批次日期目录名（data/raw_custom/<DATE>/）
   --extra_date DATE:HZ   可重复传，额外合并的批次，HZ填该批次自己真实采样率
+  --dl_config FILE       --model cnn 的超参（默认 configs/dl.yaml，端侧用 configs/dl_edge.yaml）
   --ml_config FILE       模型超参（默认 configs/ml.yaml）。要上端侧用 configs/ml_edge.yaml：
                          限深限棵数，模型才塞得进板子的 flash。端侧主力是 --model xgb
   --axes 3|6             用几轴（默认6=加速度+陀螺仪）。端侧只有加速度计时用3，
@@ -214,6 +216,7 @@ while [[ $# -gt 0 ]]; do
     --remap)          REMAP="$2";          shift 2 ;;
     --axes)           AXES="$2";           shift 2 ;;
     --ml_config)      ML_CONFIG="$2";      shift 2 ;;
+    --dl_config)      DL_CONFIG="$2";      shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
   esac
 done
@@ -574,6 +577,30 @@ fi
 if [[ "$SKIP_ML" == "1" ]]; then
   echo ""
   echo "▶ --skip_ml：预处理已完成，跳过ML训练（$PROCESSED_DIR 下的train.npz可以直接给src/dl/train.py用）"
+  exit 0
+fi
+
+# ── --model cnn：走 DL 那条（src/dl/train.py），不生成合成数据、不跑方案 B ──
+# 1D-CNN 是端侧的另一条路线（int8，权重顺序读，板上 cache 友好）。预处理跟 ML
+# 完全共用，只是训练换成 torch；模型路径按 ML 那两行同样的格式打出来，
+# label_service/jobs.py 解析的还是「纯标注:」这一行
+if [[ "$MODEL_TYPE" == "cnn" ]]; then
+  echo ""
+  echo "▶ 1D-CNN（src/dl/train.py，超参 $DL_CONFIG）..."
+  python src/dl/train.py --hz "$HZ" --model cnn \
+    --config "$DL_CONFIG" \
+    --processed_dir "$PROCESSED_DIR" \
+    --remap "$REMAP" \
+    --results_dir "$RESULTS_DIR" 2>&1 | tee "$LOG_NO_SYN"
+  _rc=${PIPESTATUS[0]}
+  if [[ "$_rc" != "0" ]]; then
+    echo "[错误] 1D-CNN 训练失败（退出码 $_rc）"
+    exit "$_rc"
+  fi
+  _remap_stem=$(basename "$REMAP" .yaml)
+  echo ""
+  echo "模型路径:"
+  echo "  纯标注: ${RESULTS_DIR}/${DATASET_TAG}/${HZ}hz_${_remap_stem}/dl_cnn_best.pt"
   exit 0
 fi
 
