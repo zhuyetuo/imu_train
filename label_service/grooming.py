@@ -136,8 +136,12 @@ def _bouts(flags: np.ndarray, starts: np.ndarray, hz: float, p: GroomParams) -> 
     return keep
 
 
-def mine(acc: np.ndarray, ts, valid_mask, hz: float, p: GroomParams | None = None) -> list[dict]:
+def mine(acc: np.ndarray, ts, valid_mask, hz: float, p: GroomParams | None = None,
+         classify=None) -> list[dict]:
     """→ 候选列表（结构同 scratch_candidates 的元素，多 label / tilt_deg）。
+
+    classify(这段的 acc, hz, 平均动作量, 秒数) → (类别, reason, 线索) 或 None：
+    给每一段换一个更像的类别（进食 / 饮水，见 behaviors.py）。None = 保持 p.label。
 
     acc (N,3)；ts 是逐行时间（pandas Series / datetime 数组），None 就给不出时间戳、返回 []；
     valid_mask (N,) True = 这行有数据。
@@ -169,7 +173,7 @@ def mine(acc: np.ndarray, ts, valid_mask, hz: float, p: GroomParams | None = Non
         sel = slice(i0, i1 + 1)
         # 打分：偏得越多、节律越明显越像。只用来排序，不是概率
         score = np.clip((tilt[sel] - p.tilt_min_deg) / 45.0, 0, 1) * 0.6 + np.clip(rhythm[sel], 0, 1) * 0.4
-        out.append({
+        cand = {
             "start_ts": _fmt_ts(t0),
             "end_ts": _fmt_ts(t1),
             "conf_max": round(float(score.max()), 3),
@@ -179,7 +183,13 @@ def mine(acc: np.ndarray, ts, valid_mask, hz: float, p: GroomParams | None = Non
             "reason": "grooming",
             "label": p.label,
             "tilt_deg": round(float(tilt[sel].mean()), 1),
-        })
+        }
+        if classify is not None:
+            hit = classify(acc[s:e + 1], hz, float(motion[sel].mean()), (t1 - t0).total_seconds())
+            if hit:
+                cand["label"], cand["reason"], info = hit
+                cand.update(info)
+        out.append(cand)
     out.sort(key=lambda c: (c["conf_mean"], c["n_windows"]), reverse=True)
     return out
 

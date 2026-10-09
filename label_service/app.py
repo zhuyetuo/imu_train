@@ -131,7 +131,9 @@ class WindowOut(BaseModel):
 
 
 class Candidate(Segment):
-    reason: str   # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判 / grooming=姿态像舔啃
+    # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判 / grooming=姿态像舔啃 /
+    # eating、drinking=姿态段按节律像进食、饮水 / barking=一串孤立冲击像吠叫（见 behaviors.py）
+    reason: str
     # 这条候选是哪个类别的。不给 = 抓挠（老调用方的约定）；疑似舔/啃候选给「舔身体」，
     # 平台按它去找标签、按它显示，确认时人还能改成别的（比如「啃身体」或带部位的标签）
     label: str | None = None
@@ -258,11 +260,17 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
                      if lab == scratch_head or lab.startswith(scratch_head + "-")
                      for seg in (segs or [])] + list(result["candidates"])
             gc = _grooming.drop_overlapping(grooming_cands, taken)
-            if len(gc) > config.GROOM_MAX:
-                log.info("疑似舔/啃候选 %d 条，只保留分最高的 %d 条（%s）",
-                         len(gc), config.GROOM_MAX, os.path.basename(full_path))
-                gc = gc[: config.GROOM_MAX]
-            result["candidates"] = result["candidates"] + gc
+            # 上限**按类别各算**：舔 / 进食 / 饮水 / 吠叫混在一起裁的话，分数高的那一类
+            # 会把别的类挤没（吠叫的分跟姿态段不是一个尺子）
+            kept: list[dict] = []
+            for lab in dict.fromkeys(c.get("label") for c in gc):
+                one = [c for c in gc if c.get("label") == lab]
+                if len(one) > config.GROOM_MAX:
+                    log.info("疑似%s候选 %d 条，只保留分最高的 %d 条（%s）",
+                             lab, len(one), config.GROOM_MAX, os.path.basename(full_path))
+                    one = sorted(one, key=lambda c: c.get("conf_mean") or 0, reverse=True)[: config.GROOM_MAX]
+                kept += one
+            result["candidates"] = result["candidates"] + kept
     if holes:
         result["segments"] = {k: postprocess.drop_missing(v, holes) for k, v in result["segments"].items()}
         result["candidates"] = postprocess.drop_missing(result["candidates"], holes)

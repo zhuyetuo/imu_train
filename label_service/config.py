@@ -103,6 +103,17 @@ GROOM_MOTION_MIN         = float(_env("GROOM_MOTION_MIN", "0.03"))  # 动作量�
 GROOM_MOTION_MAX         = float(_env("GROOM_MOTION_MAX", "0.35"))  # 动作量上限（高于 = 走/跑）
 GROOM_MIN_S              = float(_env("GROOM_MIN_S", "3"))          # 短于这个的不要
 GROOM_GAP_S              = float(_env("GROOM_GAP_S", "2"))          # 断开不超过这么久算同一段
+# 姿态段按节律再分：规整的 3–5Hz → 饮水，0.7–3Hz 且够长 → 进食，其余还是舔（见 behaviors.py）。
+# 段不增不减，只是类别猜得更像；关掉就全叫 GROOM_LABEL。名字跟「犬行为全量」模板对齐
+GROOM_SPLIT_ENABLED      = _env("GROOM_SPLIT_ENABLED", "1") == "1"
+EAT_LABEL                = _env("EAT_LABEL", "进食")
+DRINK_LABEL              = _env("DRINK_LABEL", "饮水")
+# 疑似吠叫：加速度上一串孤立的尖脉冲（见 behaviors.py）
+BARK_ENABLED             = _env("BARK_ENABLED", "1") == "1"
+BARK_LABEL               = _env("BARK_LABEL", "吠叫")
+BARK_PEAK_MIN_G          = float(_env("BARK_PEAK_MIN_G", "0.12"))  # 峰至少多高（g）
+BARK_PEAK_K              = float(_env("BARK_PEAK_K", "6"))          # 至少是底噪的几倍
+BARK_MIN_N               = int(_env("BARK_MIN_N", "3"))             # 一串至少几声
 MISSING_MIN_RATIO        = float(_env("MISSING_MIN_RATIO", "0.5"))
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))
