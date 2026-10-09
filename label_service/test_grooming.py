@@ -280,7 +280,7 @@ def test_grooming_is_added_after_refine_and_before_missing_drop():
     它**之后**加进来；掉数据那一刀要在**之后**砍，不然掉数据的段会漏进候选。"""
     code = _app_src()
     i_refine = code.index('postprocess.refine_boundaries(result["candidates"]')
-    i_groom = code.index('result["candidates"] = result["candidates"] + gc')
+    i_groom = code.index('result["candidates"] = result["candidates"] + kept')
     i_holes = code.index('result["candidates"] = postprocess.drop_missing(result["candidates"], holes)')
     assert i_refine < i_groom < i_holes
 

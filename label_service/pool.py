@@ -212,13 +212,18 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"], device_hz) if windows else None
     # 疑似舔/啃候选：只看加速度姿态，跟模型无关，但要读同一份 CSV（load_csv 在 worker
     # 里 memoize 过，不会再读一次盘）。挖不出来就空，绝不能让它把推理整个拖垮
+    # 同一次读盘顺带出：姿态段按节律分成 舔 / 进食 / 饮水，再加疑似吠叫（见 behaviors.py）
     grooming: list[dict] = []
-    if config.GROOM_ENABLED and windows:
+    if (config.GROOM_ENABLED or config.BARK_ENABLED) and windows:
         try:
-            from label_service import grooming as _grooming
-            grooming = _grooming.mine_file(full_path, float(device_hz or config.DEVICE_HZ), _groom_params())
+            from label_service import behaviors as _behaviors
+            grooming = _behaviors.mine_file(
+                full_path, float(device_hz or config.DEVICE_HZ), _groom_params(), _behavior_params(),
+                split=config.GROOM_SPLIT_ENABLED, barks=config.BARK_ENABLED)
+            if not config.GROOM_ENABLED:
+                grooming = [c for c in grooming if c.get("reason") == "barking"]
         except Exception:  # noqa: BLE001 候选是锦上添花，出错只记日志
-            log.exception("疑似舔/啃候选挖掘失败 %s", full_path)
+            log.exception("疑似舔/啃/进食/饮水/吠叫候选挖掘失败 %s", full_path)
     return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope,
             "grooming": grooming}
 
@@ -229,6 +234,14 @@ def _groom_params():
         tilt_min_deg=config.GROOM_TILT_MIN_DEG, motion_min=config.GROOM_MOTION_MIN,
         motion_max=config.GROOM_MOTION_MAX, min_s=config.GROOM_MIN_S, gap_s=config.GROOM_GAP_S,
         label=config.GROOM_LABEL,
+    )
+
+
+def _behavior_params():
+    from label_service import behaviors as _behaviors
+    return _behaviors.BehaviorParams(
+        label_eat=config.EAT_LABEL, label_drink=config.DRINK_LABEL, label_bark=config.BARK_LABEL,
+        bark_peak_min_g=config.BARK_PEAK_MIN_G, bark_peak_k=config.BARK_PEAK_K, bark_min_n=config.BARK_MIN_N,
     )
 
 
