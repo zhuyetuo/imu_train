@@ -156,42 +156,91 @@ def _load_sensor_df(url_or_none: str, csv_dir: str, sensor_name: str, missing_st
     return df, acc_cols, gyro_cols
 
 
-def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
-                  subject_id, acc_unit, keep_labels):
-    """从 df 中切出时间段，返回 row 列表。"""
+_OUT_COLS = ["record_id", "label", "timestamp", "acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
+
+
+def _extract_frame(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
+                   subject_id, acc_unit, keep_labels):
+    """从 df 中切出时间段，返回 DataFrame（列见 _OUT_COLS），没有就 None。
+
+    **整段向量化，不逐行建 dict。** 以前每一行一个 dict：670 小时 × 50Hz ≈ 1.2 亿行，
+    每个 dict 几百字节，几十 GB，跑到四分之三被系统 OOM 杀掉（2026-10-29 训练 #15）。"""
     if keep_labels and label not in keep_labels:
-        return []
+        return None
     t_start = pd.to_datetime(t_start_str)
     t_end   = pd.to_datetime(t_end_str)
     mask    = (df["_ts"] >= t_start) & (df["_ts"] <= t_end)
     seg_df  = df[mask]
     if len(seg_df) == 0:
         print(f"  [警告] {label} {t_start_str}→{t_end_str} 无匹配行")
-        return []
+        return None
     acc = seg_df[acc_cols].values.astype(np.float64)
     if acc_unit == "g":
         acc = acc * G
     gyro = seg_df[gyro_cols].values.astype(np.float64) if gyro_cols else np.zeros((len(seg_df), 3))
-    ts = seg_df["_ts"].values
-    rows = []
-    for i in range(len(seg_df)):
-        rows.append({
-            "record_id": subject_id,
-            "label":  label,
-            "timestamp": ts[i],
-            "acc_x":  acc[i, 0], "acc_y": acc[i, 1], "acc_z": acc[i, 2],
-            "gyr_x":  gyro[i, 0], "gyr_y": gyro[i, 1], "gyr_z": gyro[i, 2],
-        })
-    return rows
+    return pd.DataFrame({
+        "record_id": subject_id,
+        "label": label,
+        "timestamp": seg_df["_ts"].values,
+        "acc_x": acc[:, 0], "acc_y": acc[:, 1], "acc_z": acc[:, 2],
+        "gyr_x": gyro[:, 0], "gyr_y": gyro[:, 1], "gyr_z": gyro[:, 2],
+    }, columns=_OUT_COLS)
+
+
+def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
+                  subject_id, acc_unit, keep_labels):
+    """同 _extract_frame，返回 row dict 列表（给 analyze_missing 这种小量分析用）。"""
+    fr = _extract_frame(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
+                        subject_id, acc_unit, keep_labels)
+    return [] if fr is None else fr.to_dict("records")
 
 
 def convert(tasks: list, csv_dir: str, acc_unit: str,
-            keep_labels: list = None, missing_strategy: str = "drop") -> pd.DataFrame:
+            keep_labels: list = None, missing_strategy: str = "drop",
+            output=None):
+    """转换全部任务。
+
+    给了 output 就**按任务边转边追加写**，返回 (总行数, 各类别行数)：内存里同时只有
+    一个任务的数据，几百小时的数据集也不会撑爆。不给 output 就照旧返回整张 DataFrame
+    （小数据 / 测试用）。
+
+    排序：同一个 record_id 只来自一个任务，所以在任务内部按 (record_id, timestamp)
+    排好就够了——下游按 record_id 分组，记录之间的先后无所谓。"""
     keep_set = set(keep_labels) if keep_labels else None
-    rows = []
+    rows: list = []          # 当前这个任务的段（DataFrame）
+    frames: list = []        # 不写文件时攒全部
+    n_total = 0
+    counts: dict = {}
+    wrote_header = False
+    if output:
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        tmp_out = output + ".part"
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+
+    def _flush():
+        nonlocal wrote_header, n_total
+        if not rows:
+            return
+        chunk = pd.concat(rows, ignore_index=True)
+        rows.clear()
+        chunk = chunk.sort_values(["record_id", "timestamp"], kind="stable")
+        n_total += len(chunk)
+        for lab, c in chunk["label"].value_counts().items():
+            counts[lab] = counts.get(lab, 0) + int(c)
+        if output:
+            chunk.to_csv(tmp_out, mode="a", header=not wrote_header, index=False)
+            wrote_header = True
+        else:
+            frames.append(chunk)
+
+    def _add(fr):
+        if fr is not None and len(fr):
+            rows.append(fr)
 
     from tqdm import tqdm
     for task in tqdm(tasks, desc="转换标注", unit="task"):
+        _flush()
         task_id = task["id"]
         data    = task.get("data", {})
 
@@ -232,7 +281,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                     if not labels or not t0 or not t1 or fn not in sensor_map:
                         continue
                     df, acc_cols, gyro_cols, subject_id = sensor_map[fn]
-                    rows.extend(_extract_rows(df, acc_cols, gyro_cols,
+                    _add(_extract_frame(df, acc_cols, gyro_cols,
                                               labels[0], t0, t1,
                                               subject_id, acc_unit, keep_set))
         else:
@@ -253,19 +302,22 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                     t1     = val.get("end",   "")
                     if not labels or not t0 or not t1:
                         continue
-                    rows.extend(_extract_rows(df, acc_cols, gyro_cols,
+                    _add(_extract_frame(df, acc_cols, gyro_cols,
                                               labels[0], t0, t1,
                                               subject_id, acc_unit, keep_set))
 
-    if not rows:
+    _flush()
+    if not n_total:
         raise RuntimeError("没有任何有效数据，请检查输入 JSON 和 CSV 路径")
-
-    out = pd.DataFrame(rows)
+    if output:
+        # 写完才改名：中途被杀的话不留半份 CSV（train_custom.sh 见到文件在就会跳过这一步）
+        os.replace(tmp_out, output)
+        return n_total, counts
     # 标注段是按 Label Studio 导出顺序拼接的，不一定按时间先后，
     # 必须按 (record_id, timestamp) 重新排序，否则同一个 record_id 内部的
     # "局部秒数"跟真实时间顺序对不上（窗口切分、事件时间戳换算都会错）
-    out = out.sort_values(["record_id", "timestamp"], kind="stable").reset_index(drop=True)
-    return out
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values(["record_id", "timestamp"], kind="stable").reset_index(drop=True)
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
@@ -297,17 +349,12 @@ def main():
     print(f"共 {len(tasks)} 个 task")
     print(f"只保留标签: {args.keep_labels}")
 
-    out_df = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels,
-                      missing_strategy=args.missing_strategy)
-
-    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    out_df.to_csv(output, index=False)
+    n_total, counts = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels,
+                              missing_strategy=args.missing_strategy, output=output)
 
     print(f"\n── 汇总 ──")
-    print(f"总行数: {len(out_df)}")
-    print(f"subject 数: {out_df['record_id'].nunique()}")
-    counts = out_df["label"].value_counts()
-    for label, cnt in counts.items():
+    print(f"总行数: {n_total}")
+    for label, cnt in sorted(counts.items(), key=lambda x: -x[1]):
         print(f"  {label}: {cnt} 行")
     print(f"\n已保存: {output}")
     print(f"\n下一步（预处理）:")
