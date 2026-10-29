@@ -61,6 +61,11 @@ INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count
 # 给交互式推理（工作台点「AI预标注」）留几个槽位，批量预标注最多占 INFER_WORKERS - 这个数，
 # 免得标注员点一下要排在几十个批量文件后面
 INFER_RESERVE    = int(_env("LABEL_INFER_RESERVE", "2"))
+# 训练给机器上别的服务（标注平台的 api / 数据库 / 这里的推理接口）留几个核。
+# 以前 RF 是 n_jobs=-1，训练一跑把核全占满，平台接口 15 秒超时、页面像挂了一样
+TRAIN_RESERVE_CPUS = int(_env("TRAIN_RESERVE_CPUS", "2"))
+# 训练进程的 nice 值（0~19，越大越让着别人）。CPU 空着时照样跑满，有人要用时先让
+TRAIN_NICE         = int(_env("TRAIN_NICE", "15"))
 
 # 稳定版后处理参数（见 postprocess.py）。调试版 = 模型逐窗口原始输出，不受这些影响
 STABLE_EVENT_LABELS      = [t.strip() for t in _env("STABLE_EVENT_LABELS", "抓挠,甩身体").split(",") if t.strip()]
