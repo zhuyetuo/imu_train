@@ -8,6 +8,7 @@
 """
 
 import os
+import sys
 import argparse
 import numpy as np
 import yaml
@@ -366,6 +367,14 @@ def main(args):
 
     records, keep_label_set = load_records(args, cfg)
     source_hz = cfg["source_hz"]  # load_records 可能修改 cfg["source_hz"]（如 custom 数据集），需在其后读取
+    if args.source_hz:
+        # 调用方明确知道这份 CSV 是多少 Hz（train_custom.sh 刚把它重采样到 --hz）。
+        # 以前只认 configs/data.yaml 的 custom.source_hz=16：目标是 16Hz 时碰巧对得上，
+        # 一换成 25Hz 就「跳过 25Hz（高于源采样率 16Hz）」，什么都没生成，下一步才报
+        # 找不到 train.npz（2026-10-29 训练 #12）
+        if args.source_hz != source_hz:
+            print(f"[preprocess] 源采样率按 --source_hz={args.source_hz}（配置里写的是 {source_hz}）")
+        source_hz = args.source_hz
 
     # 拟合标签编码器
     if keep_label_set:
@@ -401,10 +410,12 @@ def main(args):
         train_ids = val_ids = test_ids = None
         print(f"[preprocess] 按连续片段分组划分: train={train_r:.0%} / val={val_r:.0%} / test={test_r_display:.0%}")
 
+    n_done = 0
     for target_hz in target_hz_list:
         if target_hz > source_hz:
             print(f"\n[preprocess] 跳过 {target_hz}Hz（高于源采样率 {source_hz}Hz，无法上采样）")
             continue
+        n_done += 1
 
         window_size = int(window_sec * target_hz)
         stride = int(stride_sec * target_hz)
@@ -473,6 +484,11 @@ def main(args):
             print(f"  🗑  已删除旧特征缓存 {feat_cache}")
         print(f"  ✅ 保存至 {out_dir}/")
 
+    if not n_done:
+        # 一个采样率都没生成就别说「全部完成」：下一步训练只会报一句找不到 train.npz，
+        # 看不出真正的原因在这里
+        sys.exit(f"\n[preprocess] ❌ 没有生成任何数据：要的 {target_hz_list} Hz 都高于源采样率 {source_hz}Hz。"
+                 "检查 --source_hz / configs/data.yaml 的 source_hz")
     print("\n[preprocess] 全部完成！")
 
 
@@ -513,6 +529,8 @@ if __name__ == "__main__":
                              "该策略下窗口本来就纯净）")
     parser.add_argument("--hz", type=int, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
+    parser.add_argument("--source_hz", type=int, default=0,
+                        help="这份 CSV 的实际采样率，覆盖 configs/data.yaml 里的 source_hz（0=用配置）")
     parser.add_argument("--stride_s", type=float, default=0.0,
                         help="训练窗口步长（秒），覆盖 configs/data.yaml 的 stride_seconds"
                              "（0=用配置文件默认值）。步长越密，训练窗口越多、"

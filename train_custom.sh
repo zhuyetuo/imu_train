@@ -554,6 +554,14 @@ fi
 # 因为换模型就重新跑。跟前面步骤0/1一样，用文件是否已存在做跳过判断，
 # --clean时才强制重新生成。
 PREPROCESSED_MARKER="${PROCESSED_DIR}/${HZ}hz/train.npz"
+# 走到这里的 CSV 已经是 --hz 了：给了 --source_hz 就在上面重采样过，带额外批次的
+# 合并时也统一重采样到了 --hz。告诉预处理别再按 configs/data.yaml 的 16Hz 算——
+# 目标 25Hz 时那样会「跳过 25Hz」、一个文件都不生成。
+# 两者都没有的老用法（单份、不传 --source_hz）不传这个，跟以前一样按配置
+PRE_SOURCE_HZ_FLAG=""
+if [[ -n "$SOURCE_HZ" || ${#EXTRA_DATES[@]} -gt 0 ]]; then
+  PRE_SOURCE_HZ_FLAG="--source_hz $HZ"
+fi
 if [[ -f "$PREPROCESSED_MARKER" && "$CLEAN" != "1" ]]; then
   echo ""
   echo "▶ 预处理数据：$PREPROCESSED_MARKER 已存在，跳过（换--model不需要重新预处理；"
@@ -574,6 +582,7 @@ else
     $( [[ -n "$STRIDE_S" ]] && echo "--stride_s $STRIDE_S" ) \
     $( [[ -n "$WINDOW_S" ]] && echo "--window_s $WINDOW_S" ) \
     $DROP_NAN_WINDOWS_FLAG \
+    $PRE_SOURCE_HZ_FLAG \
     --axes "$AXES" \
     --hz "$HZ"
 fi
