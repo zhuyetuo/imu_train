@@ -338,6 +338,12 @@ def main(args):
     model_cfg = dict(cfg[cfg_key])
     if args.n_jobs is not None:
         model_cfg["n_jobs"] = args.n_jobs
+    elif os.environ.get("IMU_TRAIN_N_JOBS") and "n_jobs" in model_cfg:
+        # 平台提交的训练：label_service 按「全部核 − 给别的服务留的」算好了。
+        # 配置里的 -1（用满）会把同一台机器上的标注平台挤到接口超时
+        cap = int(os.environ["IMU_TRAIN_N_JOBS"])
+        if model_cfg["n_jobs"] in (None, -1) or model_cfg["n_jobs"] > cap:
+            model_cfg["n_jobs"] = cap
     # RF / ExtraTrees 走 class_weight="balanced"；XGB/LGBM/CatBoost/HistGB
     # 不支持class_weight构造参数（HistGradientBoostingClassifier是sklearn
     # 没实现，xgb/lgbm/catboost是各自库的设计），统一走下面的sample_weight

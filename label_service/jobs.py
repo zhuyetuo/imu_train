@@ -79,6 +79,43 @@ def _next_job_id() -> int:
     return nid
 
 
+def train_n_jobs() -> int:
+    """训练能用几个核：全部减去给别的服务留的。"""
+    return max(1, (os.cpu_count() or 2) - max(0, config.TRAIN_RESERVE_CPUS))
+
+
+def train_env() -> dict[str, str]:
+    """限制训练的并行度。各个库各认各的变量，都得设：
+    IMU_TRAIN_N_JOBS 给 src/ml/train.py（RF 的 n_jobs），OMP/MKL/OpenBLAS 给 numpy
+    和 torch，LOKY_MAX_CPU_COUNT 给 joblib（n_jobs=-1 时按它算）。"""
+    n = str(train_n_jobs())
+    return {
+        "IMU_TRAIN_N_JOBS": n,
+        "OMP_NUM_THREADS": n,
+        "MKL_NUM_THREADS": n,
+        "OPENBLAS_NUM_THREADS": n,
+        "LOKY_MAX_CPU_COUNT": n,
+    }
+
+
+def _lower_priority() -> None:
+    """在训练子进程里跑（fork 之后、exec 之前），孩子们都继承：
+
+    - nice：CPU 紧张时先让平台的接口和数据库跑，空闲时训练照样吃满
+    - oom_score_adj=1000：内存真不够时，系统先杀训练，别去杀数据库 / api
+      （训练挂了重跑就行，数据库被杀了整个平台都没了）
+    """
+    try:
+        os.nice(max(0, min(19, config.TRAIN_NICE)))
+    except OSError:
+        pass
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass
+
+
 def apply_label_remap(tasks: list, remap: dict) -> int:
     """按 {原名: 新名} 改写标注的类别名，返回改了多少段。
 
@@ -453,8 +490,9 @@ async def run_job(job_id: int) -> None:
             # 那一个的话，孩子们照样在后台吃 CPU、往目录里写文件
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=config.REPO_ROOT, stdout=log_f, stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env={**os.environ, "PYTHONUNBUFFERED": "1", **train_env()},
                 start_new_session=True,
+                preexec_fn=_lower_priority,
             )
             job["pid"] = proc.pid
             _save(job)
