@@ -121,3 +121,69 @@ def test_barks_in_missing_data_are_ignored():
     _bark(acc, 100.0, n=5, gap_s=0.6)
     valid[int(99 * HZ):int(104 * HZ)] = False
     assert B.mine_barks(acc, ts, valid, HZ) == []
+
+
+# ── 甩头 / 抖身 ──────────────────────────────────────────────────────────
+
+def _shake(acc, t, rng, s0, s1, amp=1.2, f=5.0):
+    """甩水：左右扭转，三个轴都在大幅往复。"""
+    a, b = int(s0 * HZ), int(s1 * HZ)
+    ph = 2 * np.pi * f * t[a:b]
+    acc[a:b] += np.stack([amp * np.sin(ph), 0.6 * amp * np.sin(ph + 1.0), 0.3 * amp * np.sin(ph + 2.0)], axis=1)
+    acc[a:b] += rng.normal(0, 0.02, (b - a, 3))
+
+
+def _walk(acc, t, rng, s0, s1, f=2.0, amp=0.25):
+    """走路：步频 2 Hz、峰形不是正弦（落脚有冲击），一走就是好久。"""
+    a, b = int(s0 * HZ), int(s1 * HZ)
+    step = np.maximum(0, np.sin(2 * np.pi * f * t[a:b])) ** 3
+    acc[a:b] += (amp * step)[:, None] * np.array([0.2, 0.3, 1.0], np.float32) + rng.normal(0, 0.03, (b - a, 3))
+
+
+def test_shake_found_walk_ignored():
+    rng, t, acc, valid, ts = _base(300)
+    _shake(acc, t, rng, 60, 61.5)                 # 甩一下
+    _walk(acc, t, rng, 120, 200)                  # 走了 80 秒
+    _shake(acc, t, rng, 240, 240.8, amp=0.8, f=7.0)  # 甩头：更短更快
+    got = sorted(round(_sec(c, "start_ts")) for c in B.mine_shakes(acc, ts, valid, HZ))
+    assert len(got) == 2, got
+    assert abs(got[0] - 60) <= 1 and abs(got[1] - 240) <= 1
+    for c in B.mine_shakes(acc, ts, valid, HZ):
+        assert c["label"] == "甩头/抖身" and c["reason"] == "shaking"
+
+
+def test_long_oscillation_is_not_a_shake():
+    """超过 5 秒的连续大幅振荡（多半在跑）不要。"""
+    rng, t, acc, valid, ts = _base(120)
+    _shake(acc, t, rng, 30, 45, amp=1.0, f=4.0)
+    assert B.mine_shakes(acc, ts, valid, HZ) == []
+
+
+# ── 如厕 ────────────────────────────────────────────────────────────────
+
+def _still(acc, t, rng, s0, s1, tilt):
+    a, b = int(s0 * HZ), int(s1 * HZ)
+    acc[a:b] = _rot(tilt) + rng.normal(0, 0.004, (b - a, 3))
+
+
+def test_toilet_needs_walking_before_and_after():
+    rng, t, acc, valid, ts = _base(1200)
+    _walk(acc, t, rng, 100, 130)
+    _still(acc, t, rng, 130, 140, tilt=30)        # 走 → 抬腿 10 秒 → 走：排尿
+    _walk(acc, t, rng, 140, 170)
+    _walk(acc, t, rng, 400, 430)
+    _still(acc, t, rng, 430, 470, tilt=35)        # 走 → 蹲 40 秒 → 走：排便
+    _walk(acc, t, rng, 470, 500)
+    _still(acc, t, rng, 800, 812, tilt=30)        # 前后都没走：不算
+    got = sorted((round(_sec(c, "start_ts")), c["label"]) for c in B.mine_toilet(acc, ts, valid, HZ))
+    assert [g[1] for g in got] == ["疑似如厕-排尿", "疑似如厕-排便"], got
+    assert abs(got[0][0] - 130) <= 2 and abs(got[1][0] - 430) <= 2
+
+
+def test_long_rest_after_walk_is_not_toilet():
+    """走完趴下歇了好几分钟：超过上限，不算。"""
+    rng, t, acc, valid, ts = _base(900)
+    _walk(acc, t, rng, 100, 130)
+    _still(acc, t, rng, 130, 400, tilt=40)
+    _walk(acc, t, rng, 400, 430)
+    assert B.mine_toilet(acc, ts, valid, HZ) == []
