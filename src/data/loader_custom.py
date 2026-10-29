@@ -32,7 +32,14 @@ def load_dataset_custom(csv_path: str, cfg: dict) -> tuple:
     sensor_cols = cfg["sensor_cols"]
 
     print(f"[loader_custom] 读取 {csv_path} ...")
-    df = pd.read_csv(csv_path)
+    # 省内存地读：只读要用的列，传感器 float32，标签 / 记录 ID 用 category。
+    # 默认读法下几百小时的数据（上亿行）光字符串列就要几十 GB——每行一个
+    # Python 字符串对象（2026-10-29 训练 #15 在上一步就被 OOM 杀了，这一步同样会）
+    head = pd.read_csv(csv_path, nrows=0).columns
+    use = [c for c in dict.fromkeys(sensor_cols + [label_col, record_id_col]) if c in head]
+    dtype = {c: "float32" for c in sensor_cols if c in head}
+    dtype.update({label_col: "category", record_id_col: "category"})
+    df = pd.read_csv(csv_path, usecols=use, dtype=dtype)
 
     missing = [c for c in sensor_cols + [label_col, record_id_col] if c not in df.columns]
     if missing:
@@ -45,18 +52,23 @@ def load_dataset_custom(csv_path: str, cfg: dict) -> tuple:
     print(f"[loader_custom] 传感器列: {sensor_cols}")
     print(f"[loader_custom] 标签列: {label_col}  记录ID列: {record_id_col}")
 
-    record_ids = sorted(df[record_id_col].unique())
+    # groupby 一遍拆完，不再逐个记录在整张表上比一次（上千条记录 × 上亿行）。
+    # sort=False + 下面按 str 排：顺序跟以前 sorted(unique()) 一致
+    groups = {str(k): g for k, g in df.groupby(record_id_col, sort=False, observed=True)}
+    record_ids = sorted(groups)
     print(f"[loader_custom] 共 {len(record_ids)} 条记录（每条记录=一次录制的一路传感器，"
           f"不等于实际狗的数量）")
 
     records = []
     for record_id in record_ids:
-        sub = df[df[record_id_col] == record_id]
+        sub = groups[record_id]
         records.append({
-            "record_id": str(record_id),
+            "record_id": record_id,
             "data": sub[sensor_cols].values.astype(np.float32),
-            "labels": sub[label_col].values,
+            # 还原成普通字符串数组：下游按字符串比较 / 编码
+            "labels": np.asarray(sub[label_col].astype(str), dtype=object),
         })
+    del groups, df
 
     print(f"[loader_custom] 加载完成: {len(records)} 条记录，{len(sensor_cols)} 个传感器通道")
     return records, sensor_cols, label_col
