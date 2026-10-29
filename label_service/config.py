@@ -114,6 +114,14 @@ BARK_LABEL               = _env("BARK_LABEL", "吠叫")
 BARK_PEAK_MIN_G          = float(_env("BARK_PEAK_MIN_G", "0.12"))  # 峰至少多高（g）
 BARK_PEAK_K              = float(_env("BARK_PEAK_K", "6"))          # 至少是底噪的几倍
 BARK_MIN_N               = int(_env("BARK_MIN_N", "3"))             # 一串至少几声
+# 疑似甩头/抖身：短促、大幅、规整的 3–9 Hz 振荡（见 behaviors.py）
+SHAKE_ENABLED            = _env("SHAKE_ENABLED", "1") == "1"
+SHAKE_LABEL              = _env("SHAKE_LABEL", "甩头/抖身")
+SHAKE_RMS_MIN_G          = float(_env("SHAKE_RMS_MIN_G", "0.35"))  # 三轴高通 RMS 下限（g）
+# 疑似如厕：走 → 停下换姿势不动 4–90 秒 → 又走。判据弱、误报多，靠人排（见 behaviors.py）
+TOILET_ENABLED           = _env("TOILET_ENABLED", "1") == "1"
+TOILET_URINE_LABEL       = _env("TOILET_URINE_LABEL", "疑似如厕-排尿")
+TOILET_FECES_LABEL       = _env("TOILET_FECES_LABEL", "疑似如厕-排便")
 MISSING_MIN_RATIO        = float(_env("MISSING_MIN_RATIO", "0.5"))
 REFINE_MARGIN_S          = float(_env("REFINE_MARGIN_S", "1.0"))
 REFINE_RATIO             = float(_env("REFINE_RATIO", "0.3"))

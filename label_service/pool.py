@@ -214,16 +214,17 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     # 里 memoize 过，不会再读一次盘）。挖不出来就空，绝不能让它把推理整个拖垮
     # 同一次读盘顺带出：姿态段按节律分成 舔 / 进食 / 饮水，再加疑似吠叫（见 behaviors.py）
     grooming: list[dict] = []
-    if (config.GROOM_ENABLED or config.BARK_ENABLED) and windows:
+    if (config.GROOM_ENABLED or config.BARK_ENABLED or config.SHAKE_ENABLED or config.TOILET_ENABLED) and windows:
         try:
             from label_service import behaviors as _behaviors
             grooming = _behaviors.mine_file(
                 full_path, float(device_hz or config.DEVICE_HZ), _groom_params(), _behavior_params(),
-                split=config.GROOM_SPLIT_ENABLED, barks=config.BARK_ENABLED)
+                split=config.GROOM_SPLIT_ENABLED, barks=config.BARK_ENABLED,
+                shakes=config.SHAKE_ENABLED, toilet=config.TOILET_ENABLED)
             if not config.GROOM_ENABLED:
-                grooming = [c for c in grooming if c.get("reason") == "barking"]
+                grooming = [c for c in grooming if c.get("reason") in ("barking", "shaking", "toileting")]
         except Exception:  # noqa: BLE001 候选是锦上添花，出错只记日志
-            log.exception("疑似舔/啃/进食/饮水/吠叫候选挖掘失败 %s", full_path)
+            log.exception("疑似舔/啃/进食/饮水/吠叫/甩头/如厕候选挖掘失败 %s", full_path)
     return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope,
             "grooming": grooming}
 
@@ -242,6 +243,8 @@ def _behavior_params():
     return _behaviors.BehaviorParams(
         label_eat=config.EAT_LABEL, label_drink=config.DRINK_LABEL, label_bark=config.BARK_LABEL,
         bark_peak_min_g=config.BARK_PEAK_MIN_G, bark_peak_k=config.BARK_PEAK_K, bark_min_n=config.BARK_MIN_N,
+        label_shake=config.SHAKE_LABEL, shake_rms_min_g=config.SHAKE_RMS_MIN_G,
+        label_urinate=config.TOILET_URINE_LABEL, label_defecate=config.TOILET_FECES_LABEL,
     )
 
 
