@@ -975,8 +975,9 @@ def size_curve(job_id: int, trees: list[int] | None = None, depths: list[int] | 
     return result
 
 
-def edge_bundle(job_id: int) -> str:
-    """把这一版的端侧源码包打成 zip（algo_tinyml export_train.py --bundle），返回 zip 路径。"""
+def edge_bundle(job_id: int, lib_only: bool = False) -> str:
+    """把这一版的端侧包打成 zip（algo_tinyml export_train.py --bundle），返回 zip 路径。
+    lib_only=True 是编译库版（保密，只有 .a + 头文件，不含源码）。"""
     import subprocess
     import sys as _sys
 
@@ -988,8 +989,9 @@ def edge_bundle(job_id: int) -> str:
     script = os.path.join(config.ALGO_TINYML_DIR, "service", "export_train.py")
     out_dir = os.path.join(config.JOBS_DIR, "bundles")
     os.makedirs(out_dir, exist_ok=True)
-    zip_path = os.path.join(out_dir, f"edge_{model_tag(job_id)}.zip")
-    r = subprocess.run([_sys.executable, script, "--tag", model_tag(job_id), "--bundle", zip_path],
+    zip_path = os.path.join(out_dir, f"edge_{model_tag(job_id)}{'_lib' if lib_only else ''}.zip")
+    r = subprocess.run([_sys.executable, script, "--tag", model_tag(job_id), "--bundle", zip_path,
+                        *(["--lib-only"] if lib_only else [])],
                        capture_output=True, text=True, cwd=config.ALGO_TINYML_DIR, timeout=300)
     if r.returncode != 0 or not os.path.exists(zip_path):
         raise RuntimeError((r.stdout + r.stderr)[-2000:])
