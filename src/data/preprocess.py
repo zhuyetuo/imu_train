@@ -14,7 +14,7 @@ import numpy as np
 import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
-from gravity_align import gravity_align_batch, append_raw_tilt_batch
+from gravity_align import CHANNEL_MODES, map_channels, rotation_augment
 
 
 def downsample(data, labels, source_hz, target_hz):
@@ -195,7 +195,7 @@ def split_windows_by_segment(X_all, y_all, y_seq_all, seg_ids_all, train_r, val_
 
 
 def process_label_concat(records, window_size, stride, le, keep_label_set=None, use_gravity_align=True,
-                         drop_nan_windows=False):
+                         drop_nan_windows=False, channel_mode="tilt", map_now=True):
     """按类别汇总所有片段的窗口：每个连续片段内部各自滑窗，汇总后合并。
     不跨片段边界取窗口，避免不同时间/动物的数据拼接产生无意义的假窗口。
 
@@ -242,10 +242,8 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
         if not wins:
             continue
         arr = np.array(wins, dtype=np.float32)
-        tilt = append_raw_tilt_batch(arr)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
-        if use_gravity_align:
-            arr = gravity_align_batch(arr)
-        arr = np.concatenate([arr, tilt], axis=2)
+        if map_now:
+            arr = map_channels(arr, channel_mode, use_gravity_align)
         X_all.append(arr)
         y_all.append(np.full(len(arr), lbl_id, dtype=np.int64))
         y_seq_all.append(np.tile(
@@ -260,7 +258,8 @@ def process_label_concat(records, window_size, stride, le, keep_label_set=None, 
 
 
 def process_split(records, record_ids_set, window_size, stride, le, keep_label_set=None,
-                  use_gravity_align=True, label_mode="majority", drop_nan_windows=False):
+                  use_gravity_align=True, label_mode="majority", drop_nan_windows=False,
+                  channel_mode="tilt", map_now=True):
     X_all, y_all, y_seq_all, y_seg_all = [], [], [], []
     valid_encoded = set(le.transform(list(keep_label_set))) if keep_label_set else None
     next_seg_id = 0
@@ -276,10 +275,8 @@ def process_split(records, record_ids_set, window_size, stride, le, keep_label_s
                                             label_mode, seg_id_labels, drop_nan_windows)
         if len(X) == 0:
             continue
-        tilt = append_raw_tilt_batch(X)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
-        if use_gravity_align:
-            X = gravity_align_batch(X)
-        X = np.concatenate([X, tilt], axis=2)
+        if map_now:
+            X = map_channels(X, channel_mode, use_gravity_align)
         X_all.append(X)
         y_all.append(y)
         y_seq_all.append(y_seq)
@@ -309,7 +306,7 @@ def load_records(args, cfg):
         print("[preprocess] 自采数据集")
         custom_cfg = dict(cfg.get("custom", {}))
         # --axes 3：只用加速度那三列。**不是随便砍一刀**：
-        #   - append_raw_tilt_batch 本来就按 acc 在 0:3 算姿态角，支持 C>=3
+        #   - map_channels（姿态角 / 方向无关通道）本来就按 acc 在 0:3 算，支持 C>=3
         #   - features.py 也按 n_channels 自适应（<6 时跳过 gyro 相关那几组）
         # 所以管线本来就能跑 3 轴，缺的只是一个入口。
         #
@@ -434,25 +431,38 @@ def main(args):
                   f"（需要配合 labelstudio_to_custom.py --missing_strategy none 保留原始NaN，"
                   f"否则NaN已经在行级被drop/ffill处理掉，这里检测不到）")
 
+        # 先切原始窗口、划分，再做旋转增强（只给训练集），最后统一映射成模型输入。
+        # 增强要在原始 acc/gyro 上转，映射之后就转不了了
+        cm = args.channel_mode
         if strategy == "subject":
             # 按狗分组划分，狗与狗之间本来就不会共享同一个连续片段，天然无泄漏，seg_id 不需要
-            X_train, y_train, y_seq_train, _ = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
-            X_val,   y_val,   y_seq_val,   _ = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
-            X_test,  y_test,  y_seq_test,  _ = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
+            X_train, y_train, y_seq_train, _ = process_split(ds_records, train_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows, cm, map_now=False)
+            X_val,   y_val,   y_seq_val,   _ = process_split(ds_records, val_ids,   window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows, cm, map_now=False)
+            X_test,  y_test,  y_seq_test,  _ = process_split(ds_records, test_ids,  window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows, cm, map_now=False)
         elif strategy == "label_concat":
             # 按类别拼接所有片段后滑窗，窗口纯粹属于一个类别（label_mode 在这里没有意义，不传）
-            X_all, y_all, y_seq_all, y_seg_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga, args.drop_nan_windows)
+            X_all, y_all, y_seq_all, y_seg_all = process_label_concat(ds_records, window_size, stride, le, keep_label_set, ga, args.drop_nan_windows, cm, map_now=False)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
         else:
             # 先把所有窗口提取出来，再按连续片段分组划分（避免高度重叠窗口跨集合泄漏）
             all_ids = set(r["record_id"] for r in ds_records)
-            X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows)
+            X_all, y_all, y_seq_all, y_seg_all = process_split(ds_records, all_ids, window_size, stride, le, keep_label_set, ga, args.label_mode, args.drop_nan_windows, cm, map_now=False)
             (X_train, y_train, y_seq_train,
              X_val,   y_val,   y_seq_val,
              X_test,  y_test,  y_seq_test) = split_windows_by_segment(X_all, y_all, y_seq_all, y_seg_all, train_r, val_r, seed)
 
+        if args.rot_aug > 0 and X_train.ndim == 3 and len(X_train):
+            n0 = len(X_train)
+            X_train, y_train, y_seq_train = rotation_augment(X_train, y_train, args.rot_aug, seed=seed,
+                                                             drift_deg=args.rot_drift_deg, y_seq=y_seq_train)
+            print(f"  [旋转增强] 训练集 {n0} → {len(X_train)} 窗（每窗另加 {args.rot_aug} 份随机旋转，"
+                  f"窗口内漂移 ±{args.rot_drift_deg:g}°；验证/测试集不动）")
+        X_train = map_channels(X_train, cm, ga)
+        X_val   = map_channels(X_val,   cm, ga)
+        X_test  = map_channels(X_test,  cm, ga)
+        print(f"  [输入通道] {'方向无关（竖直/水平/模长/偏角/jerk）' if cm == 'inv' else '重力对齐 + 原始姿态角'}")
 
         out_dir = os.path.join(args.output_dir, f"{target_hz}hz")
         os.makedirs(out_dir, exist_ok=True)
@@ -471,6 +481,8 @@ def main(args):
             "test_record_ids":  str(list(test_ids))  if test_ids  is not None else "[]",
             "dataset": args.dataset,
             "gravity_aligned": str(not args.no_gravity_align),
+            "channel_mode": args.channel_mode,
+            "rot_aug": str(args.rot_aug),
         }
         if not args.no_gravity_align:
             print(f"  [重力对齐] 已启用")
@@ -514,6 +526,13 @@ if __name__ == "__main__":
                              "端侧只有加速度计时要用 3，否则模型学的是板上没有的信号")
     parser.add_argument("--no_gravity_align", action="store_true",
                         help="不做重力轴对齐（默认启用）")
+    parser.add_argument("--channel_mode", default="tilt", choices=list(CHANNEL_MODES),
+                        help="模型输入通道：tilt=重力对齐+原始姿态角（老模型）；"
+                             "inv=方向无关（竖直/水平分量、模长、偏角、jerk），怎么戴都一样")
+    parser.add_argument("--rot_aug", type=int, default=0,
+                        help="训练集旋转增强：每个窗口另加几份随机 3D 旋转（0=不加）")
+    parser.add_argument("--rot_drift_deg", type=float, default=15.0,
+                        help="旋转增强里窗口内缓慢漂移的最大角度（模拟项圈滑动）")
     parser.add_argument("--split_strategy", default="auto",
                         choices=["auto", "subject", "random", "label_concat"],
                         help="划分策略: auto=subject数>=10用subject否则用random, subject=按动物ID划分, random=窗口随机划分, label_concat=按类别拼接片段后滑窗（充分利用短片段）")

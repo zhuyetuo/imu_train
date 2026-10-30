@@ -170,3 +170,28 @@ def test_训练时合成数据路数多了就切_少了说人话():
     src = open("src/ml/train.py", encoding="utf-8").read()
     assert "X_syn = X_syn[:, :, :want_sensor]" in src
     assert "合成数据是按 3 轴生成的" in src
+
+
+def test_invariant_channels_ignore_mounting():
+    """channel_mode=inv：设备任意固定旋转（倒装、绕重力轴转、侧倾），模型输入不变；
+    tilt 那套会变。旋转增强只动训练集原始数据，形状/标签对得上。"""
+    import numpy as np
+    from src.data.gravity_align import _random_rotation, map_channels, rotation_augment
+
+    rng = np.random.default_rng(0)
+    for n_s in (3, 6):
+        X = rng.normal(0, 0.3, (6, 32, n_s)).astype(np.float32)
+        X[:, :, 2] += 1.0
+        base = map_channels(X, "inv")
+        assert base.shape == (6, 32, n_s + 2)
+        for _ in range(5):
+            R = _random_rotation(rng)
+            Xr = X.copy()
+            Xr[:, :, :3] = X[:, :, :3] @ R.T
+            if n_s == 6:
+                Xr[:, :, 3:6] = X[:, :, 3:6] @ R.T
+            assert np.abs(map_channels(Xr, "inv") - base).max() < 1e-4
+        assert np.abs(map_channels(Xr, "tilt") - map_channels(X, "tilt")).max() > 0.1
+        Xa, ya, ysa = rotation_augment(X, np.arange(6), 2, y_seq=np.zeros((6, 32)))
+        assert Xa.shape == (18, 32, n_s) and list(ya[6:12]) == list(range(6)) and ysa.shape == (18, 32)
+        assert np.array_equal(Xa[:6], X)

@@ -58,7 +58,7 @@ sys.path.insert(0, _THIS_DIR)
 
 from labelstudio_to_custom import _load_sensor_df, _extract_rows  # noqa: E402
 from preprocess import downsample  # noqa: E402
-from gravity_align import gravity_align_batch, append_raw_tilt_batch  # noqa: E402
+from gravity_align import channel_mode_of, map_channels  # noqa: E402
 from features import extract_features  # noqa: E402
 
 PROJECT_ID_RE = re.compile(r"project-(\d+)-")
@@ -266,10 +266,7 @@ def main():
                 X = _window_data(data, window_size, stride)
                 if len(X) == 0:
                     continue
-                tilt = append_raw_tilt_batch(X)[:, :, -2:]
-                if gravity_aligned:
-                    X = gravity_align_batch(X)
-                X = np.concatenate([X, tilt], axis=2)
+                X = map_channels(X, channel_mode_of(meta), gravity_aligned)
                 feats = extract_features(X, target_hz, show_progress=False)
                 pred_ids = np.array(model.predict(feats)).flatten().astype(int)
                 pred_names = [classes[i] for i in pred_ids]

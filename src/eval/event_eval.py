@@ -42,7 +42,10 @@ from sklearn.metrics import classification_report
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../ml"))
 
-from gravity_align import gravity_align_batch, append_raw_tilt_batch
+from gravity_align import channel_mode_of, map_channels
+
+# 模型输入通道（tilt / inv），main() 按模型 meta 设置
+CHANNEL_MODE = "tilt"
 from features import extract_features
 from find_task_project import extract_task_id, extract_project_no
 
@@ -242,9 +245,7 @@ def predict_record(data6, model, classes, window_size, stride, hz):
     X, starts = sliding_windows(data6, window_size, stride)
     if len(X) == 0:
         return [], [], []
-    tilt = append_raw_tilt_batch(X)[:, :, -2:]
-    X_aligned = gravity_align_batch(X)
-    X_full = np.concatenate([X_aligned, tilt], axis=2)
+    X_full = map_channels(X, CHANNEL_MODE, True)
     feats = extract_features(X_full, hz, show_progress=False)
     probs = model.predict_proba(feats)
     pred_ids = np.argmax(probs, axis=1)
@@ -681,6 +682,8 @@ def main():
         window_s = float(meta.get("window_s", 2.0))
         stride_s = float(meta.get("stride_s", 1.0))
         label_mode = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
+        global CHANNEL_MODE
+        CHANNEL_MODE = channel_mode_of(meta)
     else:
         classes = list(model.classes_) if hasattr(model, "classes_") else []
     if args.target_label not in classes:

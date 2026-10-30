@@ -16,7 +16,7 @@ import joblib
 
 from dataset import load_all_splits
 from features import extract_features
-from gravity_align import gravity_align_batch, append_raw_tilt_batch
+from gravity_align import channel_mode_of, map_channels
 from preprocess import split_windows_by_segment
 from remap_utils import load_remap_yaml, apply_remap
 from models.random_forest import build_rf
@@ -192,10 +192,8 @@ def main(args):
             # 这里补齐同样的处理，否则和真实数据的特征空间不一致，且通道数拼接会直接报错
             # 姿态角是追加在**最后两列**的。原来写死 6:8，那只在 6 轴时对；
             # 3 轴时追加的是 3:5（推理那边同一个坑，上次修了那边漏了这边）
-            tilt_syn = append_raw_tilt_batch(X_syn)[:, :, -2:]
-            if gravity_aligned_meta:
-                X_syn = gravity_align_batch(X_syn)
-            X_syn = np.concatenate([X_syn, tilt_syn], axis=2)
+            # 跟真实数据走同一个映射（channel_mode 跟预处理一致）
+            X_syn = map_channels(X_syn, channel_mode_of(meta), gravity_aligned_meta)
 
             if syn_label in classes:
                 syn_label_id = classes.index(syn_label)   # 合并到已有类别
@@ -459,6 +457,8 @@ def main(args):
         "accuracy": acc, "macro_f1": f1,
         "classes": classes,  # 全部训练类别，而非仅测试集出现的类别
         "gravity_aligned": gravity_aligned,
+        # 输入通道怎么来的：tilt=重力对齐+原始姿态角，inv=方向无关。推理侧（平台/端侧）照着映射
+        "channel_mode": channel_mode_of(meta),
         "window_size": window_size,
         "stride": stride,
         "window_s": window_s,
