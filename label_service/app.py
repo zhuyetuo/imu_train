@@ -636,12 +636,13 @@ async def export_train_edge(job_id: int):
 
 
 @app.get("/api/v1/label/train/{job_id}/edge_bundle")
-async def train_edge_bundle(job_id: int):
-    """这一版导出到端侧的源码包（core/ 运行时 + 模型导出 + README，zip）。给嵌入式打成 lib 用。"""
+async def train_edge_bundle(job_id: int, kind: str = "src"):
+    """这一版导出到端侧的包（zip）。kind=src 源码包（core/ 运行时 + 模型导出 + README）；
+    kind=lib 编译库（保密：只有 .a + 头文件 + PC 验证工具，给外部嵌入式）。"""
     from fastapi.responses import FileResponse
 
     try:
-        path = await asyncio.to_thread(jobs.edge_bundle, job_id)
+        path = await asyncio.to_thread(jobs.edge_bundle, job_id, kind == "lib")
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
     except Exception as e:  # noqa: BLE001
