@@ -37,7 +37,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
 
-from gravity_align import gravity_align, append_raw_tilt_batch
+from gravity_align import channel_mode_of, map_channels
 from features import extract_features
 
 import joblib
@@ -205,7 +205,8 @@ def sliding_windows(data, window_size, stride):
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
-               resample_method="poly", target_labels=None, is_dl=False, n_channels=8, **kwargs):
+               resample_method="poly", target_labels=None, is_dl=False, n_channels=8,
+               channel_mode="tilt", **kwargs):
     # merge_gap_s：不再使用（保留形参只是为了不破坏main()里_run_one()的
     # 调用签名，--merge_gap这个CLI参数还在，但已经名存实亡）。之前它是
     # 用来"桥接"间隔较近的同类别片段、掩盖低置信度噪声窗口的，但桥接
@@ -270,14 +271,8 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     if len(X) == 0:
         return
 
-    # 姿态角是 append_raw_tilt_batch 追加在**最后两列**的。原来写死 6:8，
-    # 那只在 6 轴（acc+gyro）时才对；3 轴时追加的是 3:5，取 6:8 会越界
-    tilt = append_raw_tilt_batch(X)[:, :, -2:]  # 原始（未对齐）姿态角，须在重力对齐前算
-    if gravity_aligned:
-        X_aligned = np.stack([gravity_align(X[i]) for i in range(len(X))])
-    else:
-        X_aligned = X
-    X_aligned = np.concatenate([X_aligned, tilt], axis=2)
+    # 模型输入：训练时怎么映射的这里就怎么映射（tilt / inv，见 gravity_align.map_channels）
+    X_aligned = map_channels(X, channel_mode, gravity_aligned)
 
     # 提取特征 + 预测——DL模型直接吃X_aligned这个原始窗口数组（模型内部
     # 自己学卷积/时序特征，不需要ml/features.py那套手工统计特征），
@@ -538,10 +533,12 @@ def main():
     is_dl = args.model.endswith(".pt")
     classes, gravity_aligned, t_hz, t_window_s, t_stride_s = [], True, 16, 2.0, 1.0
     label_mode = "majority"
+    channel_mode = "tilt"
     if is_dl:
         model, dl_meta = _load_dl_model(args.model)
         classes         = dl_meta["classes"]
         gravity_aligned = dl_meta["gravity_aligned"]
+        channel_mode    = channel_mode_of(dl_meta)
         t_hz            = int(dl_meta["hz"])
         t_window_s      = dl_meta["window_size"] / t_hz
         t_stride_s      = dl_meta["stride"] / t_hz
@@ -558,6 +555,7 @@ def main():
                 meta = json.load(f)
             classes        = meta.get("classes", [])
             gravity_aligned= meta.get("gravity_aligned", True)
+            channel_mode   = channel_mode_of(meta)
             t_hz           = int(meta.get("hz", 16))
             t_window_s     = float(meta.get("window_s", 2.0))
             t_stride_s     = float(meta.get("stride_s", 1.0))
@@ -616,7 +614,7 @@ def main():
                               output_dir=out_dir,
                               resample_method=args.resample_method,
                               target_labels=target_labels,
-                              is_dl=is_dl)
+                              is_dl=is_dl, channel_mode=channel_mode)
         except Exception as e:
             tqdm.write(f"  [错误] {os.path.basename(path)}: {e}")
             return None

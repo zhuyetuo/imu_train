@@ -197,6 +197,7 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
             target_labels=target_labels, is_dl=b["is_dl"],
             # 3 轴模型只能喂加速度——喂 6 轴进去特征维数对不上
             n_channels=b.get("n_channels", 8),
+            channel_mode=b.get("channel_mode", "tilt"),
         )
         stem = os.path.splitext(os.path.basename(full_path))[0]
         segments, windows, n_windows = {}, [], 0

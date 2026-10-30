@@ -279,6 +279,7 @@ def main(args):
         "n_channels": n_channels,
         "classes": classes,
         "gravity_aligned": str(meta.get("gravity_aligned", "True")) == "True",
+        "channel_mode": str(meta.get("channel_mode", "tilt")),
         "label_mode": meta.get("label_mode", "majority"),
         "m2m": m2m,
         "ch_mean": ch_mean.tolist(),

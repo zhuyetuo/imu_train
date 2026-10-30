@@ -365,6 +365,11 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
     if int(dataset_spec.get("axes") or 6) == 3:
         cmd += ["--axes", "3"]
+    # 方向无关输入 + 旋转增强：用户怎么戴都不限制，模型不该看佩戴方向。老记录没有这两项，照旧
+    if dataset_spec.get("channel_mode") == "inv":
+        cmd += ["--channel_mode", "inv"]
+    if int(dataset_spec.get("rot_aug") or 0) > 0:
+        cmd += ["--rot_aug", str(int(dataset_spec["rot_aug"]))]
     # 界面给了归并表就用它生成的那份，没给还是默认的 3 类表
     runtime_remap = write_runtime_remap(dataset_spec, job_id)
     if runtime_remap:
@@ -412,7 +417,7 @@ def _load_metrics(model_path: str) -> dict:
         stem = os.path.basename(model_path).replace("_best.pt", "")
         meta = _read(os.path.join(d, f"{stem}_best.json"))
         out = _read(os.path.join(d, f"{stem}.json"))
-        for k in ("n_channels", "window_size", "stride", "model_cfg", "gravity_aligned", "label_mode"):
+        for k in ("n_channels", "window_size", "stride", "model_cfg", "gravity_aligned", "label_mode", "channel_mode"):
             if k in meta and k not in out:
                 out[k] = meta[k]
         return out

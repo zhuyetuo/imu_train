@@ -89,6 +89,9 @@ DL_CONFIG="configs/dl.yaml"  # --model cnn 用的超参。端侧用 configs/dl_e
 ML_CONFIG="configs/ml.yaml"  # 模型超参。端侧用 configs/ml_edge.yaml：树限深/限棵数，
                            # 让模型塞进 GR5513 给模型留的约 128KB flash（默认那份
                            # 200 棵不限深的森林是几十 MB，差两三个数量级）
+CHANNEL_MODE="tilt"        # 模型输入通道：tilt=重力对齐+原始姿态角（老模型）；inv=方向无关
+                           # （竖直/水平分量、模长、偏角、jerk），怎么戴都一样
+ROT_AUG=0                  # 训练集旋转增强：每个窗口另加几份随机 3D 旋转（0=不加）
 AXES=6                     # 用几轴：6=加速度+陀螺仪（默认），3=只用加速度。
                            # **端侧只有加速度计时要用 3**——否则模型学的是板上
                            # 根本没有的信号，服务端指标再好也代表不了端上表现。
@@ -149,6 +152,8 @@ _print_help() {
   --dl_config FILE       --model cnn 的超参（默认 configs/dl.yaml，端侧用 configs/dl_edge.yaml）
   --ml_config FILE       模型超参（默认 configs/ml.yaml）。要上端侧用 configs/ml_edge.yaml：
                          限深限棵数，模型才塞得进板子的 flash。端侧主力是 --model xgb
+  --channel_mode tilt|inv  模型输入通道（默认 tilt）。inv=方向无关，佩戴方向不影响识别
+  --rot_aug N            训练集旋转增强，每窗另加 N 份随机 3D 旋转（默认 0）
   --axes 3|6             用几轴（默认6=加速度+陀螺仪）。端侧只有加速度计时用3，
                          否则模型学的是板上没有的信号。3轴的预处理产物单独存
                          （目录带_acc3后缀），跟6轴互不覆盖
@@ -219,6 +224,8 @@ while [[ $# -gt 0 ]]; do
     --resample_method) RESAMPLE_METHOD="$2"; shift 2 ;;
     --remap)          REMAP="$2";          shift 2 ;;
     --axes)           AXES="$2";           shift 2 ;;
+    --channel_mode)   CHANNEL_MODE="$2";   shift 2 ;;
+    --rot_aug)        ROT_AUG="$2";        shift 2 ;;
     --ml_config)      ML_CONFIG="$2";      shift 2 ;;
     --dl_config)      DL_CONFIG="$2";      shift 2 ;;
     *) echo "未知参数: $1（--help 查看全部参数）"; exit 1 ;;
@@ -273,7 +280,15 @@ _axes_suffix=""
 if [[ "$AXES" == "3" ]]; then
   _axes_suffix="_acc3"
 fi
-PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}${_axes_suffix}"
+# 输入通道 / 旋转增强不同，预处理产物也不同，同样不能共用目录（理由同上）
+_ch_suffix=""
+if [[ "$CHANNEL_MODE" == "inv" ]]; then
+  _ch_suffix="${_ch_suffix}_inv"
+fi
+if [[ "$ROT_AUG" != "0" ]]; then
+  _ch_suffix="${_ch_suffix}_rot${ROT_AUG}"
+fi
+PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}${_axes_suffix}${_ch_suffix}"
 DATA_DIR="data/raw_custom/${DATE}"
 CSV="${DATA_DIR}/merged_${DATE}.csv"
 JSON="${DATA_DIR}/merged_tmp.json"
@@ -584,6 +599,8 @@ else
     $DROP_NAN_WINDOWS_FLAG \
     $PRE_SOURCE_HZ_FLAG \
     --axes "$AXES" \
+    --channel_mode "$CHANNEL_MODE" \
+    --rot_aug "$ROT_AUG" \
     --hz "$HZ"
 fi
 

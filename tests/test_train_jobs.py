@@ -61,6 +61,13 @@ def test_一起训练的那几份也按任务隔离(repo):
     assert cmd[cmd.index("--extra_date") + 1] == "ds_old__job3:16"
 
 
+def test_方向无关和旋转增强传给训练脚本(repo):
+    cmd = jobs.build_command({"date": "ds_a", "channel_mode": "inv", "rot_aug": 2}, "rf", None, 4)
+    assert cmd[cmd.index("--channel_mode") + 1] == "inv" and cmd[cmd.index("--rot_aug") + 1] == "2"
+    old = jobs.build_command({"date": "ds_a"}, "rf", None, 5)
+    assert "--channel_mode" not in old and "--rot_aug" not in old, "老记录照旧"
+
+
 # ── 实时日志 ────────────────────────────────────────────────────────────
 
 
