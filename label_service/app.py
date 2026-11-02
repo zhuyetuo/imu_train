@@ -385,7 +385,7 @@ class ExtraDataset(BaseModel):
     """
     date: str = Field(..., description="数据集名，会成为 data/raw_custom/<date>/")
     export_json: str = Field(..., description="NAS_ROOT 下的相对路径")
-    source_hz: int | None = Field(None, description="这一批自己真实的采样率；不传跟主批次一样")
+    source_hz: float | None = Field(None, description="这一批自己真实的采样率；不传跟主批次一样")
 
 
 class DatasetSpec(BaseModel):
@@ -395,8 +395,13 @@ class DatasetSpec(BaseModel):
     skip_syn: bool = Field(False, description="只训练方案A，跳过合成数据")
     balance: str | None = Field(None, description="类别均衡：none/min（多的砍到跟最少的一样多）/cap:N（每类最多 N 个训练窗口）。只砍训练集")
     feat_workers: int | None = Field(None, description="特征提取并行数，-1=全部CPU")
-    source_hz: int | None = Field(None, description="主批次真实采样率（NAS 原始 50Hz 数据必须传 50）")
-    hz: int | None = Field(None, description="训练目标采样率，默认脚本里的 16")
+    source_hz: float | None = Field(None, description="主批次真实采样率（NAS 原始 50Hz 数据必须传 50）")
+    hz: float | None = Field(None, description="训练目标采样率，默认脚本里的 16；可以是小数（31.25 = QMI8658 原生档位）")
+    # 下面几项以前没列在这里，平台传过来会被 pydantic 悄悄丢掉——勾了「方向无关」训出来的其实还是老输入
+    channel_mode: str | None = Field(None, description="模型输入通道：tilt（默认，重力对齐+姿态角）/ inv（方向无关）")
+    rot_aug: int | None = Field(None, description="训练集旋转增强：每窗另加几份随机 3D 旋转")
+    window_s: float | None = Field(None, description="窗口秒数；不传按采样率挑整数点数（31.25 Hz → 2.048 s）")
+    stride_s: float | None = Field(None, description="步长秒数；不传按采样率挑整数点数（31.25 Hz → 1.024 s）")
     export_json: str | None = Field(None, description="label_infra 导出的 Label Studio 格式 JSON 在 NAS_ROOT 下的相对路径；"
                                                     "csv 字段是 NAS_ROOT 下的相对路径，服务会整理成 data/raw_custom/<date>/merged_tmp.json")
     clean: bool = Field(False, description="--clean 重新生成缓存（换了导出数据时要传）")

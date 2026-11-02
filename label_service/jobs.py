@@ -329,6 +329,12 @@ def write_edge_config(dataset_spec: dict, model_type: str, job_id: int | None) -
     return rel
 
 
+def _hz_str(v) -> str:
+    """采样率写进命令行：16.0 → "16"、31.25 → "31.25"。接口收的是 float，直接 str 会变成 "16.0"，
+    train_custom.sh 拼出来的目录名就成了 16.0hz，跟预处理写的 16hz 对不上"""
+    return f"{float(v):g}"
+
+
 def window_args(dataset_spec: dict) -> list[str]:
     """窗口 / 步长（秒）。界面给了就用；没给时按采样率挑整数点数：
     默认 2 秒 / 1 秒，但 31.25 Hz（QMI8658 原生档位）下那是 62.5 / 31.25 点，不是整数——
@@ -353,10 +359,10 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
     # 原始数据的采样率一定要传：不传的话 train_custom.sh 当它已经是 --hz，不降采样，
     # 训练和推理（推理按 DEVICE_HZ 降到 16Hz）就对不上了
-    cmd += ["--source_hz", str(dataset_spec.get("source_hz") or config.DEVICE_HZ)]
+    cmd += ["--source_hz", _hz_str(dataset_spec.get("source_hz") or config.DEVICE_HZ)]
     cmd += ["--resample_method", config.RESAMPLE_METHOD]
     if dataset_spec.get("hz"):
-        cmd += ["--hz", str(dataset_spec["hz"])]
+        cmd += ["--hz", _hz_str(dataset_spec["hz"])]
     cmd += window_args(dataset_spec)
     if dataset_spec.get("clean"):
         cmd += ["--clean"]
@@ -364,7 +370,7 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     # extra_date 是老的手写形式（DATE:HZ，数据已经在 data/raw_custom 下），留着
     for extra in dataset_spec.get("extra_datasets") or []:
         hz = extra.get("source_hz") or dataset_spec.get("source_hz") or 50
-        cmd += ["--extra_date", f"{run_date(extra['date'], job_id)}:{hz}"]
+        cmd += ["--extra_date", f"{run_date(extra['date'], job_id)}:{_hz_str(hz)}"]
     for extra in dataset_spec.get("extra_date", []):
         cmd += ["--extra_date", extra]
     # 端侧尺寸：用 configs/ml_edge.yaml 的超参（限深限棵数），模型才塞得进

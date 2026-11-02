@@ -536,3 +536,22 @@ def test_cnn_defaults_to_drop_window():
     assert "--missing_strategy" not in jobs.build_command({"date": "d"}, "rf", None, 5)
     cmd = jobs.build_command({"date": "d", "missing_strategy": "ffill"}, "cnn", None, 5)
     assert cmd[cmd.index("--missing_strategy") + 1] == "ffill"
+
+
+def test_平台提交的参数不能被接口丢掉():
+    """算法服务的 /train 用 pydantic 收 dataset：没列在 DatasetSpec 里的字段会被悄悄丢掉。
+    以前 channel_mode / rot_aug 没列，平台勾了「方向无关」训出来的还是老输入；hz 是 int，31.25 直接 422"""
+    from label_service.app import TrainRequest
+
+    req = TrainRequest(dataset={"date": "d", "hz": 31.25, "source_hz": 50, "channel_mode": "inv", "rot_aug": 2,
+                                "axes": 3}, model_type="rf")
+    spec = req.dataset.model_dump()
+    assert spec["hz"] == 31.25 and spec["channel_mode"] == "inv" and spec["rot_aug"] == 2
+    cmd = jobs.build_command(spec, "rf", None, 11)
+    assert cmd[cmd.index("--hz") + 1] == "31.25"
+    assert cmd[cmd.index("--channel_mode") + 1] == "inv" and cmd[cmd.index("--rot_aug") + 1] == "2"
+    assert cmd[cmd.index("--window_s") + 1] == "2.048"
+    # 平台传 16 进来在 float 字段里是 16.0：命令行要写 16，目录名才是 16hz
+    spec16 = TrainRequest(dataset={"date": "d", "hz": 16, "source_hz": 50}, model_type="rf").dataset.model_dump()
+    c16 = jobs.build_command(spec16, "rf", None, 12)
+    assert c16[c16.index("--hz") + 1] == "16" and c16[c16.index("--source_hz") + 1] == "50"
