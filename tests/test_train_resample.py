@@ -56,3 +56,32 @@ def test_synthesize_segment_resampled():
     seg = np.ones((100, 3), dtype=np.float32)
     assert abs(len(_to_hz(seg, 50, 16, "training_match")) - 32) <= 1
     assert len(_to_hz(seg, 15.8, 16, "training_match")) == 100  # 差不到 10% 不动
+
+
+def test_qmi8658_native_31_25hz():
+    """QMI8658 没有 16 / 25 / 50 Hz 档位，原生是 31.25（15.625 = 二分频）。训练、推理都要认小数采样率：
+    重采样比例是整数比、窗口点数是整数、推理侧换回点数跟训练一致。"""
+    from hzutil import n_points, parse_hz, rate_ratio
+    from preprocess import downsample
+
+    assert parse_hz("31.25") == 31.25 and parse_hz("16") == 16 and isinstance(parse_hz("16"), int)
+    assert rate_ratio(50, 31.25) == (5, 8) and rate_ratio(50, 15.625) == (5, 16) and rate_ratio(50, 16) == (8, 25)
+    x, y = downsample(np.random.randn(800, 6), np.array(["a"] * 800), 50, 31.25)
+    assert len(x) == 500 and len(y) == 500
+    # 训练 64 点，meta 存 window_s=round(64/31.25, 3)=2.048，推理按它换回来还是 64
+    assert n_points(round(64 / 31.25, 3), 31.25) == 64 and n_points(round(32 / 31.25, 3), 31.25) == 32
+    df = pd.DataFrame({"record_id": 1, "label": "a", "timestamp": 0,
+                       **{c: np.random.randn(500) for c in ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]}})
+    out = resample_df(df, 50, 31.25)
+    assert abs(len(out) - 312) <= 1
+
+
+def test_window_points_integer_at_31_25hz():
+    """2 秒 / 1 秒在 31.25 Hz 下是 62.5 / 31.25 点：没指定窗口时自动用 64 / 32 点（2.048 / 1.024 秒）"""
+    from label_service import jobs
+
+    assert jobs.window_args({"hz": 16}) == []
+    assert jobs.window_args({"hz": 31.25}) == ["--window_s", "2.048", "--stride_s", "1.024"]
+    assert jobs.window_args({"hz": 15.625}) == ["--window_s", "2.048", "--stride_s", "1.024"]
+    cmd = jobs.build_command({"date": "d", "hz": 31.25, "source_hz": 50}, "rf", None, 9)
+    assert cmd[cmd.index("--hz") + 1] == "31.25" and cmd[cmd.index("--window_s") + 1] == "2.048"

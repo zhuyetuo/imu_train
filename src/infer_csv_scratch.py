@@ -29,7 +29,6 @@ import sys
 import glob
 import io
 import urllib.request
-from math import gcd
 
 import numpy as np
 import pandas as pd
@@ -38,6 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "data"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ml"))
 
 from gravity_align import channel_mode_of, map_channels
+from hzutil import n_points, parse_hz, rate_ratio
 from features import extract_features
 
 import joblib
@@ -186,8 +186,7 @@ def downsample(data, device_hz, model_hz, method="poly"):
     if method == "training_match":
         from resample_training_match import resample_training_match
         return resample_training_match(data, device_hz, model_hz)
-    g = gcd(device_hz, model_hz)
-    up, down = model_hz // g, device_hz // g
+    up, down = rate_ratio(device_hz, model_hz)
     if up == 1:
         return data[::down]
     from scipy.signal import resample_poly
@@ -475,9 +474,9 @@ def main():
     parser.add_argument("--csv_dir",   default="", help="CSV 目录（批量处理）")
     parser.add_argument("--pattern",   default="*.csv", help="文件名通配符（默认 *.csv）")
     parser.add_argument("--model",     required=True, help="ML 模型路径（.pkl）")
-    parser.add_argument("--device_hz", type=int, default=0,
+    parser.add_argument("--device_hz", type=parse_hz, default=0,
                         help="CSV 采样率（0=自动从模型元数据读取）")
-    parser.add_argument("--model_hz",  type=int, default=0,
+    parser.add_argument("--model_hz",  type=parse_hz, default=0,
                         help="模型训练采样率（0=与device_hz相同）")
     parser.add_argument("--window_s",  type=float, default=0,
                         help="窗口秒数（0=从模型元数据读取，默认2.0）")
@@ -539,7 +538,7 @@ def main():
         classes         = dl_meta["classes"]
         gravity_aligned = dl_meta["gravity_aligned"]
         channel_mode    = channel_mode_of(dl_meta)
-        t_hz            = int(dl_meta["hz"])
+        t_hz            = parse_hz(dl_meta["hz"])
         t_window_s      = dl_meta["window_size"] / t_hz
         t_stride_s      = dl_meta["stride"] / t_hz
         label_mode      = dl_meta.get("label_mode", "majority")
@@ -556,7 +555,7 @@ def main():
             classes        = meta.get("classes", [])
             gravity_aligned= meta.get("gravity_aligned", True)
             channel_mode   = channel_mode_of(meta)
-            t_hz           = int(meta.get("hz", 16))
+            t_hz           = parse_hz(meta.get("hz", 16))
             t_window_s     = float(meta.get("window_s", 2.0))
             t_stride_s     = float(meta.get("stride_s", 1.0))
             label_mode     = meta.get("label_mode", "majority")  # 旧模型没这个字段，退化为majority（兼容原有行为）
@@ -574,8 +573,8 @@ def main():
     device_hz = args.device_hz or model_hz
     window_s  = args.window_s  or t_window_s
     stride_s  = args.stride_s  or t_stride_s
-    window_size = int(window_s * model_hz)
-    stride      = int(stride_s * model_hz)
+    window_size = n_points(window_s, model_hz)
+    stride      = n_points(stride_s, model_hz)
 
     print(f"[推理] 设备Hz={device_hz}  模型Hz={model_hz}  窗口={window_s}s  步长={stride_s}s")
 
