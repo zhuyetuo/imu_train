@@ -15,6 +15,7 @@ from balance import balance_train
 import joblib
 
 from dataset import load_all_splits
+from hzutil import parse_hz, rate_ratio
 from features import extract_features
 from gravity_align import channel_mode_of, map_channels
 from preprocess import split_windows_by_segment
@@ -145,7 +146,7 @@ def main(args):
                 hz = 0
             elif len(parts) == 3:
                 label, path, hz = parts
-                hz = int(hz)
+                hz = parse_hz(hz)
             else:
                 raise ValueError(f"--synthetic_spec 格式应为 LABEL:PATH 或 LABEL:PATH:HZ，收到: {spec}")
             synthetic_specs.append((label, path, hz))
@@ -224,9 +225,7 @@ def main(args):
             # 降采样对齐 window_size（合成数据 Hz 与训练 Hz 不同时才处理）
             src_hz = syn_hz if syn_hz > 0 else args.hz
             if src_hz != args.hz:
-                from math import gcd
-                g = gcd(src_hz, args.hz)
-                up, down = args.hz // g, src_hz // g
+                up, down = rate_ratio(src_hz, args.hz)
                 if up == 1:
                     step = down
                     X_syn_tr  = X_syn_tr[:,  ::step, :]
@@ -482,7 +481,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 15, 16, 20, 25, 50])
+    # 31.25 / 15.625 / 62.5：QMI8658 的原生档位（没有 16 / 25 / 50）
+    parser.add_argument("--hz", type=parse_hz, required=True, choices=[5, 10, 15, 15.625, 16, 20, 25, 31.25, 50, 62.5])
     parser.add_argument("--model", default="xgb", choices=list(MODELS))
     parser.add_argument("--config", default="configs/ml.yaml")
     parser.add_argument("--processed_dir", default="data/processed_a")
@@ -500,7 +500,7 @@ if __name__ == "__main__":
                              "只能注入一个类别，多个类别用--synthetic_spec")
     parser.add_argument("--synthetic_label", default="抓挠",
                         help="合成数据的类别名称（默认：抓挠），配合--synthetic用")
-    parser.add_argument("--synthetic_hz", type=int, default=0,
+    parser.add_argument("--synthetic_hz", type=parse_hz, default=0,
                         help="合成数据的采样率（默认0=与--hz相同，无需降采样），配合--synthetic用")
     parser.add_argument("--synthetic_spec", action="append", default=None,
                         help="LABEL:PATH[:HZ]，可重复传，一次注入多个类别的合成数据"

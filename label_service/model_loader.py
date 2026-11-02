@@ -13,6 +13,12 @@ import joblib
 from infer_csv_scratch import _load_dl_model  # src/ 已由 app.py 加进 sys.path
 
 
+def _hz(v):
+    """采样率可以是小数（31.25 / 15.625，QMI8658 的原生档位）。整数还是 int"""
+    x = float(v)
+    return int(x) if x.is_integer() else x
+
+
 def load_model_bundle(model_path: str) -> dict:
     """返回 dict: model, classes, is_dl, gravity_aligned, hz, window_s, stride_s, label_mode, n_channels"""
     is_dl = model_path.endswith(".pt")
@@ -26,7 +32,7 @@ def load_model_bundle(model_path: str) -> dict:
         model, dl_meta = _load_dl_model(model_path)
         classes         = dl_meta["classes"]
         gravity_aligned = dl_meta["gravity_aligned"]
-        t_hz            = int(dl_meta["hz"])
+        t_hz            = _hz(dl_meta["hz"])
         t_window_s      = dl_meta["window_size"] / t_hz
         t_stride_s      = dl_meta["stride"] / t_hz
         label_mode      = dl_meta.get("label_mode", "majority")
@@ -40,7 +46,7 @@ def load_model_bundle(model_path: str) -> dict:
                 meta = json.load(f)
             classes         = meta.get("classes", [])
             gravity_aligned = meta.get("gravity_aligned", True)
-            t_hz            = int(meta.get("hz", 16))
+            t_hz            = _hz(meta.get("hz", 16))
             t_window_s      = float(meta.get("window_s", 2.0))
             t_stride_s      = float(meta.get("stride_s", 1.0))
             label_mode      = meta.get("label_mode", "majority")

@@ -19,6 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from dataset import load_all_splits
+from hzutil import parse_hz
 from remap_utils import load_remap_yaml, apply_remap, apply_remap_seq
 
 M2M_MODELS = {"filternet_m2m"}
@@ -383,7 +384,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hz", type=int, required=True, choices=[5, 10, 15, 16, 20, 25, 50])
+    parser.add_argument("--hz", type=parse_hz, required=True, choices=[5, 10, 15, 15.625, 16, 20, 25, 31.25, 50, 62.5])
     parser.add_argument("--model", default="cnn_lstm",
                         choices=["cnn", "collar_cnn", "cnn_lstm", "transformer",
                                  "filternet", "filternet_m2m"])

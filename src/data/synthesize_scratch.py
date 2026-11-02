@@ -358,7 +358,7 @@ def main():
     parser.add_argument("--csv_dir",  default="",    help="本地 CSV 目录（不填则从 URL 下载）")
     parser.add_argument("--output",   required=True, help="输出 .npz 路径")
     parser.add_argument("--label",    default="抓挠", help="要合成的类别名称（默认：抓挠）")
-    parser.add_argument("--hz",       type=int,   default=16,  help="采样率（默认 16）")
+    parser.add_argument("--hz",       type=str,   default="16", help="采样率（默认 16；可以是小数，如 31.25）")
     parser.add_argument("--window_s", type=float, default=2.0, help="窗口秒数（默认 2.0）")
     parser.add_argument("--stride_s", type=float, default=1.0, help="步长秒数（默认 1.0）")
     parser.add_argument("--n_aug",    type=int,   default=30,  help="每个原始片段生成的增强数量（默认 30）")
@@ -375,8 +375,10 @@ def main():
     args = parser.parse_args()
 
     rng         = np.random.default_rng(args.seed)
-    window_size = int(args.window_s * args.hz)
-    stride      = int(args.stride_s * args.hz)
+    from hzutil import n_points, parse_hz
+    args.hz = parse_hz(args.hz)
+    window_size = n_points(args.window_s, args.hz)
+    stride      = n_points(args.stride_s, args.hz)
     print(f"目标类别='{args.label}'  窗口={window_size}点  步长={stride}点  采样率={args.hz}Hz")
 
     # 自动推算 target_windows

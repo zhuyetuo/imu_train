@@ -12,6 +12,7 @@ JOBS_DIR/{job_id}.json，stdout/stderr 落 JOBS_DIR/{job_id}.log，方便出问�
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -328,6 +329,25 @@ def write_edge_config(dataset_spec: dict, model_type: str, job_id: int | None) -
     return rel
 
 
+def window_args(dataset_spec: dict) -> list[str]:
+    """窗口 / 步长（秒）。界面给了就用；没给时按采样率挑整数点数：
+    默认 2 秒 / 1 秒，但 31.25 Hz（QMI8658 原生档位）下那是 62.5 / 31.25 点，不是整数——
+    改用 64 点 / 32 点 = 2.048 秒 / 1.024 秒（2 的幂，板上 FFT 也顺手）。15.625 Hz 同理 32 / 16 点。
+    训练和板上只要点数一致就行，是不是整秒无所谓。"""
+    out: list[str] = []
+    w, st = dataset_spec.get("window_s"), dataset_spec.get("stride_s")
+    hz = float(dataset_spec.get("hz") or 0)
+    if not w and hz and not float(2.0 * hz).is_integer():
+        w = round(2 ** round(math.log2(2.0 * hz)) / hz, 6)
+    if not st and hz and not float(1.0 * hz).is_integer():
+        st = round(2 ** round(math.log2(1.0 * hz)) / hz, 6)
+    if w:
+        out += ["--window_s", f"{float(w):g}"]
+    if st:
+        out += ["--stride_s", f"{float(st):g}"]
+    return out
+
+
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
     cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
@@ -337,6 +357,7 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
     cmd += ["--resample_method", config.RESAMPLE_METHOD]
     if dataset_spec.get("hz"):
         cmd += ["--hz", str(dataset_spec["hz"])]
+    cmd += window_args(dataset_spec)
     if dataset_spec.get("clean"):
         cmd += ["--clean"]
     # 一起训练的那几份。界面选的走 extra_datasets（带各自的 json 和采样率），

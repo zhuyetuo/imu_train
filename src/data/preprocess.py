@@ -15,14 +15,14 @@ import yaml
 from collections import Counter
 from sklearn.preprocessing import LabelEncoder
 from gravity_align import CHANNEL_MODES, map_channels, rotation_augment
+from hzutil import n_points, parse_hz
 
 
 def downsample(data, labels, source_hz, target_hz):
     if source_hz == target_hz:
         return data, labels
-    from math import gcd
-    g = gcd(source_hz, target_hz)
-    up, down = target_hz // g, source_hz // g
+    from hzutil import rate_ratio
+    up, down = rate_ratio(source_hz, target_hz)
     if up == 1:
         # 整除降采样，直接取点（快速路径）
         step = down
@@ -414,8 +414,9 @@ def main(args):
             continue
         n_done += 1
 
-        window_size = int(window_sec * target_hz)
-        stride = int(stride_sec * target_hz)
+        # 四舍五入：小数采样率（31.25）下 2.048 s × 31.25 可能算成 63.999…
+        window_size = n_points(window_sec, target_hz)
+        stride = n_points(stride_sec, target_hz)
 
         print(f"\n[preprocess] 处理 {target_hz}Hz ...")
 
@@ -546,9 +547,9 @@ if __name__ == "__main__":
                         help="窗口标签怎么定：majority=多数投票（默认，原有行为不变），"
                              "center=取窗口正中心那一帧的标签（对 label_concat 策略无影响，"
                              "该策略下窗口本来就纯净）")
-    parser.add_argument("--hz", type=int, default=0,
+    parser.add_argument("--hz", type=parse_hz, default=0,
                         help="只处理指定采样率（0=处理所有，默认0）")
-    parser.add_argument("--source_hz", type=int, default=0,
+    parser.add_argument("--source_hz", type=parse_hz, default=0,
                         help="这份 CSV 的实际采样率，覆盖 configs/data.yaml 里的 source_hz（0=用配置）")
     parser.add_argument("--stride_s", type=float, default=0.0,
                         help="训练窗口步长（秒），覆盖 configs/data.yaml 的 stride_seconds"

@@ -186,8 +186,9 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
     # 而平台那边看到的就是"模型什么都没检出"，完全看不出是配置挡的
     target_labels = config.target_labels_for(b["classes"])
     model_hz = b["hz"]
-    window_size = int(b["window_s"] * model_hz)
-    stride = int(b["stride_s"] * model_hz)
+    # 四舍五入：31.25 Hz 时 1.984 s × 31.25 = 61.999… 用 int() 会截成 61，跟训练的 62 对不上
+    window_size = int(round(b["window_s"] * model_hz))
+    stride = int(round(b["stride_s"] * model_hz))
     with tempfile.TemporaryDirectory(prefix="label_infer_") as tmp:
         infer_file(
             full_path, b["model"], b["classes"], window_size, stride,

@@ -514,12 +514,13 @@ import pandas as pd
 from resample_csv_hz import SENSOR_COLS
 from resample_csv_hz import resample_df
 
-target_hz = int(sys.argv[1])
+from hzutil import parse_hz
+target_hz = parse_hz(sys.argv[1])
 parts = sys.argv[3:]
 frames = []
 for part in parts:
     date_tag, path, src_hz = part.split(':')
-    src_hz = int(src_hz)
+    src_hz = parse_hz(src_hz)
     df = pd.read_csv(path)
     # 重采样批次不会保留timestamp列（重采样后行数变了，原时间戳对不上），
     # 直通批次的CSV还带着原始timestamp列——两种批次concat到一起会让这一列

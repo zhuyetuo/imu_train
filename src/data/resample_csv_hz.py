@@ -23,10 +23,12 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from hzutil import parse_hz  # noqa: E402
+
 SENSOR_COLS = ["acc_x", "acc_y", "acc_z", "gyr_x", "gyr_y", "gyr_z"]
 
 
-def resample_df(df, source_hz: int, target_hz: int, method: str = "training_match"):
+def resample_df(df, source_hz: float, target_hz: float, method: str = "training_match"):
     """按 record_id 分组把训练 CSV 从 source_hz 降到 target_hz。返回新的 DataFrame。
 
     **method 必须跟推理用的一致。** label_service 推理默认 RESAMPLE_METHOD=
@@ -68,8 +70,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
-    ap.add_argument("--source_hz", type=int, required=True)
-    ap.add_argument("--target_hz", type=int, required=True)
+    ap.add_argument("--source_hz", type=parse_hz, required=True)
+    ap.add_argument("--target_hz", type=parse_hz, required=True)
     ap.add_argument("--method", default="training_match", choices=["training_match", "poly"],
                     help="降采样算法，必须跟推理一致（label_service 默认 training_match）")
     args = ap.parse_args()
