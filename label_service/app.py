@@ -180,6 +180,7 @@ def _stable_params() -> postprocess.StableParams:
         event_single_conf=config.STABLE_EVENT_SINGLE_CONF,
         spectral_min=config.STABLE_SPECTRAL_MIN,
         viterbi_switch=config.STABLE_VITERBI_SWITCH,
+        notworn_min_s=config.STABLE_NOTWORN_MIN_S,
         cand_enter=config.CAND_ENTER,
         cand_stay=config.CAND_STAY,
         cand_min_windows=config.CAND_MIN_WINDOWS,

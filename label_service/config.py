@@ -83,6 +83,8 @@ STABLE_EVENT_SINGLE_CONF = float(_env("STABLE_EVENT_SINGLE_CONF", "0.85"))
 STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
 # viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
 STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
+# 短于这么多秒、挨着静止的「未佩戴」并回静止（睡着时模型偶尔冒出的碎片；真摘下来充电都很长）。0 = 不启用
+STABLE_NOTWORN_MIN_S     = float(_env("STABLE_NOTWORN_MIN_S", "300"))
 # 疑似抓挠候选（低门槛，给人工找漏检）与边界微调
 # 门槛太松会失去意义：0.2 进入时一小时能抽出三百多条、绝大多数是 20~30% 的噪声，
 # 人审不过来，真正值得看的那几条反而被淹掉。目标是"一小时能看完的清单"
