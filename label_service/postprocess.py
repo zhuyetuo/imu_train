@@ -63,6 +63,11 @@ class StableParams:
     event_single_conf: float = 0.85  # 单窗口也保留的最高概率下限
     spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
+    # 短的「未佩戴」碎片并回旁边的静止：狗睡着 / 趴着不动时，模型偶尔冒出几十秒未佩戴——
+    # 戴着的项圈总有呼吸、心跳带来的细微晃动，跟放在桌上不完全一样，但模型分不太清。
+    # 真摘下来（充电）一般是很长一段，所以短于这个秒数、且挨着静止类的未佩戴改成那段静止。
+    # 0 = 不启用
+    notworn_min_s: float = 300.0
     # 疑似抓挠候选（给人工审核找漏检用，不进正式片段）
     #
     # 门槛定得太松会失去意义：0.2 进入时，一小时能抽出三百多条，绝大多数是
@@ -142,6 +147,36 @@ def _absorb_short_runs(labels: list[str], zones, min_s: float) -> list[str]:
         target = right if left is None else left if right is None else (left if dur[k - 1] >= dur[k + 1] else right)
         for i in range(runs[k][1], runs[k][2] + 1):
             labels[i] = target[0]
+
+
+#: 「未佩戴」类别名里带这个就算（各版本模型叫法一致）
+NOTWORN_KEY = "未佩戴"
+#: 静止类：名字里带这些的算（各版本模型叫 睡觉 / 静止/休息 / 睡眠 / 卧…）
+REST_KEYS = ("静止", "休息", "睡", "卧", "趴")
+
+
+def _is_rest(lab: str | None) -> bool:
+    return bool(lab) and NOTWORN_KEY not in lab and any(k in lab for k in REST_KEYS)
+
+
+def _absorb_short_notworn(labels: list[str], zones, min_s: float) -> list[str]:
+    """短于 min_s、且左右至少一边是静止类的「未佩戴」段，改成那段静止（两边都是就跟更长的那边）。
+    两边都不是静止（比如夹在活动中间）的不动——那种更可能是真的摘了，交给人判断。"""
+    if min_s <= 0:
+        return labels
+    labels = list(labels)
+    runs = _runs(labels)
+    dur = [(zones[i1][1] - zones[i0][0]).total_seconds() for _, i0, i1 in runs]
+    for k, (lab, i0, i1) in enumerate(runs):
+        if NOTWORN_KEY not in (lab or "") or dur[k] >= min_s:
+            continue
+        cands = [(dur[j], runs[j][0]) for j in (k - 1, k + 1) if 0 <= j < len(runs) and _is_rest(runs[j][0])]
+        if not cands:
+            continue
+        target = max(cands)[1]
+        for i in range(i0, i1 + 1):
+            labels[i] = target
+    return labels
 
 
 def _smooth_states(probs: list[dict], states: list[str], n: int, k: int) -> list[str]:
@@ -448,6 +483,8 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
     else:
         decoded = None
         state_label = _absorb_short_runs(_smooth_states(probs, states, n, p.smooth_windows), zones, p.min_state_s)
+    # 短的未佩戴碎片并回挨着的静止（两套解码都做）
+    state_label = _absorb_short_notworn(state_label, zones, p.notworn_min_s)
 
     # ── 事件 bout ──
     final = list(state_label)
