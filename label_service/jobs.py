@@ -1079,6 +1079,8 @@ def done_models() -> list[tuple[int, str, dict]]:
             "job_id": job["job_id"],
             "dataset": spec.get("date"),
             "axes": int(spec.get("axes") or 6),
+            # 训练用的采样率（不写就是 16）。设备调试页按它挑跟设备同采样率的那版
+            "hz": float(spec.get("hz") or 16),
             "model_type": job.get("model_type") or "rf",
             "classes": (job.get("metrics") or {}).get("classes"),
             "macro_f1": (job.get("metrics") or {}).get("macro_f1"),
