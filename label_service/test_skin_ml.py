@@ -34,3 +34,12 @@ def test_extras_add_remove(tmp_path, monkeypatch):
     M.add_extra({"scenario_id": "x1", "pattern": "step_onset"})      # 同名覆盖
     assert [x["pattern"] for x in M.load_extras()] == ["step_onset"]
     assert M.remove_extra("x1") == []
+
+
+def test_feature_names_and_groups():
+    from label_service import skin_explain as E
+    assert E.name_of("baseline_ratio_count_excl_recent14") == "次数比基线（跳过近7天再往前14天）"
+    assert E.name_of("rolling_std_7d") == "近7天抓挠率波动"
+    assert E.group_of("model_a_proba_C2") == "模型A的判断" and E.group_of("odor_level") == "问卷"
+    g = E.glossary()
+    assert "event_count" in g and g["event_count"]["calc"]

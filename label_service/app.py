@@ -33,7 +33,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs, pool, postprocess, skin, skin_ml, tooth
+from label_service import config, jobs, pool, postprocess, skin, skin_explain, skin_ml, tooth
 from label_service import queue as infer_queue
 from label_service.logging_setup import setup_logging
 
@@ -891,6 +891,25 @@ async def skin_ml_activate_b(body: MlActivateIn):
         return skin_ml.activate_b(body.which)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@app.get("/api/v1/skin/ml/features")
+async def skin_ml_features():
+    """ML 用了哪些维度：中文名 / 分组 / 怎么算 / 有什么用 + 全局重要性。第一次要算一两分钟，之后存盘"""
+    return await asyncio.to_thread(skin_explain.features)
+
+
+class MlExplainIn(BaseModel):
+    rows: list[dict]
+    pet_id: str
+    date: str
+    answers: list[dict] | None = None
+
+
+@app.post("/api/v1/skin/ml/explain")
+async def skin_ml_explain(body: MlExplainIn):
+    """某只狗某一天为什么判成这个档：逐个维度的贡献、在训练数据里的位置、超出范围的提醒"""
+    return await asyncio.to_thread(skin_explain.explain, body.rows, body.pet_id, body.date, body.answers)
 
 
 @app.get("/api/v1/skin/ml/scenarios")
