@@ -33,7 +33,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from label_service import config, jobs, pool, postprocess, skin, tooth
+from label_service import config, jobs, pool, postprocess, skin, skin_ml, tooth
 from label_service import queue as infer_queue
 from label_service.logging_setup import setup_logging
 
@@ -46,6 +46,13 @@ from label_service.registry import DEFAULT_TAG, registry  # noqa: E402
 
 _bundle: dict = {}      # 主进程只留元数据（health 用），真正推理在 pool 的 worker 进程里
 _pool = None
+
+
+def _warm_skin_ml():
+    try:
+        skin_ml.models()
+    except Exception:  # noqa: BLE001 —— 预热失败不影响服务，用到时再报
+        log.exception("皮肤 ML 模型预热失败")
 
 
 @asynccontextmanager
@@ -74,6 +81,10 @@ async def lifespan(app: FastAPI):
     # 训练出来的每一版都登记进来（不加载，第一次用到才加载），平台「版本」
     # 下拉里就能直接选——不用改配置重启，也不用「启用」把默认模型换掉
     _register_trained()
+    # 皮肤 ML 模型提前读好（读不出来要用合成数据重训一份，几十秒），放后台不挡启动
+    import threading
+
+    threading.Thread(target=_warm_skin_ml, daemon=True).start()
     yield
     log.info("关闭")
     registry.shutdown()
@@ -839,6 +850,47 @@ async def skin_stats_c_batch(body: StatRowsIn):
     （基线是全历史的中位数），以前每行两次 HTTP，几百行就是上千个请求挤在这个单进程服务上，
     别的页面（比如皮肤评估打开时的 options）跟着超时。放线程里跑，不堵事件循环。"""
     return await asyncio.to_thread(_c_batch, body.rows)
+
+
+class MlBatchIn(BaseModel):
+    rows: list[dict] = Field(..., description="[{pet_id, date, events:[[起,止]], wear_seconds, breed}]，每只狗的全部历史")
+    answers: list[dict] | None = None
+
+
+@app.post("/api/v1/skin/ml/predict-batch")
+async def skin_ml_predict_batch(body: MlBatchIn):
+    """ML 版整批预测：模型 A（C 档）+ 模型 B（S 档）。label_infra「重新拉取」时调，结果存库"""
+    return await asyncio.to_thread(skin_ml.predict_batch, body.rows, body.answers)
+
+
+class MlTrainIn(BaseModel):
+    rows: list[dict]
+    labels: list[dict] = Field(..., description="[{pet_id, date, s_tier(兽医评的), pm_s_tier}]")
+    answers: list[dict] | None = None
+    synthetic_weight: float = 0.2
+
+
+@app.post("/api/v1/skin/ml/train-b-real")
+async def skin_ml_train_b_real(body: MlTrainIn):
+    """用兽医照片评级重训模型 B（合成数据打底），按狗交叉验证，跟 PM 规则 / 合成版比；不自动启用"""
+    return await asyncio.to_thread(skin_ml.train_b_real, body.rows, body.labels, body.answers, body.synthetic_weight)
+
+
+@app.get("/api/v1/skin/ml/model-status")
+async def skin_ml_model_status():
+    return skin_ml.status()
+
+
+class MlActivateIn(BaseModel):
+    which: str
+
+
+@app.post("/api/v1/skin/ml/activate-b")
+async def skin_ml_activate_b(body: MlActivateIn):
+    try:
+        return skin_ml.activate_b(body.which)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @app.post("/api/v1/skin/ml/scan")

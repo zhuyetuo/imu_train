@@ -476,18 +476,20 @@ def ml_predict(rows: list, date_label: str, imu: str, dog_name: str | None, whic
     breed = R._dog_breed(dog_name)
     if not breed:
         return {"ok": False, "message": "请先选好「对应狗狗」（用来对应品种）"}
-    a_avail, b_avail = rf_infer.models_available()
-    if not a_avail or (which == "s" and not b_avail):
-        return {"ok": False, "message": "模型文件不存在，先在 skin_health/code/ 下跑 train_rf_model_a.py（和 gen_model_b_training_data.py + train_rf_model_b.py）"}
+    # 跟整批接口用同一份模型（skin_ml.models：仓库里的 pickle 跟现在装的 scikit-learn 版本
+    # 对不上时会当场用合成数据重训一份，不再整个 ML 版用不了）
+    from label_service import skin_ml
+    try:
+        model_a, model_b = skin_ml.models()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"模型加载失败：{type(e).__name__}: {e}"}
     target = _dt.date.fromisoformat(match["date"])
     events, wear = _events_for(match["root"], imu, match.get("infer_sub"))
-    model_a = rf_infer.load_model_a()
     if which == "c":
         res = rf_infer.predict_c(model_a, events, wear, imu, breed, target)
         if not res["available"]:
             return {"ok": False, "message": f"模型A无法预测：{res['reason']}"}
         return {"ok": True, "model": "A", "tier": res["tier"], "proba": {k: float(v) for k, v in res["proba"].items()}, "caveat": ML_CAVEAT}
-    model_b = rf_infer.load_model_b()
     a = answers or {}
     ordinals = R._pm_answers_to_rf_ordinals(a.get("color"), a.get("odor"), a.get("lesion"), a.get("hair_spot"),
                                             a.get("hair_diameter"), a.get("coat"))
