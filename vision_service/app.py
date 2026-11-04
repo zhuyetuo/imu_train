@@ -18,7 +18,7 @@ import threading
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, gpumem, dog, embed, llm as llmmod, lowlight, models, sam, seek
+from . import config, gpumem, dog, embed, llm as llmmod, lowlight, models, sam, seek, tooth
 
 _logger = logging.getLogger("vision_service")
 
@@ -545,6 +545,34 @@ def gpu_report():
 def gpu_release():
     """把 torch 缓存着、已经不用的显存还给系统。不动任何模型。"""
     return gpumem.release()
+
+
+# ── 牙齿检测（从 label_service 挪过来，接口不变）─────────────────────────
+
+class ToothDetectIn(BaseModel):
+    path: str = Field(..., description="相对 MATERIAL_ROOT 的图片路径，比如 口腔验证/2026-09-02-ok/Bali/x.jpg")
+    conf: float | None = Field(None, ge=0.0, le=0.95, description="置信度阈值，缺省 0.5；传 0 = 全部检出都返回")
+    with_image: bool = True
+    top_k: int = Field(1, ge=0, le=50, description="每张图最多保留几个框，默认 1；0 = 不限")
+
+
+@app.get("/api/v1/tooth/status")
+def tooth_status():
+    return tooth.status()
+
+
+@app.post("/api/v1/tooth/detect")
+def tooth_detect(body: ToothDetectIn):
+    full = _resolve(body.path)
+    conf = None if body.conf is None else max(body.conf, 0.001)   # ultralytics conf=0 会被当成默认值
+    try:
+        r = tooth.detect(full, conf, None, body.with_image, body.top_k)
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("牙齿检测失败 %s", body.path)
+        raise HTTPException(500, f"检测失败：{type(e).__name__}: {e}") from e
+    return {"path": body.path, **r}
 
 
 @app.get("/api/v1/models")

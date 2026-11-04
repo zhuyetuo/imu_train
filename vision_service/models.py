@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, dog, embed, lowlight, pose, sam, segmask, vllm_manager
+from . import config, dog, embed, lowlight, pose, sam, segmask, tooth, vllm_manager
 from . import meter as _meter
 
 _started = time.time()
@@ -280,9 +280,48 @@ def _lowlight_test() -> dict:
             "detail": f"256x256 暗图跑一次，输出均值 {float(out.mean()):.0f}/255"}
 
 
+def _tooth_status() -> dict:
+    st = tooth.status()
+    return {"available": st["loaded"], "error": st["error"], "device": st["device"], "weights": st["weights"],
+            "warm": st["loaded"]}
+
+
+def _tooth_load() -> dict:
+    tooth.load()
+    return {"warm": True}
+
+
+def _tooth_unload() -> None:
+    tooth.unload()
+    _cuda_free()
+
+
+def _tooth_test() -> dict:
+    import os
+    import tempfile
+
+    import cv2
+    import numpy as np
+
+    tooth.load()
+    img = np.random.default_rng(1).integers(0, 256, size=(640, 640, 3), dtype="uint8")
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        cv2.imwrite(path, img)
+        t0 = time.monotonic()
+        r = tooth.detect(path, conf=0.001, with_image=False, top_k=1)
+    finally:
+        os.remove(path)
+    return {"latency_ms": int((time.monotonic() - t0) * 1000),
+            "detail": f"随机图跑一次，类别 {'/'.join(r['class_names'])}（随机图有没有框都正常）"}
+
+
 REGISTRY: dict[str, dict] = {
     "dog": {"name": "狗检测（YOLO）", "purpose": "画面里有没有狗、狗在哪；建索引 / 找片段 / 找相似都先用它框狗",
             "status": _dog_status, "load": lambda: dog.warmup(), "unload": _dog_unload, "test": _dog_test},
+    "tooth": {"name": "牙齿检测（YOLO）", "purpose": "牙齿识别页：口腔照片正常 / 异常，从 label_service 挪过来跟这些一起上 GPU",
+              "status": _tooth_status, "load": _tooth_load, "unload": _tooth_unload, "test": _tooth_test},
     "sam": {"name": "SAM 分割", "purpose": "视觉标注页点一下出掩码",
             "status": _sam_status, "load": lambda: sam.warmup(), "unload": _sam_unload, "test": _sam_test},
     "embed": {"name": "画面向量（SigLIP）", "purpose": "画面向量索引：以图搜图 / 一句话搜",
