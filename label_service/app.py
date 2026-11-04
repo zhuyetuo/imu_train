@@ -893,6 +893,38 @@ async def skin_ml_activate_b(body: MlActivateIn):
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
+@app.get("/api/v1/skin/ml/scenarios")
+async def skin_ml_scenarios():
+    """合成数据里现成的场景（当模拟的模板）"""
+    return skin_ml.scenario_templates()
+
+
+@app.post("/api/v1/skin/ml/simulate")
+async def skin_ml_simulate(s: dict):
+    """按参数造一只狗的抓挠历史，看模型 A / B 每天怎么判、跟规则 / 合成真值差多少"""
+    try:
+        return await asyncio.to_thread(skin_ml.simulate, s)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=422, detail=f"参数不对：{e}") from e
+
+
+@app.post("/api/v1/skin/ml/extra-scenarios")
+async def skin_ml_add_extra(s: dict):
+    """把一个模拟场景加进合成训练集（下次「重训合成版」时生效）"""
+    return skin_ml.add_extra(s)
+
+
+@app.post("/api/v1/skin/ml/extra-scenarios/remove")
+async def skin_ml_remove_extra(body: dict):
+    return skin_ml.remove_extra(str(body.get("scenario_id") or ""))
+
+
+@app.post("/api/v1/skin/ml/retrain-synthetic")
+async def skin_ml_retrain_synthetic():
+    """合成数据（含加进来的场景）重训模型 A 和合成版模型 B，带交叉验证。一两分钟"""
+    return await asyncio.to_thread(skin_ml.retrain_synthetic)
+
+
 @app.post("/api/v1/skin/ml/scan")
 async def skin_ml_scan(body: RootsIn):
     return await asyncio.to_thread(skin.ml_scan, body.roots)
