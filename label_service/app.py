@@ -772,6 +772,27 @@ async def skin_s_total(s: STotalIn):
                         s.hair_spot, s.hair_diameter, s.coat)
 
 
+class STotalBatchIn(BaseModel):
+    rows: list[STotalIn]
+
+
+def _s_batch(rows: list[STotalIn]) -> list[dict | None]:
+    out: list[dict | None] = []
+    for s in rows:
+        try:
+            out.append(skin.s_total(s.c_value, s.c_tier_hint or "", s.has_hair_loss, s.color, s.odor, s.lesion,
+                                    s.hair_spot, s.hair_diameter, s.coat))
+        except Exception:  # noqa: BLE001 —— 一行算不出来不影响别的行
+            out.append(None)
+    return out
+
+
+@app.post("/api/v1/skin/s-batch")
+async def skin_s_batch(body: STotalBatchIn):
+    """跟踪表一次几百行，每行一两次 s-total；整批一个请求在线程里算完，不堵这个单进程服务"""
+    return await asyncio.to_thread(_s_batch, body.rows)
+
+
 @app.post("/api/v1/skin/stats/scan")
 async def skin_stats_scan(body: RootsIn):
     return await asyncio.to_thread(skin.scan_stats, body.roots, body.target_label)
@@ -792,6 +813,32 @@ async def skin_stats_from_events(body: EventsIn):
 @app.post("/api/v1/skin/stats/to-c-inputs")
 async def skin_stats_to_c(row: dict):
     return skin.stats_to_c_inputs(row)
+
+
+class StatRowsIn(BaseModel):
+    rows: list[dict]
+
+
+def _c_batch(rows: list[dict]) -> list[dict | None]:
+    out: list[dict | None] = []
+    for row in rows:
+        try:
+            cin = skin.stats_to_c_inputs(row)
+            c = CScoreIn(**{k: v for k, v in cin.items() if k in CScoreIn.model_fields})
+            res = skin.c_score(c.baseline_count, c.baseline_duration_min, c.today_count, c.today_duration_min,
+                               c.cluster_count, c.persistence_days, c.zn, c.zd, c.long_scratch, c.has_baseline)
+            out.append({"c_inputs": cin, "c": res})
+        except Exception:  # noqa: BLE001 —— 一行算不出来不影响别的行，跟逐行调时一样当没有
+            out.append(None)
+    return out
+
+
+@app.post("/api/v1/skin/stats/c-batch")
+async def skin_stats_c_batch(body: StatRowsIn):
+    """stats 行 → C 输入 → C 值，一次算一批。label_infra「重新拉取」要把库里所有天都重算一遍
+    （基线是全历史的中位数），以前每行两次 HTTP，几百行就是上千个请求挤在这个单进程服务上，
+    别的页面（比如皮肤评估打开时的 options）跟着超时。放线程里跑，不堵事件循环。"""
+    return await asyncio.to_thread(_c_batch, body.rows)
 
 
 @app.post("/api/v1/skin/ml/scan")
