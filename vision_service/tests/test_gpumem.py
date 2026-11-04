@@ -124,3 +124,22 @@ def test_建完一路自动还缓存_但留一截周转(monkeypatch):
     # 闲着的没到线：一下都别动，省得白白去要一次显存
     state["reserved"] = state["alloc"] + 1000 * gpumem.MIB
     assert gpumem.trim(keep_mib=4096) == 0.0 and state["emptied"] == 1
+
+
+def test_smi_parses_and_tolerates_missing(monkeypatch):
+    import shutil
+    import subprocess
+
+    from vision_service import gpumem
+
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    assert gpumem.smi() == []
+
+    class R:
+        stdout = "0, NVIDIA GeForce RTX 5090, 37, 20480, 32607, 55, 120.5\n1, X, [N/A], 1, 2, 3, [N/A]\n"
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    g = gpumem.smi()
+    assert g[0]["util_pct"] == 37 and g[0]["mem_total_mib"] == 32607 and g[0]["name"].endswith("5090")
+    assert g[1]["util_pct"] is None
