@@ -109,6 +109,9 @@ WINDOW_S=""               # 训练窗口长度秒数（留空=用 configs/data.y
                            # 甩身体这类短促动作（1~1.5秒）比默认2秒窗口还短，建不成
                            # 窗口、直接被跳过，试着调小（比如--window_s 1 --stride_s 0.5）
                            # 能不能把这类短片段也纳入训练
+SHORT_LABELS=""           # 短促动作类别（逗号分隔，比如 甩动,甩头/抖身）：比窗口短的片段以事件为中心
+                           # 带上前后真实上下文补成一段（每个窗口都完整包含这次事件），不再被丢掉 /
+                           # 被多数投票吞掉。见 src/data/labelstudio_to_custom.py 的 _extract_short_event
 FEAT_WORKERS="1"          # 特征提取并行进程数（默认1=不并行，传-1用全部核心）
 TAG=""                    # 输出目录后缀。留空时不是真的不加后缀，而是自动用
                            # missing_${MISSING_STRATEGY}（见下面解析完参数后的
@@ -176,6 +179,7 @@ _print_help() {
                                         的--drop_nan_windows）
   --label_mode MODE      majority(默认，多数投票)/center(窗口中心帧)
   --window_s SEC         训练窗口长度秒数（默认用configs/data.yaml的2秒）
+  --short_labels A,B     短促动作类别（如 甩动）：比窗口短的片段带上下文补成完整窗口
   --stride_s SEC         训练窗口步长秒数（默认用configs/data.yaml的1秒）
   --split_strategy S     random(默认)/subject/label_concat
   --train_ratio R        训练集比例（默认0.9）
@@ -213,6 +217,7 @@ while [[ $# -gt 0 ]]; do
     --label_mode)     LABEL_MODE="$2";     shift 2 ;;
     --stride_s)       STRIDE_S="$2";       shift 2 ;;
     --window_s)       WINDOW_S="$2";       shift 2 ;;
+    --short_labels)   SHORT_LABELS="$2";   shift 2 ;;
     --feat_workers)   FEAT_WORKERS="$2";   shift 2 ;;
     --tag)            TAG="$2";            shift 2 ;;
     --balance)        BALANCE="$2";        shift 2 ;;
@@ -290,7 +295,10 @@ if [[ "$ROT_AUG" != "0" ]]; then
 fi
 PROCESSED_DIR="data/processed_${DATE}${TAG:+_$TAG}${_axes_suffix}${_ch_suffix}"
 DATA_DIR="data/raw_custom/${DATE}"
-CSV="${DATA_DIR}/merged_${DATE}.csv"
+# 开了短事件补齐，CSV 换个名字：不然会直接用上次没补齐时生成的那份（CSV 在就跳过步骤1）
+SHORT_SUFFIX=""
+[[ -n "$SHORT_LABELS" ]] && SHORT_SUFFIX="_short$(echo -n "${SHORT_LABELS}|${WINDOW_S:-2}" | md5sum | cut -c1-6)"
+CSV="${DATA_DIR}/merged_${DATE}${SHORT_SUFFIX}.csv"
 JSON="${DATA_DIR}/merged_tmp.json"
 # 每个要合成的类别各自一份npz文件，文件名带上类别名区分（多个类别时避免
 # 互相覆盖）；SYNTHETIC_PATHS按LABELS顺序一一对应，后面--synthetic_spec
@@ -405,6 +413,7 @@ if [[ ! -f "$CSV" || "$CLEAN" == "1" ]]; then
     --output "$CSV" \
     --csv_dir "$CSV_DIR" \
     --missing_strategy "$LS_MISSING_STRATEGY" \
+    $( [[ -n "$SHORT_LABELS" ]] && echo "--short_labels $SHORT_LABELS --window_s ${WINDOW_S:-2}" ) \
     --keep_labels
 fi
 
@@ -441,7 +450,7 @@ if [[ ${#EXTRA_DATES[@]} -gt 0 ]]; then
     _ehz="${_ed##*:}"
     _edata_dir="data/raw_custom/${_edate}"
     _ejson="${_edata_dir}/merged_tmp.json"
-    _ecsv="${_edata_dir}/merged_${_edate}.csv"
+    _ecsv="${_edata_dir}/merged_${_edate}${SHORT_SUFFIX}.csv"
 
     # 跟主批次同一个道理：平台「一起训练」选的那几份，label_service 也是直接
     # 写好 merged_tmp.json、没有 project-*.json，这时它就是源文件
@@ -473,6 +482,7 @@ print(f'  合并完成，共 {len(merged)} 条任务')
         --output "$_ecsv" \
         --csv_dir "$CSV_DIR" \
         --missing_strategy "$LS_MISSING_STRATEGY" \
+        $( [[ -n "$SHORT_LABELS" ]] && echo "--short_labels $SHORT_LABELS --window_s ${WINDOW_S:-2}" ) \
         --keep_labels
     fi
 

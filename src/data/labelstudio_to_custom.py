@@ -187,6 +187,74 @@ def _extract_frame(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
     }, columns=_OUT_COLS)
 
 
+def _extract_short_event(df, acc_cols, gyro_cols, label, t_start_str, t_end_str, subject_id, k,
+                         acc_unit, others, window_s, stats):
+    """短事件（比如甩动，一两秒）补成训练窗口：以事件为中心、带上前后**真实的**上下文切一段，
+    整段标成这个类别，单独成一个 record（{subject}_short{k}）。
+
+    为什么要补：训练按 window_s（默认 2 秒）切窗。比窗口短的片段——
+      · 按片段切（label_concat）时整段被丢掉；
+      · 按记录滑窗时跟前后别的片段拼在一起，多数投票投成别的类，
+    结果甩动几乎进不了训练集，模型没见过「甩动」长什么样，一甩就判成抓挠。
+
+    长度取 S = 2W - L（L = 事件长）：这样在这一段里怎么滑 W 长的窗口，**每个窗口都完整
+    包含这次事件**——窗口里有一次完整的甩动，就叫它甩动（推理时看到的也是这样的窗口）。
+    上下文碰到前后别的类别的标注就截住（不把抓挠的数据标成甩动）；截短了不够 S，
+    用剩下那段真实数据镜像补齐，不编造新的信号。"""
+    a, b = pd.to_datetime(t_start_str), pd.to_datetime(t_end_str)
+    L = (b - a).total_seconds()
+    W = float(window_s)
+    if L >= W or L <= 0:
+        return None
+    S = 2 * W - L
+    c = a + (b - a) / 2
+    lo, hi = c - pd.Timedelta(seconds=S / 2), c + pd.Timedelta(seconds=S / 2)
+    clipped = False
+    for o_lab, o0, o1 in others:
+        if o_lab == label:
+            continue
+        if o1 <= a and o1 > lo:
+            lo, clipped = o1, True
+        if o0 >= b and o0 < hi:
+            hi, clipped = o0, True
+    seg_df = df[(df["_ts"] >= lo) & (df["_ts"] <= hi)]
+    if len(seg_df) < 2:
+        return None
+    acc = seg_df[acc_cols].values.astype(np.float64)
+    if acc_unit == "g":
+        acc = acc * G
+    gyro = seg_df[gyro_cols].values.astype(np.float64) if gyro_cols else np.zeros((len(seg_df), 3))
+    ts = seg_df["_ts"].values
+    dt = np.median(np.diff(ts).astype("timedelta64[ns]").astype(np.int64)) if len(ts) > 1 else 0
+    if dt <= 0:
+        return None
+    need = int(np.ceil(S * 1e9 / dt)) + 1
+    padded = False
+    if len(seg_df) < need:
+        # 不够长：两头镜像补（用的是这段里真实的数据），不插值、不造信号
+        lack = need - len(seg_df)
+        left = lack // 2
+        right = lack - left
+        vals = np.concatenate([acc, gyro], axis=1)
+        vals = np.pad(vals, ((left, right), (0, 0)), mode="symmetric")
+        acc, gyro = vals[:, :3], vals[:, 3:]
+        t0 = ts[0] - np.timedelta64(int(dt) * left, "ns")
+        ts = t0 + np.arange(len(vals)) * np.timedelta64(int(dt), "ns")
+        padded = True
+    stats["n"] = stats.get("n", 0) + 1
+    stats["clipped"] = stats.get("clipped", 0) + int(clipped)
+    stats["padded"] = stats.get("padded", 0) + int(padded)
+    stats.setdefault("by_label", {}).setdefault(label, 0)
+    stats["by_label"][label] += 1
+    return pd.DataFrame({
+        "record_id": f"{subject_id}_short{k}",
+        "label": label,
+        "timestamp": ts,
+        "acc_x": acc[:, 0], "acc_y": acc[:, 1], "acc_z": acc[:, 2],
+        "gyr_x": gyro[:, 0], "gyr_y": gyro[:, 1], "gyr_z": gyro[:, 2],
+    }, columns=_OUT_COLS)
+
+
 def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
                   subject_id, acc_unit, keep_labels):
     """同 _extract_frame，返回 row dict 列表（给 analyze_missing 这种小量分析用）。"""
@@ -197,7 +265,7 @@ def _extract_rows(df, acc_cols, gyro_cols, label, t_start_str, t_end_str,
 
 def convert(tasks: list, csv_dir: str, acc_unit: str,
             keep_labels: list = None, missing_strategy: str = "drop",
-            output=None):
+            output=None, short_labels: list | None = None, window_s: float = 2.0):
     """转换全部任务。
 
     给了 output 就**按任务边转边追加写**，返回 (总行数, 各类别行数)：内存里同时只有
@@ -207,6 +275,9 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
     排序：同一个 record_id 只来自一个任务，所以在任务内部按 (record_id, timestamp)
     排好就够了——下游按 record_id 分组，记录之间的先后无所谓。"""
     keep_set = set(keep_labels) if keep_labels else None
+    # 短事件补齐（见 _extract_short_event）；统计打在最后
+    short_stats: dict = {"_labels": set(short_labels or ())}
+    short_k = [0]
     rows: list = []          # 当前这个任务的段（DataFrame）
     frames: list = []        # 不写文件时攒全部
     n_total = 0
@@ -237,6 +308,22 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
     def _add(fr):
         if fr is not None and len(fr):
             rows.append(fr)
+
+    def _emit(df, acc_cols, gyro_cols, lab, t0, t1, subject_id, same_sensor_segs, orig=()):
+        """一段标注 → 训练行。短事件类别且比窗口短：换成带上下文的独立 record；否则照旧。
+        认短事件看现在的类别名，也看归并前的原名（甩头/抖身 并进「活动」当负样本时也要补）"""
+        if keep_set and lab not in keep_set:
+            return
+        if lab in short_stats["_labels"] or any(o in short_stats["_labels"] for o in (orig or ())):
+            others = [(l2, pd.to_datetime(a2), pd.to_datetime(b2)) for l2, a2, b2 in same_sensor_segs
+                      if not (l2 == lab and a2 == t0 and b2 == t1)]
+            fr = _extract_short_event(df, acc_cols, gyro_cols, lab, t0, t1, subject_id, short_k[0],
+                                      acc_unit, others, window_s, short_stats)
+            if fr is not None:
+                short_k[0] += 1
+                _add(fr)
+                return
+        _add(_extract_frame(df, acc_cols, gyro_cols, lab, t0, t1, subject_id, acc_unit, keep_set))
 
     from tqdm import tqdm
     for task in tqdm(tasks, desc="转换标注", unit="task"):
@@ -271,6 +358,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
             if len(sensor_map) == 1:
                 sensor_map["label"] = next(iter(sensor_map.values()))
 
+            segs = []
             for ann in annotations:
                 for seg in ann.get("result", []):
                     val    = seg.get("value", {})
@@ -280,10 +368,10 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                     fn     = seg.get("from_name", "")
                     if not labels or not t0 or not t1 or fn not in sensor_map:
                         continue
-                    df, acc_cols, gyro_cols, subject_id = sensor_map[fn]
-                    _add(_extract_frame(df, acc_cols, gyro_cols,
-                                              labels[0], t0, t1,
-                                              subject_id, acc_unit, keep_set))
+                    segs.append((sensor_map[fn], labels[0], t0, t1, val.get("orig_labels") or labels))
+            for (df, acc_cols, gyro_cols, subject_id), lab, t0, t1, orig in segs:
+                _emit(df, acc_cols, gyro_cols, lab, t0, t1, subject_id,
+                      [(l2, t2a, t2b) for (s2, l2, t2a, t2b, _o) in segs if s2[3] == subject_id], orig)
         else:
             # 旧格式：单 csv
             csv_url = data.get("csv", "")
@@ -294,6 +382,7 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                 continue
             df, acc_cols, gyro_cols = res
             subject_id = f"task{task_id}"
+            segs = []
             for ann in annotations:
                 for seg in ann.get("result", []):
                     val    = seg.get("value", {})
@@ -302,11 +391,17 @@ def convert(tasks: list, csv_dir: str, acc_unit: str,
                     t1     = val.get("end",   "")
                     if not labels or not t0 or not t1:
                         continue
-                    _add(_extract_frame(df, acc_cols, gyro_cols,
-                                              labels[0], t0, t1,
-                                              subject_id, acc_unit, keep_set))
+                    segs.append((labels[0], t0, t1, val.get("orig_labels") or labels))
+            for lab, t0, t1, orig in segs:
+                _emit(df, acc_cols, gyro_cols, lab, t0, t1, subject_id, [x[:3] for x in segs], orig)
 
     _flush()
+    if short_stats.get("n"):
+        print(f"\n[短事件补齐] {short_stats['n']} 段比 {window_s:g} 秒窗口短的片段补成了带上下文的独立片段 "
+              f"{short_stats['by_label']}；其中 {short_stats.get('clipped', 0)} 段前后碰到别的类别被截住、"
+              f"{short_stats.get('padded', 0)} 段不够长用真实数据镜像补齐")
+    elif short_stats["_labels"]:
+        print(f"\n[短事件补齐] {sorted(short_stats['_labels'])} 里没有比 {window_s:g} 秒短的片段")
     if not n_total:
         raise RuntimeError("没有任何有效数据，请检查输入 JSON 和 CSV 路径")
     if output:
@@ -336,6 +431,11 @@ def main():
                              "不编造数据；ffill=前后值填充；none=不处理，保留原始NaN"
                              "（这是最早改动之前一直用的方式）。想对比不同处理方式训出来的"
                              "模型效果，改这个参数配合--tag分别跑")
+    parser.add_argument("--short_labels", default="",
+                        help="短促动作类别（逗号分隔，比如 甩动,甩头/抖身）：比训练窗口短的片段不再被丢掉 / "
+                             "被多数投票吞掉，而是以事件为中心带上前后真实上下文补成一段，每个训练窗口都完整包含这次事件")
+    parser.add_argument("--window_s", type=float, default=2.0,
+                        help="训练窗口长度（秒），配合 --short_labels：要跟 preprocess 的 --window_s 一致")
     args = parser.parse_args()
 
     json_stem = os.path.splitext(os.path.basename(args.json))[0]
@@ -349,8 +449,12 @@ def main():
     print(f"共 {len(tasks)} 个 task")
     print(f"只保留标签: {args.keep_labels}")
 
+    short = [x.strip() for x in args.short_labels.split(",") if x.strip()]
+    if short:
+        print(f"短事件补齐: {short}（窗口 {args.window_s:g} 秒）")
     n_total, counts = convert(tasks, args.csv_dir, args.acc_unit, keep_labels=args.keep_labels,
-                              missing_strategy=args.missing_strategy, output=output)
+                              missing_strategy=args.missing_strategy, output=output,
+                              short_labels=short, window_s=args.window_s)
 
     print(f"\n── 汇总 ──")
     print(f"总行数: {n_total}")

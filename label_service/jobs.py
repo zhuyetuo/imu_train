@@ -164,6 +164,9 @@ def apply_label_remap(tasks: list, remap: dict) -> int:
                 # 就会跳过，二级标签留在链上没被收掉，人在界面上明明选了合并
                 if not target or labels == [target]:
                     continue
+                # 原名留一份：短促动作补齐要认原来的类别（甩头/抖身 并进「活动」当负样本时，
+                # 改名之后就认不出它是短促动作了）
+                v.setdefault("orig_labels", list(labels))
                 v["timeserieslabels"] = [target]
                 n += 1
     return n
@@ -397,6 +400,10 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
         cmd += ["--channel_mode", "inv"]
     if int(dataset_spec.get("rot_aug") or 0) > 0:
         cmd += ["--rot_aug", str(int(dataset_spec["rot_aug"]))]
+    # 短促动作（甩动这类一两秒的）补成完整窗口，见 labelstudio_to_custom._extract_short_event
+    short = [str(x).strip() for x in (dataset_spec.get("short_labels") or []) if str(x).strip()]
+    if short:
+        cmd += ["--short_labels", ",".join(short)]
     # 界面给了归并表就用它生成的那份，没给还是默认的 3 类表
     runtime_remap = write_runtime_remap(dataset_spec, job_id)
     if runtime_remap:
