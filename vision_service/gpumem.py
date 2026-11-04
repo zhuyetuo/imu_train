@@ -149,6 +149,40 @@ def trim(keep_mib: float = 4096.0) -> float:
     return round(freed, 1)
 
 
+def smi() -> list[dict]:
+    """每张卡的利用率 / 显存 / 温度（nvidia-smi，整卡口径，所有进程加起来）。
+    没装驱动 / 容器没给 utility 能力就返回 []，不报错"""
+    import shutil
+    import subprocess
+
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for line in r.stdout.strip().splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 7:
+            continue
+
+        def num(x):
+            try:
+                return float(x)
+            except ValueError:
+                return None
+
+        out.append({"index": int(num(parts[0]) or 0), "name": parts[1], "util_pct": num(parts[2]),
+                    "mem_used_mib": num(parts[3]), "mem_total_mib": num(parts[4]),
+                    "temp_c": num(parts[5]), "power_w": num(parts[6])})
+    return out
+
+
 def report() -> dict:
     """显存明细。数都是 MiB。
 
@@ -164,7 +198,7 @@ def report() -> dict:
     t = _torch()
     with _lock:
         models = dict(sorted(_loaded.items(), key=lambda kv: -(kv[1]["mib"] or 0)))
-    out: dict = {"models": models}
+    out: dict = {"models": models, "gpus": smi()}
     if t is None:
         out["why"] = "没有 CUDA，显存明细不适用"
         return out
