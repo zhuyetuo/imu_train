@@ -20,3 +20,17 @@ def test_train_refuses_when_labels_too_few(monkeypatch):
     r = M.train_b_real([], [{"pet_id": "a", "date": "2026-11-01", "s_tier": "S1"}])
     assert r["ok"] is False and "不够" in r["message"]
     assert M.train_b_real([], [])["ok"] is False
+
+
+def test_norm_scenario_fills_pattern_defaults():
+    s = M._norm_scenario({"pattern": "ramp_onset", "n_days": 500, "severity_multiplier": "2.5", "junk": 1})
+    assert s["n_days"] == 120 and s["onset_day"] == 60 and s["peak_day"] == 67 and s["severity_multiplier"] == 2.5
+    assert "junk" not in s and s["scenario_id"].startswith("custom_")
+
+
+def test_extras_add_remove(tmp_path, monkeypatch):
+    monkeypatch.setattr(M, "RUN_DIR", str(tmp_path))
+    M.add_extra({"scenario_id": "x1", "pattern": "stable"})
+    M.add_extra({"scenario_id": "x1", "pattern": "step_onset"})      # 同名覆盖
+    assert [x["pattern"] for x in M.load_extras()] == ["step_onset"]
+    assert M.remove_extra("x1") == []
