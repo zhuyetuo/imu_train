@@ -335,6 +335,8 @@ def retrain_synthetic() -> dict:
         _train_synthetic(with_report=True)
     reset_cache()
     models()
+    from label_service import skin_explain
+    skin_explain.reset()   # 参照分布 / 重要性跟着训练数据变，删掉下次重算
     return status()
 
 
@@ -597,4 +599,8 @@ def activate_b(which: str) -> dict:
     with open(os.path.join(RUN_DIR, _ACTIVE_FILE), "w", encoding="utf-8") as f:
         json.dump({"model_b": which, "at": datetime.now().isoformat(timespec="seconds")}, f)
     reset_cache()
+    try:
+        os.remove(os.path.join(RUN_DIR, "importance.json"))   # 模型 B 换了，重要性重算
+    except OSError:
+        pass
     return status()
