@@ -332,6 +332,78 @@ async def infer(req: InferRequest):
     )
 
 
+class InferSamplesRequest(BaseModel):
+    """浏览器直连设备（平台「设备调试」页）收到的原始采样，直接送来跑模型，跟板子的识别结果对比"""
+    t_ms: list[int] = Field(..., min_length=2, max_length=60_000, description="每个样本的设备时间戳（Unix 毫秒）")
+    acc: list[list[float]] = Field(..., description="[[ax, ay, az], ...]，单位 g（跟采集 CSV 一样）")
+    gyro: list[list[float]] | None = Field(None, description="[[gx, gy, gz], ...] °/s；没有（项圈只有加速度）就不传，按 0")
+    hz: float = Field(..., gt=0, description="这批数据的采样率（项圈 31.25）")
+    mode: Literal["raw", "stable", "viterbi", "stable_noshake", "viterbi_noshake"] = "raw"
+    model: str | None = None
+
+
+def _write_samples_csv(req: "InferSamplesRequest") -> str:
+    """写成跟采集 CSV 同样的列，走同一条推理链。时间戳写 UTC 的「墙上时间」，回来再按 UTC 换回毫秒——
+    不经过任何本地时区，容器和浏览器时区不一样也对得上"""
+    import csv as _csv
+    import tempfile
+    from datetime import datetime as _dt, timezone as _tz
+
+    n = len(req.t_ms)
+    if len(req.acc) != n or (req.gyro is not None and len(req.gyro) != n):
+        raise HTTPException(422, "t_ms / acc / gyro 长度不一样")
+    fd, path = tempfile.mkstemp(prefix="devdebug_", suffix=".csv")
+    with os.fdopen(fd, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["timestamp", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"])
+        for i, t in enumerate(req.t_ms):
+            ts = _dt.fromtimestamp(t / 1000, _tz.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            a = req.acc[i]
+            g = req.gyro[i] if req.gyro is not None else (0.0, 0.0, 0.0)
+            w.writerow([ts, a[0], a[1], a[2], g[0], g[1], g[2]])
+    return path
+
+
+def _utc_str_to_ms(s: str | None) -> int | None:
+    if not s:
+        return None
+    from datetime import datetime as _dt, timezone as _tz
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return int(_dt.strptime(s, fmt).replace(tzinfo=_tz.utc).timestamp() * 1000)
+        except ValueError:
+            continue
+    return None
+
+
+@app.post("/api/v1/label/infer_samples")
+async def infer_samples(req: InferSamplesRequest):
+    """一段原始采样直接跑模型（不经过 NAS 上的 CSV）。返回跟 /infer 一样的 windows / segments，
+    另外每个窗口、片段多带一个 *_ms（Unix 毫秒），前端直接跟板子的 0x07 / 0x09 时间对齐"""
+    b, px = _pick_model(req.model)
+    path = _write_samples_csv(req)
+    try:
+        result = await _infer_in_pool(path, req.mode, infer_queue.PRIORITY_INTERACTIVE, req.hz, bundle=b, pool_obj=px)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for w in result.get("windows") or []:
+        w["ts_ms"] = _utc_str_to_ms(w.get("ts"))
+    for segs in (result.get("segments") or {}).values():
+        for sg in segs:
+            sg["start_ms"] = _utc_str_to_ms(sg.get("start_ts"))
+            sg["end_ms"] = _utc_str_to_ms(sg.get("end_ts"))
+    return {"model_path": b["model_path"], "classes": b["classes"], "hz_model": b.get("hz"),
+            "window_s": b.get("window_s"), "stride_s": b.get("stride_s"), "mode": req.mode,
+            "n_windows": len(result.get("windows") or []),
+            "windows": result.get("windows") or [], "segments": result.get("segments") or {},
+            "missing": result.get("missing") or []}
+
+
 class InferBatchItem(BaseModel):
     path: str
     sample_id: int | None = None
