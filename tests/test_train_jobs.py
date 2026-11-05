@@ -555,3 +555,61 @@ def test_平台提交的参数不能被接口丢掉():
     spec16 = TrainRequest(dataset={"date": "d", "hz": 16, "source_hz": 50}, model_type="rf").dataset.model_dump()
     c16 = jobs.build_command(spec16, "rf", None, 12)
     assert c16[c16.index("--hz") + 1] == "16" and c16[c16.index("--source_hz") + 1] == "50"
+
+
+def test_界面上的窗口_标签方式_模型超参都传到训练():
+    import os
+    import yaml
+    from label_service import config as cfg_mod
+    spec = {"date": "ds_a", "window_s": 3, "stride_s": 1.5, "label_mode": "center",
+            "model_params": {"n_estimators": 300, "max_depth": 12, "min_samples_leaf": 5, "max_features": "log2"}}
+    cmd = jobs.build_command(spec, "rf", None, 99901)
+    path = os.path.join(cfg_mod.REPO_ROOT, "configs", "ml_job99901.yaml")
+    try:
+        assert cmd[cmd.index("--window_s") + 1] == "3" and cmd[cmd.index("--stride_s") + 1] == "1.5"
+        assert cmd[cmd.index("--label_mode") + 1] == "center"
+        assert cmd[cmd.index("--ml_config") + 1] == os.path.join("configs", "ml_job99901.yaml")
+        rf = yaml.safe_load(open(path, encoding="utf-8"))["random_forest"]
+        assert rf["n_estimators"] == 300 and rf["max_depth"] == 12 and rf["min_samples_leaf"] == 5 and rf["max_features"] == "log2"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_端侧尺寸再叠模型超参_在端侧那份上改():
+    import os
+    import yaml
+    from label_service import config as cfg_mod
+    cmd = jobs.build_command({"date": "ds_a", "edge_size": True, "model_params": {"min_samples_leaf": 8}}, "rf", None, 99902)
+    path = os.path.join(cfg_mod.REPO_ROOT, "configs", "ml_job99902.yaml")
+    try:
+        assert cmd.count("--ml_config") == 1
+        rf = yaml.safe_load(open(path, encoding="utf-8"))["random_forest"]
+        base = yaml.safe_load(open(os.path.join(cfg_mod.REPO_ROOT, "configs", "ml_edge_rf_d10.yaml"), encoding="utf-8"))["random_forest"]
+        assert rf["min_samples_leaf"] == 8 and rf["n_estimators"] == base["n_estimators"]
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_平台传的短促动作补齐_接口不再丢掉():
+    from label_service.app import DatasetSpec
+    s = DatasetSpec(date="d", short_labels=["甩头/抖身", "抓挠"], label_mode="center", model_params={"min_samples_leaf": 3})
+    d = s.model_dump()
+    assert d["short_labels"] == ["甩头/抖身", "抓挠"] and d["label_mode"] == "center"
+    import os
+    from label_service import config as cfg_mod
+    try:
+        assert "--short_labels" in jobs.build_command(d, "rf", None, 99903)
+    finally:
+        p = os.path.join(cfg_mod.REPO_ROOT, "configs", "ml_job99903.yaml")
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def test_随机森林用上类别权重():
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "ml"))
+    from models.random_forest import build_rf
+    m = build_rf({"class_weight": "balanced", "min_samples_leaf": 4})
+    assert m.class_weight == "balanced" and m.min_samples_leaf == 4

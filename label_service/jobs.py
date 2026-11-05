@@ -332,6 +332,40 @@ def write_edge_config(dataset_spec: dict, model_type: str, job_id: int | None) -
     return rel
 
 
+_MODEL_SECTION = {"rf": "random_forest", "xgb": "xgboost", "lgbm": "lightgbm", "catboost": "catboost",
+                  "extratrees": "extra_trees", "histgb": "histgb"}
+_MODEL_KEYS = ("n_estimators", "max_depth", "min_samples_leaf", "max_features")
+
+
+def write_model_config(params: dict, model_type: str, job_id: int | None, base_rel: str | None = None) -> str | None:
+    """界面上填的超参落成本任务专用的配置（在 base_rel 或 configs/ml.yaml 上改那一个模型的那一节）。
+    只认几个常用键；空 / 0 / 不认识的不动"""
+    import yaml
+
+    sect_key = _MODEL_SECTION.get(model_type)
+    clean = {}
+    for k in _MODEL_KEYS:
+        v = (params or {}).get(k)
+        if v in (None, "", 0):
+            continue
+        if k == "max_features":
+            clean[k] = v if v in ("sqrt", "log2") else float(v)
+        else:
+            clean[k] = int(v)
+    if not sect_key or not clean:
+        return None
+    base = os.path.join(config.REPO_ROOT, base_rel or os.path.join("configs", "ml.yaml"))
+    with open(base, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cfg.setdefault(sect_key, {}).update(clean)
+    safe = job_id if job_id is not None else "manual"
+    rel = os.path.join("configs", f"ml_job{safe}.yaml")
+    with open(os.path.join(config.REPO_ROOT, rel), "w", encoding="utf-8") as f:
+        f.write(f"# 训练任务 #{safe} 的模型超参（界面上填的，在 {base_rel or 'configs/ml.yaml'} 上改），由 label_service 生成\n")
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    return rel
+
+
 def _hz_str(v) -> str:
     """采样率写进命令行：16.0 → "16"、31.25 → "31.25"。接口收的是 float，直接 str 会变成 "16.0"，
     train_custom.sh 拼出来的目录名就成了 16.0hz，跟预处理写的 16hz 对不上"""
@@ -392,6 +426,20 @@ def build_command(dataset_spec: dict, model_type: str, tag: str | None,
         custom = write_edge_config(dataset_spec, model_type, job_id)
         if custom:
             cmd += ["--dl_config", custom]
+    # 界面上填的模型超参（棵数 / 深度 / 叶子最少样本数 / 每次分裂看几个特征）：在当前那份配置上改，落成本任务专用的
+    if model_type != "cnn" and dataset_spec.get("model_params"):
+        base = None
+        if "--ml_config" in cmd:
+            base = cmd[cmd.index("--ml_config") + 1]
+            del cmd[cmd.index("--ml_config"):cmd.index("--ml_config") + 2]
+        mp = write_model_config(dataset_spec["model_params"], model_type, job_id, base)
+        if mp:
+            cmd += ["--ml_config", mp]
+        elif base:
+            cmd += ["--ml_config", base]
+    # 窗口怎么打标签：majority（多数投票，默认）/ center（窗口中心那一刻的标签）
+    if dataset_spec.get("label_mode") in ("majority", "center"):
+        cmd += ["--label_mode", dataset_spec["label_mode"]]
     # 3 轴（只用加速度）：端侧没有陀螺仪时要这么训。默认 6 不传，保持原行为
     if int(dataset_spec.get("axes") or 6) == 3:
         cmd += ["--axes", "3"]
