@@ -174,3 +174,42 @@ def test_诊断_混淆矩阵和两两可分性():
     assert hard["auc"] < 0.7 and "分不开" in hard["verdict"]
     assert easy["auc"] > 0.95 and "分得开" in easy["verdict"]
     assert len(easy["top_features"]) > 0 and easy["top_features"][0]["higher"] == "抓挠"
+
+
+def test_回放进度_跑着不让再点(monkeypatch):
+    """rerun 之后状态是 starting / running，再点一次 409；跑完是 done，带 done / total"""
+    import asyncio
+    from fastapi import HTTPException
+    from label_service import app as app_mod
+
+    job = {"job_id": 777, "status": app_mod.jobs.STATUS_DONE}
+    monkeypatch.setattr(app_mod.jobs, "get_job", lambda jid: job if jid == 777 else None)
+    gate = asyncio.Event()
+
+    async def fake_inner(job_id, j, on_progress):
+        on_progress(0, 4)
+        on_progress(2, 4)
+        await gate.wait()
+        on_progress(4, 4)
+
+    monkeypatch.setattr(app_mod, "_review_trained_inner", fake_inner)
+    app_mod.REVIEW_PROGRESS.pop(777, None)
+
+    async def scenario():
+        assert (await app_mod.train_review_status(777))["status"] == "idle"
+        await app_mod.rerun_train_review(777)
+        await asyncio.sleep(0)
+        st = await app_mod.train_review_status(777)
+        assert st["status"] == "running" and st["done"] == 2 and st["total"] == 4
+        try:
+            await app_mod.rerun_train_review(777)
+            raise AssertionError("跑着的时候不该能再点")
+        except HTTPException as e:
+            assert e.status_code == 409
+        gate.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        st = await app_mod.train_review_status(777)
+        assert st["status"] == "done" and st["done"] == 4
+
+    asyncio.run(scenario())

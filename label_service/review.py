@@ -204,7 +204,7 @@ def _review_task(task: dict, result: dict, table: dict, window_s: float, stride_
 
 
 async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s: float,
-              classes: list[str], concurrency: int = 3, max_rows: int = 2000) -> dict:
+              classes: list[str], concurrency: int = 3, max_rows: int = 2000, on_progress=None) -> dict:
     """infer(full_path, device_hz) → 推理结果（raw 模式）。按任务并发几个，结果落盘 + 返回。"""
     dataset_spec = job.get("dataset_spec") or {}
     table = _table(dataset_spec)
@@ -215,6 +215,8 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
     for ex in dataset_spec.get("extra_datasets") or []:
         hz_of_run[ex.get("date")] = ex.get("source_hz") or dataset_spec.get("source_hz")
     tasks = _load_tasks(run_dates)
+    if on_progress:
+        on_progress(0, len(tasks))
     sem = asyncio.Semaphore(concurrency)
     all_rows: list[dict] = []
     pairs: list[tuple[str, str]] = []
@@ -227,6 +229,8 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
         if not full:
             n_fail += 1
             errors.append(f"任务 #{t.get('id')}：找不到 CSV")
+            if on_progress:
+                on_progress(n_ok + n_fail, len(tasks))
             return
         data = t.get("data") or {}
         hz = data.get("sample_rate_hz") or hz_of_run.get(rd.split("__job")[0]) or config.DEVICE_HZ
@@ -236,11 +240,15 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
             except Exception as e:  # noqa: BLE001 一个文件挂了别拖垮整轮
                 n_fail += 1
                 errors.append(f"任务 #{t.get('id')}：{type(e).__name__}: {str(e)[:120]}")
+                if on_progress:
+                    on_progress(n_ok + n_fail, len(tasks))
                 return
         rows, prs = _review_task(t, res, table, window_s, stride_s, event_labels, _day_of(t, rd.split("__job")[0]))
         all_rows.extend(rows)
         pairs.extend(prs)
         n_ok += 1
+        if on_progress:
+            on_progress(n_ok + n_fail, len(tasks))
 
     await asyncio.gather(*(one(rd, t) for rd, t in tasks))
 
