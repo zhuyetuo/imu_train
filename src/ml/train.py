@@ -396,6 +396,34 @@ def main(args):
                       f"{f'  ⚠️ 明显低于合成样本，说明模型对真实{syn_label}泛化不够' if tag == '真实样本' and recall < 0.7 else ''}")
     print(classification_report(y_eval, y_pred, labels=present_labels, target_names=present_names,
                                 zero_division=0))
+    # 指标注释 + 混淆矩阵 + 容易混的两类单独看分不分得开（见 diagnose.py）。
+    # 诊断出错不影响训练结果本身
+    diag = {}
+    try:
+        import diagnose
+        print(diagnose.LEGEND)
+        cm_text, cm_info = diagnose.confusion(y_eval, y_pred, present_labels, present_names)
+        print(cm_text)
+        diag["confusion"] = cm_info
+        try:
+            from features import feature_names as _fnames
+            _fn = _fnames(int(meta.get("n_channels", 8)))
+            if len(_fn) != X_tr_f.shape[1]:
+                _fn = None
+        except Exception:  # noqa: BLE001
+            _fn = None
+        _cm = np.array(cm_info["matrix"])
+        _sep = []
+        for i, j in diagnose.confused_pairs(_cm, present_names):
+            _sep.append(diagnose.pair_separability(
+                X_tr_f, y_tr, X_eval_f, y_eval, present_labels[i], present_labels[j],
+                present_names[i], present_names[j], feat_names=_fn,
+                n_jobs=int(model_cfg.get("n_jobs") or 2) if (model_cfg.get("n_jobs") or 2) > 0 else 2))
+        if _sep:
+            print(diagnose.separability_text(_sep))
+            diag["separability"] = _sep
+    except Exception as e:  # noqa: BLE001
+        print(f"  （诊断没跑完：{type(e).__name__}: {e}）")
 
     window_size = int(meta.get("window_size", 0))
     stride      = int(meta.get("stride", 0))
@@ -471,6 +499,8 @@ def main(args):
                           if m in ("precision", "recall", "f1-score")}
                       for k in present_names},
         "balance": balance_info,
+        # 混淆矩阵 + 两两可分性（平台训练记录里画出来）
+        **diag,
     }
     with open(os.path.join(out_dir, f"ml_{args.model}.json"), "w") as f:
         json.dump(result, f, indent=2)
