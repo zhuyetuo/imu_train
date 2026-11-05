@@ -32,6 +32,24 @@ KIND_FALSE = "误识别"     # 模型报了事件类，人标的不是
 KIND_CONFUSE = "混淆"     # 两边都不是事件类，但类别不同（活动 ↔ 睡觉）
 KIND_UNLABELED = "未标注区报事件"   # 没人标的时间里模型连着报事件类
 
+# 每条对不上的段，猜一下是哪种情况（只是提示，最后还是人看）：
+HINT_MISLABEL = "疑似标错"     # 模型很有把握是另一类、几乎没给人标的那一类概率、窗口一边倒 → 先去看是不是标错了
+HINT_MIXED = "段里混了别的"    # 窗口投票很分散：这一段里可能有好几种动作，起止要调 / 要拆
+HINT_HARD = "难区分"           # 人标的那一类和模型判的那一类概率差不多：这一段本来就模棱两可
+HINT_LEAN = "模型偏向另一类"   # 以上都不是：模型偏另一类但不是很确定，多看几条同类的再判断
+
+
+def hint_of(conf: float, p_human: float | None, top_share: float) -> str:
+    """conf = 模型判的那一类的平均概率；p_human = 人标那一类的平均概率；top_share = 投给判的那一类的窗口占比"""
+    ph = p_human or 0.0
+    if conf >= 0.75 and ph <= 0.15 and top_share >= 0.8:
+        return HINT_MISLABEL
+    if top_share < 0.6:
+        return HINT_MIXED
+    if abs(conf - ph) < 0.25:
+        return HINT_HARD
+    return HINT_LEAN
+
 
 def _is_event(label: str, event_labels: list[str]) -> bool:
     return any(label == e or label.startswith(e + "-") for e in event_labels)
@@ -156,6 +174,7 @@ def _review_task(task: dict, result: dict, table: dict, window_s: float, stride_
             "seconds": round((end_ms - start_ms) / 1000, 1),
             "conf": round(p_pred, 3), "p_human": round(p_human, 3), "n_windows": len(idx),
             "votes": {k: v for k, v in votes.most_common(4)},
+            "hint": hint_of(p_pred, p_human, votes[top] / len(idx)),
         })
     # 没人标的时间里连着报事件类的
     run: list[int] = []
@@ -241,19 +260,25 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
                         "recall": round(tp / n_h, 4) if n_h else None,
                         "precision": round(tp / n_p, 4) if n_p else None}
     by_kind = Counter(r["kind"] for r in all_rows)
+    by_hint = Counter(r["hint"] for r in all_rows if r.get("hint"))
     order = {KIND_MISS: 0, KIND_FALSE: 1, KIND_UNLABELED: 2, KIND_CONFUSE: 3}
-    all_rows.sort(key=lambda r: (order.get(r["kind"], 9), -(r["conf"] or 0)))
+    # 「疑似标错」排最前：改掉它最值钱
+    h_order = {HINT_MISLABEL: 0, HINT_MIXED: 1, HINT_LEAN: 2, HINT_HARD: 3}
+    all_rows.sort(key=lambda r: (h_order.get(r.get("hint"), 4), order.get(r["kind"], 9), -(r["conf"] or 0)))
     out = {
         "model_tag": job.get("model_version"), "job_id": job.get("job_id"),
         "n_tasks": len(tasks), "n_tasks_ok": n_ok, "n_tasks_failed": n_fail,
         "n_segments": len(pairs), "n_wrong": sum(1 for r in all_rows if r["kind"] != KIND_UNLABELED),
-        "by_kind": dict(by_kind), "event_labels": event_labels,
+        "by_kind": dict(by_kind), "by_hint": dict(by_hint), "event_labels": event_labels,
         "confusion": {"classes": cls_order, "matrix": matrix}, "per_class": per_class,
         "rows": all_rows[:max_rows], "n_rows_total": len(all_rows),
         "errors": errors[:20],
         "note": ("按段比：一段里的窗口多数投票当预测类别。漏识别 = 人标了事件类模型没认；"
                  "误识别 = 模型报事件类人标的不是；混淆 = 别的类别之间互认；"
-                 "未标注区报事件 = 没人标的时间里模型连着报事件类，可能是误报也可能是漏标"),
+                 "未标注区报事件 = 没人标的时间里模型连着报事件类，可能是误报也可能是漏标。"
+                 "回放的是训练集本身：模型见过这些数据还判成别的，说明要么标错了、要么这类跟那类在现有特征下本来就分不开。"
+                 "提示：疑似标错 = 模型很有把握是另一类、几乎不给人标的那类概率；段里混了别的 = 窗口投票分散；"
+                 "难区分 = 两类概率差不多"),
     }
     return out
 

@@ -141,3 +141,36 @@ def test_run_dates_of():
     job = {"job_id": 3, "run_date": "a__job3", "dataset_spec": {"date": "a", "extra_datasets": [{"date": "b"}]}}
     assert jobs.run_dates_of(job) == ["a__job3", "b__job3"]
     assert jobs.run_dates_of({"job_id": 3, "dataset_spec": {"date": "a"}}) == ["a"]
+
+
+def test_对不上的段给提示():
+    """模型很有把握是另一类、几乎不给人标的那类概率 → 疑似标错；投票分散 → 段里混了别的；两类概率接近 → 难区分"""
+    from label_service import review
+    assert review.hint_of(0.9, 0.05, 0.95) == review.HINT_MISLABEL
+    assert review.hint_of(0.5, 0.2, 0.5) == review.HINT_MIXED
+    assert review.hint_of(0.48, 0.4, 0.7) == review.HINT_HARD
+    assert review.hint_of(0.7, 0.3, 0.75) == review.HINT_LEAN
+
+
+def test_诊断_混淆矩阵和两两可分性():
+    import sys, os
+    import numpy as np
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "ml"))
+    import diagnose
+    rng = np.random.default_rng(0)
+    X = np.vstack([rng.normal(0, 1, (800, 4)), rng.normal(0.15, 1, (800, 4)), rng.normal(5, 1, (800, 4))])
+    y = np.r_[np.zeros(800), np.ones(800), np.full(800, 2)].astype(int)
+    Xe = np.vstack([rng.normal(0, 1, (200, 4)), rng.normal(0.15, 1, (200, 4)), rng.normal(5, 1, (200, 4))])
+    ye = np.r_[np.zeros(200), np.ones(200), np.full(200, 2)].astype(int)
+    yp = ye.copy()
+    yp[:90] = 1
+    yp[200:280] = 0
+    _t, info = diagnose.confusion(ye, yp, [0, 1, 2], ["静止", "活动", "抓挠"])
+    assert info["matrix"][0][1] == 90 and info["top"][0]["human"] == "静止"
+    pairs = diagnose.confused_pairs(np.array(info["matrix"]), ["静止", "活动", "抓挠"])
+    assert pairs == [(0, 1)]
+    hard = diagnose.pair_separability(X, y, Xe, ye, 0, 1, "静止", "活动", n_jobs=1)
+    easy = diagnose.pair_separability(X, y, Xe, ye, 0, 2, "静止", "抓挠", n_jobs=1)
+    assert hard["auc"] < 0.7 and "分不开" in hard["verdict"]
+    assert easy["auc"] > 0.95 and "分得开" in easy["verdict"]
+    assert len(easy["top_features"]) > 0 and easy["top_features"][0]["higher"] == "抓挠"
