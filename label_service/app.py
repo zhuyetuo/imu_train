@@ -558,18 +558,47 @@ async def _run_and_register(job_id: int) -> None:
     await _review_trained(job_id)
 
 
+# 回放进度（进程内）：{任务号: {status: running/done/failed, done, total, started_at, finished_at, error}}。
+# 平台轮询它显示进度、跑着的时候不让再点。服务重启就没了——那时也确实没在跑
+REVIEW_PROGRESS: dict[int, dict] = {}
+
+
+def review_progress(job_id: int) -> dict:
+    return REVIEW_PROGRESS.get(job_id) or {"status": "idle"}
+
+
 async def _review_trained(job_id: int) -> None:
     """训练完回放：用这一版把训练集再预测一遍，错例写进训练记录（见 review.py）。
     失败只记日志，不动训练记录的状态——模型已经训好了，回放只是附加的检查。"""
     job = jobs.get_job(job_id)
     if not job or job.get("status") != jobs.STATUS_DONE:
         return
+    if review_progress(job_id).get("status") == "running":
+        return
+    prog = REVIEW_PROGRESS[job_id] = {"status": "running", "done": 0, "total": None,
+                                      "started_at": time.time(), "finished_at": None, "error": None}
+
+    def on_progress(done: int, total: int) -> None:
+        prog["done"], prog["total"] = done, total
+    try:
+        await _review_trained_inner(job_id, job, on_progress)
+        if prog["status"] == "running":
+            prog["status"] = "done"
+    except Exception as e:  # noqa: BLE001
+        prog["status"], prog["error"] = "failed", f"{type(e).__name__}: {e}"
+    finally:
+        prog["finished_at"] = time.time()
+
+
+async def _review_trained_inner(job_id: int, job: dict, on_progress) -> None:
+    prog = REVIEW_PROGRESS[job_id]
     from label_service import review as review_mod
     tag = jobs.model_tag(job_id)
     try:
         b, px = registry.get(tag)
     except Exception as e:  # noqa: BLE001
         log.warning("训练任务 #%d 回放跳过：模型加载失败 %s", job_id, e)
+        prog["status"], prog["error"] = "failed", f"模型加载失败：{e}"
         return
     t0 = time.time()
     with open(jobs._log_path(job_id), "a", encoding="utf-8") as f:
@@ -578,7 +607,8 @@ async def _review_trained(job_id: int) -> None:
         async def infer(full_path: str, hz: float) -> dict:
             return await _infer_in_pool(full_path, "raw", infer_queue.PRIORITY_BATCH, hz, bundle=b, pool_obj=px)
 
-        full = await review_mod.run(job, jobs.run_dates_of(job), infer, b["window_s"], b["stride_s"], b["classes"])
+        full = await review_mod.run(job, jobs.run_dates_of(job), infer, b["window_s"], b["stride_s"], b["classes"],
+                                    on_progress=on_progress)
         with open(review_mod.review_path(job_id), "w", encoding="utf-8") as f:
             json.dump(full, f, ensure_ascii=False)
         job = jobs.get_job(job_id) or job
@@ -591,6 +621,7 @@ async def _review_trained(job_id: int) -> None:
                  full["n_segments"], full["n_wrong"])
     except Exception as e:  # noqa: BLE001
         log.exception("训练任务 #%d 回放失败", job_id)
+        prog["status"], prog["error"] = "failed", f"{type(e).__name__}: {e}"
         with open(jobs._log_path(job_id), "a", encoding="utf-8") as f:
             f.write(f"  回放失败：{type(e).__name__}: {e}\n")
 
@@ -662,8 +693,19 @@ async def rerun_train_review(job_id: int):
         raise HTTPException(404, f"训练任务 #{job_id} 不存在")
     if job.get("status") != jobs.STATUS_DONE:
         raise HTTPException(409, "训练还没完成")
+    if review_progress(job_id).get("status") == "running":
+        raise HTTPException(409, "回放正在跑，等它跑完")
+    # 先标成在跑，免得两次请求挨得很近时都启动了（create_task 里的协程还没开始执行）
+    REVIEW_PROGRESS[job_id] = {"status": "starting", "done": 0, "total": None,
+                               "started_at": time.time(), "finished_at": None, "error": None}
     asyncio.create_task(_review_trained(job_id))
     return {"ok": True}
+
+
+@app.get("/api/v1/label/train/{job_id}/review/status")
+async def train_review_status(job_id: int):
+    """回放进度：idle / starting / running（done / total 个任务）/ done / failed"""
+    return review_progress(job_id)
 
 
 @app.get("/api/v1/label/train/{job_id}/log")
