@@ -281,3 +281,6 @@ vision_service/.env
 vision_service/index/
 # 视觉模型权重（SigLIP 等，get_weights.sh 下的，几百 MB）
 models/vision/
+
+# label_service 按训练任务生成的模型超参（界面上填的）
+configs/ml_job*.yaml

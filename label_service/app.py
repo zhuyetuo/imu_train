@@ -498,6 +498,10 @@ class DatasetSpec(BaseModel):
                                      "端侧只有加速度计时用 3，否则模型学的是板上没有的信号")
     extra_datasets: list[ExtraDataset] = Field(default_factory=list,
         description="一起训练的其它数据集。跟主数据集走同一条整理流程，然后按 --extra_date DATE:HZ 合并")
+    # 以前没列在这里：平台传过来的「短促动作补齐」被 pydantic 悄悄丢掉，一直没生效
+    short_labels: list[str] = Field(default_factory=list, description="短促动作补齐的类别（比窗口短的片段带上前后上下文补成完整窗口）")
+    label_mode: str | None = Field(None, description="窗口怎么打标签：majority（默认，多数投票）/ center（窗口中心那一刻）")
+    model_params: dict | None = Field(None, description="模型超参覆盖：n_estimators / max_depth / min_samples_leaf / max_features")
     label_remap: dict[str, str] = Field(default_factory=dict,
         description="类别归并 {原名: 新名}，整理数据时改写。先按链的最后一级（细类）查，"
                     "查不到再按第一级（大类）。用来把太少的细类并进兄弟类别，"
