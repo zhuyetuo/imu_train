@@ -55,7 +55,8 @@ def _nominal_rate(rate: float) -> float:
 GYRO_COLS = (("gyro_x", "gyro_y", "gyro_z"), ("gyr_x", "gyr_y", "gyr_z"))
 
 
-def load_timeline(csv_path: str, hz: float, declared: float | None = None, axes: int = 3) -> dict | None:
+def load_timeline(csv_path: str, hz: float, declared: float | None = None, axes: int = 3,
+                  upsample: bool = False) -> dict | None:
     """一个 CSV → 目标采样率上的 3 轴加速度 + 无效点标记。源采样率比目标低的不往上插，返回 None"""
     import pandas as pd
     from resample_training_match import resample_training_match
@@ -85,7 +86,11 @@ def load_timeline(csv_path: str, hz: float, declared: float | None = None, axes:
     if src < hz <= src * 1.1:
         src = hz  # 15.9Hz 实测的老 16Hz 数据当 15.625 用，不算往上插
     if hz > src + 1e-6:
-        return None
+        if not upsample:
+            return None
+        # 往上插：线性插到目标采样率。注意插出来的数据在 src/2 以上没有任何信号（16Hz → 25Hz 的话
+        # 8~12.5Hz 那段是空的），跟真 25Hz 的数据不一样——要不要用，看实测
+        src = hz
     grid = np.arange(0, t[-1], 1 / src)
     xs = np.stack([np.interp(grid, t, acc[:, k]) for k in range(acc.shape[1])], 1)
     idx = np.searchsorted(t, grid)
@@ -153,10 +158,10 @@ def _parse_dt(s):
 
 
 def _build_one(args):
-    csv_path, segs, hz, axes = args
+    csv_path, segs, hz, axes, upsample = args
     if not os.path.isfile(csv_path):
         return csv_path, None, f"CSV 不存在：{csv_path}"
-    tl = load_timeline(csv_path, hz, segs[0].get("source_hz"), axes)
+    tl = load_timeline(csv_path, hz, segs[0].get("source_hz"), axes, upsample)
     if tl is None:
         return csv_path, None, None
     n = len(tl["x"])
@@ -308,7 +313,7 @@ def main(a):
         by_csv.setdefault(s["csv"], []).append(s)
     tls, skipped, missing = {}, 0, []
     with ProcessPoolExecutor(max_workers=max(1, int(a.workers))) as ex:
-        for i, (p, tl, err) in enumerate(ex.map(_build_one, [(p, ss, hz, axes) for p, ss in by_csv.items()], chunksize=4)):
+        for i, (p, tl, err) in enumerate(ex.map(_build_one, [(p, ss, hz, axes, bool(spec.get("upsample"))) for p, ss in by_csv.items()], chunksize=4)):
             if err:
                 missing.append(err)
             elif tl is None:

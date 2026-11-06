@@ -38,10 +38,12 @@ def test_平台勾新版流程_命令和输入都对():
         jobs.build_command({**d, "axes": 6}, "rf", None, 99911)
         assert json.load(open(_spec_file(99911), encoding="utf-8"))["axes"] == 6
         assert spec["datasets"][1]["export_json"] == os.path.join(cfg.NAS_ROOT, "data_train/old16/merged_tmp.json")
-        # 板上特征缓冲最多 64 点：25Hz × 4s = 100 点要截到 64
-        d2 = {**d, "hz": 25.0}
-        jobs.build_command(d2, "rf", None, 99911)
-        assert json.load(open(_spec_file(99911), encoding="utf-8"))["window"] == 64
+        # 窗口跟着采样率走：25Hz × 4s = 100 点（上限 128）；不填采样率默认 20Hz → 80 点
+        jobs.build_command({**d, "hz": 25.0}, "rf", None, 99911)
+        assert json.load(open(_spec_file(99911), encoding="utf-8"))["window"] == 100
+        jobs.build_command({**d, "hz": None}, "rf", None, 99911)
+        sp_ = json.load(open(_spec_file(99911), encoding="utf-8"))
+        assert sp_["hz"] == 20.0 and sp_["window"] == 80
         with pytest.raises(RuntimeError):
             jobs.build_command(d, "cnn", None, 99911)
     finally:
