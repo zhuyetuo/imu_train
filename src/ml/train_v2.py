@@ -390,6 +390,8 @@ def main(a):
         "fine_labels": fine, "train_classes": names, "class_scale": {c: float(s) for c, s in zip(classes, scale)},
         "rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}, "n_nodes": n_nodes,
         "cv": f"按（天, 项圈）分组 {folds} 折" if pred is not None else None,
+        # 主数据集（标注平台上点「用它训练」的那份，一般标得最干净）：列表上的各类 F1 默认看它
+        "main_dataset": spec["datasets"][0]["name"],
     }
     if pred is not None:
         present = sorted(set(y_ev))
@@ -426,9 +428,15 @@ def main(a):
                 t_, p_ = sy[sm], sp[sm]
                 seg_d["scratch_segments"] = {"recall": round(float((p_[t_ == k] == k).mean()), 3) if (t_ == k).any() else None,
                                              "precision": round(float((t_[p_ == k] == k).mean()), 3) if (p_ == k).any() else None}
+            _, cm_d = diag_confusion(y_ev[mk], pred[mk], list(range(len(classes))), classes)
             result["per_dataset"][d] = {"macro_f1": round(float(f1_score(y_ev[mk], pred[mk], labels=pr_, average="macro")), 4),
                                         "n": int(mk.sum()),
-                                        "f1": {classes[i]: round(rep_d[classes[i]]["f1-score"], 3) for i in pr_}, **seg_d}
+                                        "f1": {classes[i]: round(rep_d[classes[i]]["f1-score"], 3) for i in pr_},
+                                        "per_class": {classes[i]: {m: round(rep_d[classes[i]][m], 4) for m in ("precision", "recall", "f1-score")}
+                                                      for i in pr_},
+                                        # 交叉验证（没训练过的数据）的混淆矩阵，按窗口；诊断页能切数据集看
+                                        "confusion": {"labels": cm_d["labels"], "matrix": cm_d["matrix"]},
+                                        **seg_d}
         print("\n  ── 分数据集（老数据标得粗会拉低总分；看效果以标得最干净的那份为准）──")
         for d, r in result["per_dataset"].items():
             sc = r.get("scratch_segments") or {}

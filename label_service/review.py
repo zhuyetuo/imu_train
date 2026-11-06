@@ -220,6 +220,7 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
     sem = asyncio.Semaphore(concurrency)
     all_rows: list[dict] = []
     pairs: list[tuple[str, str]] = []
+    pair_ds: list[str] = []   # 每段属于哪份数据集（主 + 一起训练的），界面上能切着看
     n_ok = n_fail = 0
     errors: list[str] = []
 
@@ -243,9 +244,13 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
                 if on_progress:
                     on_progress(n_ok + n_fail, len(tasks))
                 return
-        rows, prs = _review_task(t, res, table, window_s, stride_s, event_labels, _day_of(t, rd.split("__job")[0]))
+        ds = rd.split("__job")[0]
+        rows, prs = _review_task(t, res, table, window_s, stride_s, event_labels, _day_of(t, ds))
+        for r in rows:
+            r["dataset"] = ds
         all_rows.extend(rows)
         pairs.extend(prs)
+        pair_ds.extend([ds] * len(prs))
         n_ok += 1
         if on_progress:
             on_progress(n_ok + n_fail, len(tasks))
@@ -256,8 +261,11 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
     cls_order = list(classes) + [c for c in sorted({a for a, _ in pairs} | {b for _, b in pairs}) if c not in classes]
     idx = {c: i for i, c in enumerate(cls_order)}
     matrix = [[0] * len(cls_order) for _ in cls_order]
-    for h, p in pairs:
+    by_ds: dict[str, list[list[int]]] = {}
+    for (h, p), ds in zip(pairs, pair_ds):
         matrix[idx[h]][idx[p]] += 1
+        m = by_ds.setdefault(ds, [[0] * len(cls_order) for _ in cls_order])
+        m[idx[h]][idx[p]] += 1
     per_class = {}
     for c in cls_order:
         i = idx[c]
@@ -279,6 +287,7 @@ async def run(job: dict, run_dates: list[str], infer, window_s: float, stride_s:
         "n_segments": len(pairs), "n_wrong": sum(1 for r in all_rows if r["kind"] != KIND_UNLABELED),
         "by_kind": dict(by_kind), "by_hint": dict(by_hint), "event_labels": event_labels,
         "confusion": {"classes": cls_order, "matrix": matrix}, "per_class": per_class,
+        "confusion_by_dataset": {ds: {"classes": cls_order, "matrix": m} for ds, m in sorted(by_ds.items())},
         "rows": all_rows[:max_rows], "n_rows_total": len(all_rows),
         "errors": errors[:20],
         "note": ("按段比：一段里的窗口多数投票当预测类别。漏识别 = 人标了事件类模型没认；"
