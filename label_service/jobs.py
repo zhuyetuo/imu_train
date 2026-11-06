@@ -391,8 +391,57 @@ def window_args(dataset_spec: dict) -> list[str]:
     return out
 
 
+# 新版训练流程（src/ml/train_v2.py）：窗口上限 64 点是板上特征缓冲的上限（core/tm_features.h TM_FEAT_MAX_T）
+V2_DEFAULT_HZ = 15.625
+V2_MAX_WINDOW = 64
+
+
+def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
+    """平台的 dataset_spec → train_v2.py 的输入。主数据集和一起训练的那几份都直接读 NAS 上的导出 JSON
+    （不读 prepare_export 改写过的那份：那份已经按归并表改过类别名，细分训练要的「进食 / 饮水」就没了）"""
+    hz = float(dataset_spec.get("hz") or V2_DEFAULT_HZ)
+    win_s = float(dataset_spec.get("window_s") or 4.0)
+    window = min(V2_MAX_WINDOW, max(8, int(round(win_s * hz))))
+    remap = dataset_spec.get("label_remap") or {}
+    classes = list(dict.fromkeys(remap.values())) or ["未佩戴", "静止/休息", "活动", "抓挠", "甩头/抖身"]
+    datasets = []
+    main_hz = dataset_spec.get("source_hz")
+    if dataset_spec.get("export_json"):
+        datasets.append({"name": dataset_spec["date"], "export_json": os.path.join(config.NAS_ROOT, dataset_spec["export_json"]),
+                         "source_hz": main_hz})
+    for x in dataset_spec.get("extra_datasets") or []:
+        if x.get("export_json"):
+            datasets.append({"name": x["date"], "export_json": os.path.join(config.NAS_ROOT, x["export_json"]),
+                             "source_hz": x.get("source_hz") or main_hz})
+    if not datasets:
+        raise RuntimeError("新版训练流程只认标注平台导出的数据集（要有 export_json）")
+    mp = dict(dataset_spec.get("model_params") or {})
+    if dataset_spec.get("edge_size"):
+        mp.setdefault("n_estimators", dataset_spec.get("edge_trees") or 20)
+        mp.setdefault("max_depth", dataset_spec.get("edge_depth") or 8)
+    run = re.sub(r"[^0-9A-Za-z_.-]", "_", f"{dataset_spec['date']}__job{job_id}" if job_id is not None else dataset_spec["date"])[:80]
+    return {
+        "hz": hz, "window": window, "stride_s": float(dataset_spec.get("stride_s") or 1.0),
+        "classes": classes, "label_remap": remap,
+        "fine_labels": dataset_spec.get("fine_labels"),
+        "class_scale": dataset_spec.get("class_scale") or {},
+        "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
+    }
+
+
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
+    if dataset_spec.get("pipeline") == "v2":
+        if model_type != "rf":
+            raise RuntimeError("新版训练流程目前只训随机森林（rf）")
+        spec = v2_spec(dataset_spec, job_id)
+        os.makedirs(os.path.join(config.REPO_ROOT, "tmp"), exist_ok=True)
+        rel = os.path.join("tmp", f"train_v2_job{job_id if job_id is not None else 'manual'}.json")
+        with open(os.path.join(config.REPO_ROOT, rel), "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False, indent=2)
+        import sys as _sys
+        n = train_n_jobs()
+        return [_sys.executable, "src/ml/train_v2.py", "--spec", rel, "--workers", str(min(4, n)), "--n_jobs", str(n)]
     cmd = ["bash", "train_custom.sh", "--date", run_date(dataset_spec["date"], job_id)]
     # 原始数据的采样率一定要传：不传的话 train_custom.sh 当它已经是 --hz，不降采样，
     # 训练和推理（推理按 DEVICE_HZ 降到 16Hz）就对不上了
@@ -593,7 +642,7 @@ async def run_job(job_id: int) -> None:
             stdout = f.read()
 
         if proc.returncode != 0:
-            raise RuntimeError(f"train_custom.sh 退出码 {proc.returncode}，详见日志 {_log_path(job_id)}，末尾:\n{stdout[-2000:]}")
+            raise RuntimeError(f"训练脚本退出码 {proc.returncode}，详见日志 {_log_path(job_id)}，末尾:\n{stdout[-2000:]}")
 
         model_path = parse_model_path(stdout)
         if not model_path:
