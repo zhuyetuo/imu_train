@@ -423,6 +423,8 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
     run = re.sub(r"[^0-9A-Za-z_.-]", "_", f"{dataset_spec['date']}__job{job_id}" if job_id is not None else dataset_spec["date"])[:80]
     return {
         "hz": hz, "window": window, "stride_s": float(dataset_spec.get("stride_s") or 1.0),
+        # 6 轴 = 加陀螺仪（方向无关的竖直/水平/模长各 3 个 → 8 个输入通道）；默认 3 轴（板子平时只开加速度计）
+        "axes": 6 if int(dataset_spec.get("axes") or 3) == 6 else 3,
         "classes": classes, "label_remap": remap,
         "fine_labels": dataset_spec.get("fine_labels"),
         "class_scale": dataset_spec.get("class_scale") or {},

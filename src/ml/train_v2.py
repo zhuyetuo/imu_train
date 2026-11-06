@@ -52,19 +52,29 @@ def _nominal_rate(rate: float) -> float:
     return round(rate, 3)
 
 
-def load_timeline(csv_path: str, hz: float, declared: float | None = None) -> dict | None:
+GYRO_COLS = (("gyro_x", "gyro_y", "gyro_z"), ("gyr_x", "gyr_y", "gyr_z"))
+
+
+def load_timeline(csv_path: str, hz: float, declared: float | None = None, axes: int = 3) -> dict | None:
     """一个 CSV → 目标采样率上的 3 轴加速度 + 无效点标记。源采样率比目标低的不往上插，返回 None"""
     import pandas as pd
     from resample_training_match import resample_training_match
 
-    d = pd.read_csv(csv_path, usecols=["timestamp", "acc_x", "acc_y", "acc_z"], encoding="utf-8-sig")
+    head = pd.read_csv(csv_path, nrows=0, encoding="utf-8-sig").columns
+    cols = ["acc_x", "acc_y", "acc_z"]
+    if axes == 6:
+        g = next((c for c in GYRO_COLS if all(x in head for x in c)), None)
+        if g is None:
+            return None  # 要 6 轴但这份没有陀螺仪
+        cols += list(g)
+    d = pd.read_csv(csv_path, usecols=["timestamp", *cols], encoding="utf-8-sig")
     d = d.dropna()
     if len(d) < 10:
         return None
     dt = pd.to_datetime(d.timestamp)
     t0 = dt.iloc[0]
     ts = (dt - t0).dt.total_seconds().to_numpy()
-    acc = d[["acc_x", "acc_y", "acc_z"]].to_numpy(np.float64)
+    acc = d[cols].to_numpy(np.float64)
     first = np.r_[True, np.diff(ts) > 0]
     ai = np.flatnonzero(first)
     at = ts[ai]
@@ -77,7 +87,7 @@ def load_timeline(csv_path: str, hz: float, declared: float | None = None) -> di
     if hz > src + 1e-6:
         return None
     grid = np.arange(0, t[-1], 1 / src)
-    xs = np.stack([np.interp(grid, t, acc[:, k]) for k in range(3)], 1)
+    xs = np.stack([np.interp(grid, t, acc[:, k]) for k in range(acc.shape[1])], 1)
     idx = np.searchsorted(t, grid)
     near = np.minimum(np.abs(t[np.clip(idx, 0, len(t) - 1)] - grid), np.abs(t[np.clip(idx - 1, 0, len(t) - 1)] - grid))
     bad_src = near > max(0.3, 3 / src)
@@ -143,10 +153,10 @@ def _parse_dt(s):
 
 
 def _build_one(args):
-    csv_path, segs, hz = args
+    csv_path, segs, hz, axes = args
     if not os.path.isfile(csv_path):
         return csv_path, None, f"CSV 不存在：{csv_path}"
-    tl = load_timeline(csv_path, hz, segs[0].get("source_hz"))
+    tl = load_timeline(csv_path, hz, segs[0].get("source_hz"), axes)
     if tl is None:
         return csv_path, None, None
     n = len(tl["x"])
@@ -253,6 +263,7 @@ def main(a):
     with open(a.spec, encoding="utf-8") as f:
         spec = json.load(f)
     hz = float(spec["hz"])
+    axes = 6 if int(spec.get("axes") or 3) == 6 else 3
     classes = list(spec["classes"])
     remap = spec.get("label_remap") or {}
     fine = [x for x in (spec.get("fine_labels") if spec.get("fine_labels") is not None else DEFAULT_FINE)]
@@ -270,7 +281,7 @@ def main(a):
     run = spec["run_name"]
     t0 = time.time()
     print("=" * 60)
-    print(f"  新版训练流程（v2）  采样率 {hz:g}Hz  窗口 {W} 点（{W / hz:.2f}s）  步长 {S} 点（{S / hz:.2f}s）")
+    print(f"  新版训练流程（v2）  {axes} 轴  采样率 {hz:g}Hz  窗口 {W} 点（{W / hz:.2f}s）  步长 {S} 点（{S / hz:.2f}s）")
     print(f"  类别：{classes}")
     print(f"  细分训练、合并输出：{fine or '不用'}")
     print(f"  输出校准：{ {c: s for c, s in zip(classes, scale) if s != 1} or '不用'}")
@@ -297,7 +308,7 @@ def main(a):
         by_csv.setdefault(s["csv"], []).append(s)
     tls, skipped, missing = {}, 0, []
     with ProcessPoolExecutor(max_workers=max(1, int(a.workers))) as ex:
-        for i, (p, tl, err) in enumerate(ex.map(_build_one, [(p, ss, hz) for p, ss in by_csv.items()], chunksize=4)):
+        for i, (p, tl, err) in enumerate(ex.map(_build_one, [(p, ss, hz, axes) for p, ss in by_csv.items()], chunksize=4)):
             if err:
                 missing.append(err)
             elif tl is None:
@@ -306,7 +317,7 @@ def main(a):
                 tls[p] = tl
             if (i + 1) % 50 == 0:
                 print(f"  读 CSV {i + 1}/{len(by_csv)}", flush=True)
-    print(f"▶ CSV {len(tls)} 个可用" + (f"，{skipped} 个采样率低于 {hz:g}Hz 跳过" if skipped else "")
+    print(f"▶ CSV {len(tls)} 个可用" + (f"，{skipped} 个跳过（采样率低于 {hz:g}Hz{'、或没有陀螺仪' if axes == 6 else ''}）" if skipped else "")
           + (f"，{len(missing)} 个找不到" if missing else ""), flush=True)
     for m in missing[:5]:
         print(f"  ⚠ {m}")
