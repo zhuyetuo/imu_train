@@ -502,6 +502,10 @@ class DatasetSpec(BaseModel):
     short_labels: list[str] = Field(default_factory=list, description="短促动作补齐的类别（比窗口短的片段带上前后上下文补成完整窗口）")
     label_mode: str | None = Field(None, description="窗口怎么打标签：majority（默认，多数投票）/ center（窗口中心那一刻）")
     model_params: dict | None = Field(None, description="模型超参覆盖：n_estimators / max_depth / min_samples_leaf / max_features")
+    # 新版训练流程（src/ml/train_v2.py）：按真实时间切窗口、细分训练合并输出、输出校准、分组交叉验证
+    pipeline: str | None = Field(None, description="v2 = 新版训练流程；不填走 train_custom.sh")
+    fine_labels: list[str] | None = Field(None, description="v2：训练时单独成类、输出时并回的细类（默认 进食 / 饮水 / 甩身体）")
+    class_scale: dict[str, float] | None = Field(None, description="v2：输出校准，各类概率乘的系数（如 抓挠 1.5）")
     label_remap: dict[str, str] = Field(default_factory=dict,
         description="类别归并 {原名: 新名}，整理数据时改写。先按链的最后一级（细类）查，"
                     "查不到再按第一级（大类）。用来把太少的细类并进兄弟类别，"
