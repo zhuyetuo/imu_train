@@ -401,16 +401,28 @@ def main(a):
             pr_ = sorted(set(y_ev[mk]))
             rep_d = classification_report(y_ev[mk], pred[mk], labels=pr_, target_names=[classes[i] for i in pr_],
                                           zero_division=0, output_dict=True)
+            # 片段级（按次数）也分数据集：皮肤评估看的是这个
+            sm = np.array([segs[x]["dataset"] == d for x in su])
+            seg_d = {"segment_macro_f1": round(float(f1_score(sy[sm], sp[sm], labels=sorted(set(sy[sm])), average="macro")), 4)}
+            if "抓挠" in classes:
+                k = classes.index("抓挠")
+                t_, p_ = sy[sm], sp[sm]
+                seg_d["scratch_segments"] = {"recall": round(float((p_[t_ == k] == k).mean()), 3) if (t_ == k).any() else None,
+                                             "precision": round(float((t_[p_ == k] == k).mean()), 3) if (p_ == k).any() else None}
             result["per_dataset"][d] = {"macro_f1": round(float(f1_score(y_ev[mk], pred[mk], labels=pr_, average="macro")), 4),
                                         "n": int(mk.sum()),
-                                        "f1": {classes[i]: round(rep_d[classes[i]]["f1-score"], 3) for i in pr_}}
-        print("\n  ── 分数据集（各自的类别 F1）──")
+                                        "f1": {classes[i]: round(rep_d[classes[i]]["f1-score"], 3) for i in pr_}, **seg_d}
+        print("\n  ── 分数据集（老数据标得粗会拉低总分；看效果以标得最干净的那份为准）──")
         for d, r in result["per_dataset"].items():
-            print(f"  {d:<28} macro {r['macro_f1']:.3f}  {r['n']:>7} 窗  " + "  ".join(f"{k} {v:.2f}" for k, v in r["f1"].items()))
+            sc = r.get("scratch_segments") or {}
+            print(f"  {d:<28} 窗口 macro {r['macro_f1']:.3f}  按片段 macro {r['segment_macro_f1']:.3f}"
+                  + (f"  抓挠按次数 查全 {sc['recall']} 查准 {sc['precision']}" if sc.get("recall") is not None else "")
+                  + f"  {r['n']:>7} 窗")
+            print("      " + "  ".join(f"{k} {v:.2f}" for k, v in r["f1"].items()))
         print("\n" + classification_report(y_ev, pred, labels=present, target_names=[classes[i] for i in present],
                                            zero_division=0, digits=3))
         print(text)
-        print(f"  片段级 macro F1 {result['segment_macro_f1']}" +
+        print(f"  （以上是全部数据集合在一起）片段级 macro F1 {result['segment_macro_f1']}" +
               (f"；抓挠按段 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
                if "scratch_segments" in result else ""))
     with open(os.path.join(out_dir, "ml_rf.json"), "w", encoding="utf-8") as f:
