@@ -23,7 +23,7 @@ def test_平台勾新版流程_命令和输入都对():
     d = DatasetSpec(date="pool_x", export_json="data_train/pool_x/merged_tmp.json", source_hz=50, hz=15.625,
                     extra_datasets=[{"date": "old16", "export_json": "data_train/old16/merged_tmp.json", "source_hz": 16}],
                     label_remap={"进食": "活动", "抓挠-躯干": "抓挠", "活动": "活动", "抓挠": "抓挠"},
-                    pipeline="v2", fine_labels=["进食"], class_scale={"抓挠": 1.5},
+                    pipeline="v2", fine_labels=["进食"], class_scale={"抓挠": 1.5}, axes=3,
                     edge_size=True, edge_trees=20, edge_depth=8).model_dump()
     try:
         cmd = jobs.build_command(d, "rf", None, 99911)
