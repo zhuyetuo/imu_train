@@ -392,8 +392,11 @@ def window_args(dataset_spec: dict) -> list[str]:
 
 
 # 新版训练流程（src/ml/train_v2.py）：窗口上限 64 点是板上特征缓冲的上限（core/tm_features.h TM_FEAT_MAX_T）
-V2_DEFAULT_HZ = 15.625
-V2_MAX_WINDOW = 64
+# 默认 20Hz：#27 的数据上 15.625 / 16 / 20 / 25Hz（都配 4 秒窗口）差别在误差内，20Hz 抓挠按次数最好、
+# 留得住 10Hz 以内的动作节奏，点数也不多；16Hz 的老批次不往上插（插上去实测每次都变差），会被跳过。
+# 窗口上限 128 点：模型跟着服务端重采样走。要导到板上，板上特征缓冲（TM_FEAT_MAX_T，现在 64）得 ≥ 窗口点数
+V2_DEFAULT_HZ = 20.0
+V2_MAX_WINDOW = 128
 
 
 def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
