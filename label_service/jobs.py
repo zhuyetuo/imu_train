@@ -401,7 +401,7 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
     （不读 prepare_export 改写过的那份：那份已经按归并表改过类别名，细分训练要的「进食 / 饮水」就没了）"""
     hz = float(dataset_spec.get("hz") or V2_DEFAULT_HZ)
     win_s = float(dataset_spec.get("window_s") or 4.0)
-    window = min(V2_MAX_WINDOW, max(8, int(round(win_s * hz))))
+    window = min(V2_MAX_WINDOW, max(8, int(math.floor(win_s * hz + 1e-9))))  # 4s × 15.625Hz = 62.5 → 62（跟实验、平台显示一致）
     remap = dataset_spec.get("label_remap") or {}
     classes = list(dict.fromkeys(remap.values())) or ["未佩戴", "静止/休息", "活动", "抓挠", "甩头/抖身"]
     datasets = []
