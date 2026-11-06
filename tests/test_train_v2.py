@@ -34,6 +34,9 @@ def test_平台勾新版流程_命令和输入都对():
         assert spec["class_scale"] == {"抓挠": 1.5}
         assert spec["model_params"] == {"n_estimators": 20, "max_depth": 8}
         assert [x["source_hz"] for x in spec["datasets"]] == [50, 16]
+        assert spec["axes"] == 3
+        jobs.build_command({**d, "axes": 6}, "rf", None, 99911)
+        assert json.load(open(_spec_file(99911), encoding="utf-8"))["axes"] == 6
         assert spec["datasets"][1]["export_json"] == os.path.join(cfg.NAS_ROOT, "data_train/old16/merged_tmp.json")
         # 板上特征缓冲最多 64 点：25Hz × 4s = 100 点要截到 64
         d2 = {**d, "hz": 25.0}
@@ -123,6 +126,14 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
     assert meta["classes"] == spec["classes"] and meta["window_size"] == 62 and meta["n_channels"] == 5
     assert meta["train_classes"] == ["静止/休息", "活动", "抓挠", "进食"]
     assert meta["macro_f1"] > 0.8                      # 三种信号差别很大，分不开说明流程有问题
+    # 6 轴：同一份数据加陀螺仪，输入 8 个通道
+    spec6 = {**spec, "axes": 6, "run_name": "v2pytest6"}
+    sp.write_text(json.dumps(spec6, ensure_ascii=False), encoding="utf-8")
+    r6 = subprocess.run([sys.executable, os.path.join(ROOT, "src", "ml", "train_v2.py"), "--spec", str(sp),
+                         "--repo", str(tmp_path), "--workers", "1", "--n_jobs", "1"], capture_output=True, text=True, timeout=600)
+    assert r6.returncode == 0, r6.stdout[-2000:] + r6.stderr[-2000:]
+    m6 = json.load(open(tmp_path / "results/processed_v2pytest6/15.625hz_v2/rf/ml_rf.json", encoding="utf-8"))
+    assert m6["n_channels"] == 8
     import joblib
     m = joblib.load(model_path)
     assert list(m.classes_) == [0, 1, 2]
