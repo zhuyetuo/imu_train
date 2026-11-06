@@ -470,6 +470,9 @@ class ExtraDataset(BaseModel):
     date: str = Field(..., description="数据集名，会成为 data/raw_custom/<date>/")
     export_json: str = Field(..., description="NAS_ROOT 下的相对路径")
     source_hz: float | None = Field(None, description="这一批自己真实的采样率；不传跟主批次一样")
+    # 新版流程：这份数据里不用的类别（归并后的名字）。老数据标得粗的那几类（比如抓挠间隙被标成「活动」）
+    # 可以不要，只拿它标得准的那几类
+    exclude_classes: list[str] = Field(default_factory=list, description="新版流程：这份数据集里不进训练的类别（归并后的名字）")
 
 
 class DatasetSpec(BaseModel):

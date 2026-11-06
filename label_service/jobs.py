@@ -412,7 +412,8 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
     for x in dataset_spec.get("extra_datasets") or []:
         if x.get("export_json"):
             datasets.append({"name": x["date"], "export_json": os.path.join(config.NAS_ROOT, x["export_json"]),
-                             "source_hz": x.get("source_hz") or main_hz})
+                             "source_hz": x.get("source_hz") or main_hz,
+                             "exclude_classes": list(x.get("exclude_classes") or [])})
     if not datasets:
         raise RuntimeError("新版训练流程只认标注平台导出的数据集（要有 export_json）")
     mp = dict(dataset_spec.get("model_params") or {})
@@ -427,6 +428,15 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
         "class_scale": dataset_spec.get("class_scale") or {},
         "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
     }
+
+
+def v2_stats_geom(dataset_spec: dict) -> tuple:
+    """训练集统计按哪套窗口算：新版流程用它自己的窗口（默认 62 点 ≈ 4 秒），老流程照旧（None = 按配置）"""
+    if dataset_spec.get("pipeline") != "v2":
+        return (None, None)
+    hz = float(dataset_spec.get("hz") or V2_DEFAULT_HZ)
+    win = min(V2_MAX_WINDOW, max(8, int(math.floor(float(dataset_spec.get("window_s") or 4.0) * hz + 1e-9))))
+    return (win / hz, float(dataset_spec.get("stride_s") or 1.0))
 
 
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
@@ -604,7 +614,8 @@ async def run_job(job_id: int) -> None:
         # 训练集统计：这次到底喂了什么。先于训练写进 metrics，训练中就能看
         try:
             from label_service import dataset_stats
-            stats = await asyncio.to_thread(dataset_stats.compute, job["dataset_spec"], run_dates_of(job))
+            stats = await asyncio.to_thread(dataset_stats.compute, job["dataset_spec"], run_dates_of(job),
+                                            *v2_stats_geom(job["dataset_spec"]))
             job["metrics"] = {**(job.get("metrics") or {}), "dataset": stats}
             _save(job)
             with open(_log_path(job_id), "a", encoding="utf-8") as f:

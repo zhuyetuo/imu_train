@@ -121,7 +121,7 @@ def collect_segments(datasets: list[dict], nas_root: str, remap: dict, classes: 
                     if not chain:
                         continue
                     coarse = coarse_of(chain, remap, classes)
-                    if coarse is None:
+                    if coarse is None or coarse in (ds.get("exclude_classes") or []):
                         continue
                     leaf = chain[-1]
                     train_name = next((c for c in reversed(chain) if c in fine), None) or coarse

@@ -77,6 +77,9 @@ def compute(dataset_spec: dict, run_dates: list[str], window_s: float | None = N
     window_s = window_s or w_s
     stride_s = stride_s or s_s
     table = _remap_table(dataset_spec)
+    # 新版流程（train_v2）：比窗口短的片段以中心补齐，一段至少一个窗口；一起训练的数据集可以不用某几类
+    v2 = dataset_spec.get("pipeline") == "v2"
+    excl = {x.get("date"): set(x.get("exclude_classes") or []) for x in dataset_spec.get("extra_datasets") or []}
 
     per: dict[str, dict] = defaultdict(lambda: {"segments": 0, "seconds": 0.0, "windows": 0, "short": 0,
                                                 "tasks": set(), "days": set()})
@@ -109,10 +112,14 @@ def compute(dataset_spec: dict, run_dates: list[str], window_s: float | None = N
                         dropped[raw]["segments"] += 1
                         dropped[raw]["seconds"] += sec
                         continue
+                    if v2 and cls in excl.get(fallback, ()):
+                        dropped[f"{cls}（{fallback} 里不用）"]["segments"] += 1
+                        dropped[f"{cls}（{fallback} 里不用）"]["seconds"] += sec
+                        continue
                     d = per[cls]
                     d["segments"] += 1
                     d["seconds"] += sec
-                    d["windows"] += int((sec - window_s) // stride_s) + 1 if sec >= window_s else 0
+                    d["windows"] += (int((sec - window_s) // stride_s) + 1 if sec >= window_s else (1 if v2 else 0))
                     if sec < window_s:
                         d["short"] += 1
                     d["tasks"].add(t.get("id"))
@@ -140,10 +147,11 @@ def compute(dataset_spec: dict, run_dates: list[str], window_s: float | None = N
                              f"少的类别容易被当噪声，先确认标注没漏，再考虑「类别均衡」把多的砍一砍")
             if r["n_days"] <= 2 and len(days_all) > 3:
                 hints.append(f"「{r['label']}」只来自 {r['n_days']} 个采集日（整份数据有 {len(days_all)} 天）：模型学的可能是那几天的狗和环境，换一只狗就不认")
-            if r["segments"] and r["short_segments"] / r["segments"] > 0.3:
+            if not v2 and r["segments"] and r["short_segments"] / r["segments"] > 0.3:
                 hints.append(f"「{r['label']}」{r['short_segments']}/{r['segments']} 段比一个窗口（{window_s:g} 秒）还短，进不了训练：要么是手滑点出来的碎段，要么该把窗口调小")
-    if dropped:
-        names = "、".join(f"{k}（{v['segments']} 段）" for k, v in sorted(dropped.items(), key=lambda kv: -kv[1]['segments'])[:6])
+    not_in_table = {k: v for k, v in dropped.items() if "里不用）" not in k}
+    if not_in_table:
+        names = "、".join(f"{k}（{v['segments']} 段）" for k, v in sorted(not_in_table.items(), key=lambda kv: -kv[1]['segments'])[:6])
         hints.append(f"归并表里没有、被丢掉的类别：{names}。想用就在提交训练时把它们归并进某一类")
     return {
         "window_s": window_s, "stride_s": stride_s,

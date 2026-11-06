@@ -133,3 +133,57 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
     # 端侧导出要的留出集
     d = np.load(tmp_path / "data/processed_v2pytest/15.625hz/val.npz")
     assert d["X"].shape[1:] == (62, 5) and set(np.unique(d["y"])) <= {0, 1, 2}
+
+
+def test_一起训练的数据集可以不用某几类(tmp_path):
+    from train_v2 import collect_segments
+
+    tasks = [{"id": 1, "data": {"csv": "a.csv", "sample_code": "x_imu1"},
+              "annotations": [{"result": [{"value": {"start_ms": 0, "end_ms": 5000, "timeserieslabels": ["活动"]}},
+                                          {"value": {"start_ms": 5000, "end_ms": 9000, "timeserieslabels": ["抓挠"]}}]}]}]
+    p = tmp_path / "e.json"
+    p.write_text(json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+    remap = {"活动": "活动", "抓挠": "抓挠"}
+    cls = ["活动", "抓挠"]
+    all_ = collect_segments([{"name": "old", "export_json": str(p)}], str(tmp_path), remap, cls, [])
+    only = collect_segments([{"name": "old", "export_json": str(p), "exclude_classes": ["活动"]}], str(tmp_path), remap, cls, [])
+    assert [s["coarse"] for s in all_] == ["活动", "抓挠"] and [s["coarse"] for s in only] == ["抓挠"]
+
+
+def test_平台把不用的类别传到训练():
+    from label_service.app import DatasetSpec
+
+    d = DatasetSpec(date="pool", export_json="a.json", pipeline="v2", label_remap={"活动": "活动", "抓挠": "抓挠"},
+                    extra_datasets=[{"date": "old", "export_json": "b.json", "source_hz": 50, "exclude_classes": ["活动"]}]).model_dump()
+    try:
+        jobs.build_command(d, "rf", None, 99912)
+        spec = json.load(open(_spec_file(99912), encoding="utf-8"))
+        assert spec["datasets"][0].get("exclude_classes") is None and spec["datasets"][1]["exclude_classes"] == ["活动"]
+    finally:
+        if os.path.exists(_spec_file(99912)):
+            os.remove(_spec_file(99912))
+
+
+def test_新版流程的训练集统计_按它自己的窗口_短片段不算进不了(tmp_path, monkeypatch):
+    from label_service import config as cfg, dataset_stats
+
+    monkeypatch.setattr(cfg, "REPO_ROOT", str(tmp_path))
+    d = tmp_path / "data" / "raw_custom" / "old__job7"
+    d.mkdir(parents=True)
+
+    def seg(a, b, lab):
+        return {"value": {"start": f"2026-10-30 10:00:{a:02d}.000", "end": f"2026-10-30 10:00:{b:02d}.000", "timeserieslabels": [lab]}}
+    tasks = [{"id": 1, "data": {"csv": "x_20261030.csv"},
+              "annotations": [{"result": [seg(0, 1, "甩头/抖身"), seg(2, 3, "甩头/抖身"), seg(10, 40, "活动")]}]}]
+    (d / "merged_tmp.json").write_text(json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+    spec = {"date": "pool", "pipeline": "v2", "hz": 15.625, "label_remap": {"甩头/抖身": "甩头/抖身", "活动": "活动"},
+            "extra_datasets": [{"date": "old", "exclude_classes": ["活动"]}]}
+    st = dataset_stats.compute(spec, ["old__job7"], *jobs.v2_stats_geom(spec))
+    assert abs(st["window_s"] - 62 / 15.625) < 1e-9
+    rows = {r["label"]: r for r in st["rows"]}
+    assert rows["甩头/抖身"]["windows"] == 2 and "活动" not in rows
+    assert not any("进不了训练" in h or "切不出来" in h for h in st["hints"])
+    assert not any("归并表里没有" in h for h in st["hints"])
+    # 老流程还是按 2 秒窗口说「切不出来」
+    old = dataset_stats.compute({**spec, "pipeline": None}, ["old__job7"])
+    assert any("切不出来" in h or "进不了训练" in h for h in old["hints"])
