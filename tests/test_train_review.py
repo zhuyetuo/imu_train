@@ -112,6 +112,9 @@ def test_review_finds_miss_false_confuse_and_unlabeled(repo):
     i = m["classes"].index("抓挠")
     assert sum(m["matrix"][i]) == 2          # 两段抓挠
     assert out["per_class"]["睡觉"]["recall"] == 1.0
+    # 每段带上数据集名，按数据集各一份混淆矩阵，加起来等于总的
+    assert all(r["dataset"] == "ds" for r in out["rows"])
+    assert out["confusion_by_dataset"]["ds"]["matrix"] == m["matrix"]
     # 漏识别排最前
     assert out["rows"][0]["kind"] == review.KIND_MISS
     s = review.summary(out, keep_rows=1)

@@ -128,6 +128,10 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
     assert meta["classes"] == spec["classes"] and meta["window_size"] == 62 and meta["n_channels"] == 5
     assert meta["train_classes"] == ["静止/休息", "活动", "抓挠", "进食"]
     assert meta["macro_f1"] > 0.8                      # 三种信号差别很大，分不开说明流程有问题
+    assert meta["main_dataset"] == "fake"
+    pdm = meta["per_dataset"]["fake"]
+    assert pdm["confusion"]["labels"] == spec["classes"] and len(pdm["confusion"]["matrix"]) == 3
+    assert set(pdm["per_class"]) <= set(spec["classes"])
     # 6 轴：同一份数据加陀螺仪，输入 8 个通道
     spec6 = {**spec, "axes": 6, "run_name": "v2pytest6"}
     sp.write_text(json.dumps(spec6, ensure_ascii=False), encoding="utf-8")
