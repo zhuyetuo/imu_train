@@ -223,6 +223,27 @@ def privacy_mask_submit(body: PrivacyMaskIn):
         raise HTTPException(422, str(e)) from e
 
 
+class PrivacyMaskCancelIn(BaseModel):
+    paths: list[str] | None = Field(None, max_length=5000, description="不给 = 全停")
+
+
+@app.post("/api/v1/privacy_mask/pause")
+def privacy_mask_pause():
+    """暂停：正在做的停在原地，排队的不开工（整个遮罩队列）"""
+    return privacy_mask.pause()
+
+
+@app.post("/api/v1/privacy_mask/resume")
+def privacy_mask_resume():
+    return privacy_mask.resume()
+
+
+@app.post("/api/v1/privacy_mask/cancel")
+def privacy_mask_cancel(body: PrivacyMaskCancelIn):
+    """停止：排队的拿掉、正在做的中断（半成品删掉）。已经做好的不动"""
+    return privacy_mask.cancel(body.paths)
+
+
 @app.post("/api/v1/privacy_mask/state")
 def privacy_mask_state(body: PrivacyMaskStatusIn):
     """每个视频的遮罩状态：done / queued / running / failed / none"""
