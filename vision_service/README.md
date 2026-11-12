@@ -607,3 +607,14 @@ python -m vision_service.posepart --part 后爪 --near-max 0.4 --min-motion 0.06
 （动作量 = 相邻两秒向量距离，门槛 `SEEK_INDEX_MOTION_MIN`，默认 0.06），预览秒出；
 真跑时只把选中的窗那几秒用 ffmpeg 定位抽出来、按索引里的框裁狗再送模型。
 所以顺序是：先「建画面索引」，再「画面找片段」。
+
+## 隐私遮罩（privacy_mask.py）
+
+给标注员看的「狗框以外全黑」的视频，平台项目上一键生成、可开可关。
+
+- `POST /api/v1/privacy_mask/submit {paths, pad=0.3, hold_s=3, merge_s=0.5, every_sec=0.25}`：排队（后台一次一个）
+- `POST /api/v1/privacy_mask/state {paths}`：每个视频 done / queued / running / failed / none
+- 输出：`VIDEO_ROOT/_privacy_mask/<原相对路径>` + 同名 `.json` 说明（参数、各类帧占比）
+- 每帧沿用原视频的 PTS（VFR 也一帧不挪），编完核对帧数、首末帧时间，对不上不交付；不带音轨
+- 漏检：沿用上一次的框最多 3 秒，再找不到整帧全黑
+- 依赖 `av`（requirements 里有，wheel 自带 ffmpeg/libx264）；有卡先用 NVENC
