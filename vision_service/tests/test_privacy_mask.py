@@ -133,3 +133,92 @@ def test_对不上就不交付(monkeypatch, tmp_path):
         pm.process("b.mp4", P, detector=lambda s, p, progress=None: [(0.0, [])])
     assert not os.path.exists(tmp_path / pm.MASK_DIR / "b.mp4")
     assert pm.read_info("b.mp4") is None
+
+
+def test_队列_多路同时做_插队的先做(monkeypatch, tmp_path):
+    import threading
+    import time as _t
+
+    monkeypatch.setattr(config, "VIDEO_ROOT", str(tmp_path))
+    for n in "abcd":
+        (tmp_path / f"{n}.mp4").write_bytes(b"x")
+    monkeypatch.setattr(pm, "WORKERS", 2)
+    gate = threading.Event()
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def fake_process(rel, p, progress=None, detector=None, check=None):
+        with lock:
+            started.append(rel)
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setattr(pm, "process", fake_process)
+    import queue as _queue
+
+    # 每个测试一条新队列、一批新 worker（上一个测试留下的 worker 卡在旧队列上，不来抢）
+    monkeypatch.setattr(pm, "_q", _queue.PriorityQueue())
+    monkeypatch.setattr(pm, "_workers", [])
+    pm._state.clear()
+    pm.submit(["a.mp4", "b.mp4", "c.mp4"], P)
+    for _ in range(100):
+        if len(started) >= 2:
+            break
+        _t.sleep(0.02)
+    assert sorted(started) == ["a.mp4", "b.mp4"], "两路同时开工"
+    # c 还在排队：d 插队，空出位置时先做 d
+    pm.submit(["d.mp4"], P, front=True)
+    gate.set()
+    for _ in range(100):
+        if len(started) >= 4:
+            break
+        _t.sleep(0.02)
+    assert started[2] == "d.mp4" and started[3] == "c.mp4"
+
+
+def test_暂停_继续_停止(monkeypatch, tmp_path):
+    import threading
+    import time as _t
+
+    monkeypatch.setattr(config, "VIDEO_ROOT", str(tmp_path))
+    for n in "abc":
+        (tmp_path / f"{n}.mp4").write_bytes(b"x")
+    monkeypatch.setattr(pm, "WORKERS", 1)
+    steps = {"a.mp4": 0}
+    started: list[str] = []
+
+    def fake_process(rel, p, progress=None, detector=None, check=None):
+        started.append(rel)
+        for _ in range(200):
+            check()
+            steps[rel] = steps.get(rel, 0) + 1
+            _t.sleep(0.01)
+        return {}
+
+    monkeypatch.setattr(pm, "process", fake_process)
+    import queue as _queue
+
+    # 每个测试一条新队列、一批新 worker（上一个测试留下的 worker 卡在旧队列上，不来抢）
+    monkeypatch.setattr(pm, "_q", _queue.PriorityQueue())
+    monkeypatch.setattr(pm, "_workers", [])
+    pm._state.clear()
+    pm.resume()
+    pm.submit(["a.mp4", "b.mp4", "c.mp4"], P)
+    _t.sleep(0.2)
+    pm.pause()
+    _t.sleep(0.6)
+    n = steps["a.mp4"]
+    _t.sleep(0.6)
+    assert steps["a.mp4"] == n, "暂停了还在跑"
+    assert pm.status(["a.mp4"])["a.mp4"]["state"] == "running"
+    # 停止：正在做的 a 中断、排队的 b 拿掉；c 留着
+    r = pm.cancel(["a.mp4", "b.mp4"])
+    assert r == {"removed": 1, "stopping": 1}
+    pm.resume()
+    for _ in range(200):
+        if "c.mp4" in started:
+            break
+        _t.sleep(0.02)
+    assert started[:2] == ["a.mp4", "c.mp4"], "b 停掉了不该再做"
+    assert pm.status(["a.mp4"])["a.mp4"]["state"] == "none"
+    pm.cancel()

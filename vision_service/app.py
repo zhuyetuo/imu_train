@@ -196,6 +196,7 @@ class PrivacyMaskIn(BaseModel):
     every_sec: float = Field(0.25, ge=0.1, le=5.0)
     conf: float = Field(0.2, ge=0.05, le=0.9)
     force: bool = False
+    front: bool = False        # 插到队列最前面（平台上「先试这个任务」）
 
 
 class PrivacyMaskStatusIn(BaseModel):
@@ -217,9 +218,30 @@ def privacy_mask_submit(body: PrivacyMaskIn):
     p = privacy_mask.MaskParams(pad=body.pad, hold_s=body.hold_s, merge_s=body.merge_s,
                                 every_sec=body.every_sec, conf=body.conf)
     try:
-        return privacy_mask.submit(body.paths, p, force=body.force)
+        return privacy_mask.submit(body.paths, p, force=body.force, front=body.front)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+
+
+class PrivacyMaskCancelIn(BaseModel):
+    paths: list[str] | None = Field(None, max_length=5000, description="不给 = 全停")
+
+
+@app.post("/api/v1/privacy_mask/pause")
+def privacy_mask_pause():
+    """暂停：正在做的停在原地，排队的不开工（整个遮罩队列）"""
+    return privacy_mask.pause()
+
+
+@app.post("/api/v1/privacy_mask/resume")
+def privacy_mask_resume():
+    return privacy_mask.resume()
+
+
+@app.post("/api/v1/privacy_mask/cancel")
+def privacy_mask_cancel(body: PrivacyMaskCancelIn):
+    """停止：排队的拿掉、正在做的中断（半成品删掉）。已经做好的不动"""
+    return privacy_mask.cancel(body.paths)
 
 
 @app.post("/api/v1/privacy_mask/state")

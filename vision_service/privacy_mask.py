@@ -59,6 +59,10 @@ _logger = logging.getLogger("vision_service.privacy_mask")
 MASK_DIR = os.environ.get("PRIVACY_MASK_DIR", "_privacy_mask").strip("/") or "_privacy_mask"
 #: 编码器："auto" 先试 NVENC（有卡快很多），开不起来退 libx264
 CODEC = os.environ.get("PRIVACY_MASK_CODEC", "auto")
+#: 同时做几个视频。一个视频的时间大半花在解码 / 涂黑 / 编码上（CPU + 显卡的编解码单元），
+#: 狗检测那一步几个视频轮流用 GPU（dog.py 里有锁）。5090 上 3 路 GPU 才用一半；消费卡 NVENC
+#: 同时编码路数有上限（现在的驱动一般 8 路），别开太大
+WORKERS = max(1, int(os.environ.get("PRIVACY_MASK_WORKERS", "3")))
 
 
 @dataclass
@@ -169,7 +173,7 @@ def read_info(rel_path: str) -> dict | None:
 # ── 两遍 ───────────────────────────────────────────────────────────────
 
 
-def detect_timeline(path: str, p: MaskParams, progress=None) -> list[tuple[float, list[list[float]]]]:
+def detect_timeline(path: str, p: MaskParams, progress=None, check=None) -> list[tuple[float, list[list[float]]]]:
     """第一遍：每 every_sec 秒一帧跑狗检测。ffmpeg 抽帧 + 一批批送 GPU，跟 scan_video 一个路数。"""
     from . import dog, seek
 
@@ -187,6 +191,8 @@ def detect_timeline(path: str, p: MaskParams, progress=None) -> list[tuple[float
             progress(out[-1][0])
 
     for t, frame in seek.iter_frames(path, p.every_sec):
+        if check:
+            check()
         pending.append((t, frame))
         if len(pending) >= config.DETECT_BATCH:
             flush()
@@ -200,7 +206,7 @@ class _EncoderFailed(Exception):
         self.name = name
 
 
-def render(src: str, dst_part: str, tl: Timeline, codec_pref: str = CODEC, progress=None) -> dict:
+def render(src: str, dst_part: str, tl: Timeline, codec_pref: str = CODEC, progress=None, check=None) -> dict:
     """第二遍：逐帧解码 → 涂黑 → 按原 PTS 编码。返回统计。"""
     import av
 
@@ -208,7 +214,7 @@ def render(src: str, dst_part: str, tl: Timeline, codec_pref: str = CODEC, progr
     last_err: Exception | None = None
     for name in order:
         try:
-            return _render_with(src, dst_part, tl, name, progress)
+            return _render_with(src, dst_part, tl, name, progress, check)
         except _EncoderFailed as e:
             last_err = e
             continue
@@ -222,7 +228,7 @@ def render(src: str, dst_part: str, tl: Timeline, codec_pref: str = CODEC, progr
     raise RuntimeError(f"没有能用的编码器：{last_err}")
 
 
-def _render_with(src: str, dst_part: str, tl: Timeline, codec: str, progress=None) -> dict:
+def _render_with(src: str, dst_part: str, tl: Timeline, codec: str, progress=None, check=None) -> dict:
     import av
 
     stats = {"frames": 0, "det": 0, "hold": 0, "black": 0}
@@ -249,6 +255,8 @@ def _render_with(src: str, dst_part: str, tl: Timeline, codec: str, progress=Non
                 raise _EncoderFailed(codec, e) from e
             last_report = 0.0
             for frame in inp.decode(vin):
+                if check and stats["frames"] % 50 == 0:
+                    check()
                 if frame.pts is None:
                     continue
                 t = float(frame.pts * frame.time_base)
@@ -298,7 +306,27 @@ def verify(src_stats: dict, dst: str, tol_s: float = 0.002) -> str | None:
     return None
 
 
-def process(rel_path: str, p: MaskParams, progress=None, detector=None) -> dict:
+def _duration(path: str) -> float | None:
+    """视频时长（秒），给进度条用；读不到就 None（进度条停在 0，不影响处理）。"""
+    try:
+        import av
+
+        with av.open(path) as c:
+            st = c.streams.video[0]
+            if st.duration:
+                return float(st.duration * st.time_base)
+            if c.duration:
+                return c.duration / 1_000_000
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+class Cancelled(Exception):
+    """停止了：这个视频不做了，半成品删掉。"""
+
+
+def process(rel_path: str, p: MaskParams, progress=None, detector=None, check=None) -> dict:
     """处理一个视频，写好遮罩版和说明，返回说明。detector 给测试用（替掉真模型）。"""
     src, dst, meta = _paths(rel_path)
     if not os.path.isfile(src):
@@ -311,10 +339,21 @@ def process(rel_path: str, p: MaskParams, progress=None, detector=None) -> dict:
             progress(stage, max(0.0, min(1.0, frac)))
 
     sig = _src_sig(src)
-    dets = (detector or detect_timeline)(src, p, progress=lambda t: _p("detect", 0))
+    dur = _duration(src)
+    if detector is not None:
+        dets = detector(src, p, progress=lambda t: _p("detect", (t / dur) if dur else 0))
+    else:
+        dets = detect_timeline(src, p, progress=lambda t: _p("detect", (t / dur) if dur else 0), check=check)
     tl = Timeline(dets, p)
     part = dst + ".part"
-    stats = render(src, part, tl, progress=lambda t, dur: _p("render", (t / dur) if dur else 0))
+    try:
+        stats = render(src, part, tl, progress=lambda t, dur: _p("render", (t / dur) if dur else 0), check=check)
+    except Cancelled:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
     err = verify(stats, part)
     if err:
         try:
@@ -339,58 +378,122 @@ def process(rel_path: str, p: MaskParams, progress=None, detector=None) -> dict:
     return info
 
 
-# ── 后台队列：一次只跑一个（吃满 GPU + 编码 CPU）──────────────────────
+# ── 后台队列：WORKERS 个同时做；「先试这个任务」的插到最前面 ──────────────
 
 
-_q: "queue.Queue[tuple[str, MaskParams]]" = queue.Queue()
+_q: "queue.PriorityQueue[tuple[int, int, str, MaskParams]]" = queue.PriorityQueue()
 _lock = threading.Lock()
 _state: dict[str, dict] = {}     # rel_path -> {state, stage, progress, error}
-_worker: threading.Thread | None = None
+_seq: dict[str, int] = {}        # rel_path -> 最新那次入队的序号（插队时旧的那条作废）
+_counter = 0
+_workers: list[threading.Thread] = []
+# 暂停：正在做的停在原地（不丢进度），排队的不开工；继续就接着做
+_paused = threading.Event()
+# 停止：这些视频正在做的马上中断（半成品删掉），排队的拿掉
+_cancel: set[str] = set()
 
 
-def _run():
+def _checker(rel: str):
+    def check():
+        while True:
+            with _lock:
+                if rel in _cancel:
+                    _cancel.discard(rel)
+                    raise Cancelled(rel)
+            if not _paused.is_set():
+                return
+            time.sleep(0.5)
+    return check
+
+
+def _run(q):
     while True:
-        rel, p = _q.get()
-        with _lock:
-            _state[rel] = {"state": "running", "stage": "detect", "progress": 0.0}
-
-        def prog(stage, frac, _rel=rel):
-            with _lock:
-                _state[_rel] = {"state": "running", "stage": stage, "progress": round(frac, 3)}
-
+        _prio, seq, rel, p = q.get()
+        while _paused.is_set():
+            time.sleep(0.5)
         try:
-            process(rel, p, progress=prog)
             with _lock:
-                _state.pop(rel, None)
-        except Exception as e:  # noqa: BLE001 一个视频坏了不能把队列带死
-            _logger.exception("遮罩失败：%s", rel)
-            with _lock:
-                _state[rel] = {"state": "failed", "error": f"{type(e).__name__}: {e}"}
+                # 插队时同一个视频会再入队一次，旧的那条到这里就跳过
+                if _seq.get(rel) != seq or _state.get(rel, {}).get("state") != "queued":
+                    continue
+                _state[rel] = {"state": "running", "stage": "detect", "progress": 0.0}
+
+            def prog(stage, frac, _rel=rel):
+                with _lock:
+                    _state[_rel] = {"state": "running", "stage": stage, "progress": round(frac, 3)}
+
+            try:
+                process(rel, p, progress=prog, check=_checker(rel))
+                with _lock:
+                    _state.pop(rel, None)
+            except Cancelled:
+                with _lock:
+                    _state.pop(rel, None)
+                _logger.info("遮罩已停止：%s", rel)
+            except Exception as e:  # noqa: BLE001 一个视频坏了不能把队列带死
+                _logger.exception("遮罩失败：%s", rel)
+                with _lock:
+                    _state[rel] = {"state": "failed", "error": f"{type(e).__name__}: {e}"}
         finally:
-            _q.task_done()
+            q.task_done()
 
 
-def submit(paths: list[str], p: MaskParams, force: bool = False) -> dict:
-    """排队。已经处理好的（且原视频没变）跳过，除非 force。"""
-    global _worker
+def _ensure_workers_locked() -> None:
+    _workers[:] = [w for w in _workers if w.is_alive()]
+    while len(_workers) < WORKERS:
+        w = threading.Thread(target=_run, args=(_q,), name=f"privacy-mask-{len(_workers)}", daemon=True)
+        w.start()
+        _workers.append(w)
+
+
+def submit(paths: list[str], p: MaskParams, force: bool = False, front: bool = False) -> dict:
+    """排队。已经处理好的（且原视频没变）跳过，除非 force。front：插到最前面（先试一个任务）。"""
+    global _counter
     queued, skipped = 0, 0
     with _lock:
-        if _worker is None or not _worker.is_alive():
-            _worker = threading.Thread(target=_run, name="privacy-mask", daemon=True)
-            _worker.start()
+        _ensure_workers_locked()
         for rel in dict.fromkeys(paths):
             _paths(rel)  # 路径不对直接报出去
             cur = _state.get(rel, {}).get("state")
-            if cur in ("queued", "running"):
+            if cur == "running" or (cur == "queued" and not front):
                 skipped += 1
                 continue
-            if not force and read_info(rel) is not None:
+            if cur != "queued" and not force and read_info(rel) is not None:
                 skipped += 1
                 continue
+            _counter += 1
+            _seq[rel] = _counter
             _state[rel] = {"state": "queued"}
-            _q.put((rel, p))
+            _q.put((0 if front else 1, _counter, rel, p))
             queued += 1
     return {"queued": queued, "skipped": skipped, "pending": _q.qsize()}
+
+
+def pause() -> dict:
+    _paused.set()
+    return {"paused": True}
+
+
+def resume() -> dict:
+    _paused.clear()
+    return {"paused": False}
+
+
+def cancel(paths: list[str] | None = None) -> dict:
+    """停止：给了 paths 只停这些，不给全停。排队的拿掉，正在做的中断。已经做好的不动。"""
+    removed = stopping = 0
+    with _lock:
+        targets = list(_state) if paths is None else list(dict.fromkeys(paths))
+        for rel in targets:
+            st = _state.get(rel, {}).get("state")
+            if st == "queued":
+                _state.pop(rel, None)
+                _seq.pop(rel, None)       # 队列里那条到 worker 手上会被跳过
+                removed += 1
+            elif st == "running":
+                _cancel.add(rel)
+                stopping += 1
+    return {"removed": removed, "stopping": stopping}
 
 
 def status(paths: list[str]) -> dict[str, dict]:
@@ -424,4 +527,4 @@ def available() -> dict:
     st = dog.status()
     if not st.get("available"):
         return {"available": False, "error": st.get("error") or "狗检测模型不可用"}
-    return {"available": True, "error": None, "pending": _q.qsize()}
+    return {"available": True, "error": None, "pending": _q.qsize(), "workers": WORKERS, "paused": _paused.is_set()}
