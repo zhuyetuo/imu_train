@@ -197,6 +197,7 @@ class PrivacyMaskIn(BaseModel):
     conf: float = Field(0.15, ge=0.05, le=0.9)
     force: bool = False
     front: bool = False        # 插到队列最前面（平台上「先试这个任务」）
+    shape: str = Field("seg", pattern="^(seg|box)$")   # seg 贴着狗的轮廓 / box 方框
 
 
 class PrivacyMaskStatusIn(BaseModel):
@@ -216,7 +217,7 @@ def privacy_mask_submit(body: PrivacyMaskIn):
     if not st["available"]:
         raise HTTPException(503, st["error"])
     p = privacy_mask.MaskParams(pad=body.pad, hold_s=body.hold_s, merge_s=body.merge_s,
-                                every_sec=body.every_sec, conf=body.conf)
+                                every_sec=body.every_sec, conf=body.conf, shape=body.shape)
     try:
         return privacy_mask.submit(body.paths, p, force=body.force, front=body.front)
     except ValueError as e:

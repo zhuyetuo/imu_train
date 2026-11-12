@@ -241,3 +241,53 @@ def test_狗在走_前几秒的位置不重复留():
     tl = pm.Timeline(dets, P)
     # 4.0 秒前后半秒内最左是 3.5 秒那一帧（x=0.24，扩框后 0.18）；更早的位置跟它是同一只，不该再留
     assert min(r[0] for r in tl.rects_at(4.0)[0]) >= 0.17, "同一只狗走动，不该把一路上的位置全留下来"
+
+
+def test_实例分割掩码_只留狗的轮廓():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    inst = np.zeros((108, 192), dtype=bool)
+    inst[40:60, 80:100] = True                       # 一只狗
+    bbox = [80 / 192, 40 / 108, 20 / 192, 20 / 108]
+    packed = pm.pack_mask(inst, bbox, 0.3)
+    tl = pm.Timeline([(1.0, [{"bbox": bbox, "mask": packed}])], P)
+    rects, how = tl.rects_at(1.0)
+    assert how == "det" and rects[0].mask == packed
+    img = np.full((540, 960, 3), 200, dtype=np.uint8)
+    out = pm.apply_mask(img, rects)
+    assert out[250, 450].tolist() == [200, 200, 200], "狗身上留着"
+    # 方框的角上（框里但不是狗）：掩码模式下涂黑
+    x1, y1, _x2, _y2 = rects[0]
+    assert out[int(y1 * 540) + 1, int(x1 * 960) + 1].max() == 0
+    assert out[10, 10].max() == 0
+
+
+def test_分割和方框混着用():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    inst = np.zeros((108, 192), dtype=bool)
+    inst[10:20, 10:20] = True
+    seg = {"bbox": [10 / 192, 10 / 108, 10 / 192, 10 / 108], "mask": pm.pack_mask(inst, [10 / 192, 10 / 108, 10 / 192, 10 / 108], 0.3)}
+    tl = pm.Timeline([(0.0, [seg, [0.7, 0.7, 0.1, 0.1]])], P)
+    out = pm.apply_mask(np.full((108, 192, 3), 9, dtype=np.uint8), tl.rects_at(0.0)[0])
+    assert out[15, 15].max() == 9 and out[int(0.75 * 108), int(0.75 * 192)].max() == 9
+
+
+def test_找狗_分割为主_分割漏掉的用检测框补(monkeypatch):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    from vision_service import dog, seek, segmask
+
+    frames = [(0.0, np.zeros((108, 192, 3), np.uint8)), (0.25, np.zeros((108, 192, 3), np.uint8))]
+    monkeypatch.setattr(seek, "iter_frames", lambda path, every: iter(frames))
+    monkeypatch.setattr(segmask, "available", lambda: True)
+    inst = np.zeros((108, 192), dtype=bool)
+    inst[10:30, 10:30] = True
+    a = [10 / 192, 10 / 108, 20 / 192, 20 / 108]          # 分割、检测都找到的狗
+    b = [0.7, 0.7, 0.1, 0.1]                               # 只有检测找到的
+    monkeypatch.setattr(segmask, "instances_batch", lambda fs, conf: [[{"bbox": a, "mask": inst}], []])
+    monkeypatch.setattr(dog, "detect_batch_no_person", lambda fs, conf: [[{"bbox": a}, {"bbox": b}], [{"bbox": b}]])
+    out = pm.detect_timeline("x.mp4", P)
+    f0 = out[0][1]
+    assert len(f0) == 2 and isinstance(f0[0], dict) and f0[0]["mask"] and f0[1] == b, "同一只狗不重复；分割漏的用框补"
+    assert out[1][1] == [b]

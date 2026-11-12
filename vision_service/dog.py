@@ -444,3 +444,49 @@ def cuda_report() -> dict:
         out["why"] = (f"torch 是带 CUDA {out['cuda_build']} 的版本，但 torch.cuda.is_available() 是 False——"
                       "多半是驱动版本对不上、或者进程看不到 GPU（容器没给 --gpus）")
     return out
+
+
+def person_class(model) -> int | None:
+    """这份权重里 person 是几号；没有返回 None。"""
+    names = getattr(model, "names", None) or {}
+    try:
+        items = names.items() if hasattr(names, "items") else enumerate(names)
+        for k, v in items:
+            if str(v).strip().lower() == "person":
+                return int(k)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def detect_batch_no_person(frames: list, conf: float = 0.2) -> list[list[dict]]:
+    """跟 detect_batch 一样找狗，但**把人也一起检**，类别之间做一次 NMS：
+
+    门槛放低以后，人蹲着 / 黑头发会被认成 bear、dog（隐私遮罩把人露出来了，2026-11-12）。
+    人也参与 agnostic NMS 的话，同一个位置「人」的分数更高，那个低分的「熊」就被压掉了。
+    最后把人的框去掉，只返回狗的。"""
+    if not frames:
+        return []
+    _ready()
+    pc = person_class(_model)
+    if pc is None:
+        return detect_batch(frames, conf)
+    half = bool(config.DETECT_HALF and (_device_used or "cpu") != "cpu")
+    from . import meter
+
+    with _lock, meter.timed("dog", frames=len(frames)):
+        res = _model.predict(list(frames), verbose=False, conf=conf, half=half, imgsz=config.DETECT_IMGSZ,
+                             classes=list(_classes) + [pc], agnostic_nms=True,
+                             device=_device_used or "cpu")
+    out = []
+    for frame, r in zip(frames, res):
+        keep = []
+        h, w = frame.shape[:2]
+        for b in getattr(r, "boxes", []):
+            if int(b.cls[0]) == pc:
+                continue
+            x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+            keep.append({"bbox": [round(x1 / w, 4), round(y1 / h, 4), round((x2 - x1) / w, 4), round((y2 - y1) / h, 4)],
+                         "conf": round(float(b.conf[0]), 3)})
+        out.append(dedup_boxes(keep))
+    return out

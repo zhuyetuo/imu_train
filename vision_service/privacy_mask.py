@@ -71,8 +71,27 @@ class MaskParams:
     hold_s: float = 3.0       # 漏检时沿用上一次框的最长秒数，超过整帧全黑
     merge_s: float = 0.5      # 前后多少秒内的框取并集
     every_sec: float = 0.25   # 多久检测一次
-    # 检测置信度：比扫描（0.2）再低一点。这里漏检 = 狗被涂黑，误检 = 多露一小块背景，前者代价大得多
+    # 检测置信度：比扫描（0.2）再低一点。这里漏检 = 狗被涂黑，误检 = 多露一小块背景，前者代价大得多。
+    # 人一起参与检测、互相压（见 dog.detect_batch_no_person），放低门槛也不会把人认成熊露出来
     conf: float = 0.15
+    # 形状：seg = 贴着狗的轮廓（实例分割，往外扩一圈）；box = 方框。分割模型不在 / 某帧分不出来时自动用方框
+    shape: str = "seg"
+
+
+#: 分割掩码存的分辨率（整段视频的掩码都留在内存里，一小时几千个，存小的；往外扩那一圈盖得住锯齿）
+MASK_W, MASK_H = 192, 108
+
+
+class Obj(tuple):
+    """一只狗：(x1, y1, x2, y2) 扩过的框，外加 .mask（MASK_H x MASK_W 已经往外扩过的掩码，压成位；
+    没有掩码 = 用方框）。是 tuple：跟方框一样能比较、能当框用。"""
+
+    mask: bytes | None = None
+
+    def __new__(cls, rect, mask=None):
+        o = super().__new__(cls, tuple(rect))
+        o.mask = mask
+        return o
 
 
 # ── 纯函数：每一刻留哪几块 ──────────────────────────────────────────────
@@ -93,7 +112,9 @@ class Timeline:
         dets = sorted(dets, key=lambda d: d[0])
         self.p = p
         self.t = [d[0] for d in dets]
-        self.boxes = [[pad_box(b, p.pad) for b in d[1]] for d in dets]
+        # 每个检测点的每只狗：老格式是 [x,y,w,h]，新格式是 {"bbox": [...], "mask": 压好的位}
+        self.boxes = [[Obj(pad_box(b["bbox"], p.pad), b.get("mask")) if isinstance(b, dict) else Obj(pad_box(b, p.pad))
+                       for b in d[1]] for d in dets]
         # 有框的那些点（漏检补洞时往前找「最后一次有框」用）
         self.hit_idx = [i for i, bs in enumerate(self.boxes) if bs]
         self.hit_t = [self.t[i] for i in self.hit_idx]
@@ -139,17 +160,43 @@ def _same_obj(a, b) -> bool:
 
 
 def apply_mask(img, rects) -> object:
-    """img：HxWx3 ndarray。块外全部涂黑，返回新数组（不改原图）。"""
+    """img：HxWx3 ndarray。只留狗（有掩码的按掩码，没有的按方框），其余涂黑，返回新数组（不改原图）。"""
     import numpy as np
 
     h, w = img.shape[:2]
     out = np.zeros_like(img)
-    for x1, y1, x2, y2 in rects:
+    low = None
+    for r in rects:
+        m = getattr(r, "mask", None)
+        if m is not None:
+            bits = np.unpackbits(np.frombuffer(m, dtype=np.uint8))[: MASK_W * MASK_H].reshape(MASK_H, MASK_W)
+            low = bits if low is None else (low | bits)
+            continue
+        x1, y1, x2, y2 = r
         a, b = int(x1 * w), int(min(w, round(x2 * w)))
         c, d = int(y1 * h), int(min(h, round(y2 * h)))
         if b > a and d > c:
             out[c:d, a:b] = img[c:d, a:b]
+    if low is not None:
+        import cv2
+
+        full = cv2.resize(low, (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+        out[full] = img[full]
     return out
+
+
+def pack_mask(inst, bbox: list[float], pad: float) -> bytes:
+    """一个实例的掩码（任意分辨率 bool）→ 缩到 MASK_W x MASK_H、往外扩一圈（按狗的大小 × pad）、压成位。"""
+    import cv2
+    import numpy as np
+
+    m = cv2.resize(np.asarray(inst, dtype=np.uint8), (MASK_W, MASK_H), interpolation=cv2.INTER_NEAREST)
+    _x, _y, bw, bh = bbox
+    r = int(round(pad * 0.5 * min(bw * MASK_W, bh * MASK_H))) + 1
+    if r > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        m = cv2.dilate(m, k)
+    return np.packbits(m.astype(np.uint8).ravel()).tobytes()
 
 
 # ── 路径 ───────────────────────────────────────────────────────────────
@@ -199,19 +246,35 @@ def read_info(rel_path: str) -> dict | None:
 # ── 两遍 ───────────────────────────────────────────────────────────────
 
 
-def detect_timeline(path: str, p: MaskParams, progress=None, check=None) -> list[tuple[float, list[list[float]]]]:
-    """第一遍：每 every_sec 秒一帧跑狗检测。ffmpeg 抽帧 + 一批批送 GPU，跟 scan_video 一个路数。"""
-    from . import dog, seek
+def detect_timeline(path: str, p: MaskParams, progress=None, check=None) -> list[tuple[float, list]]:
+    """第一遍：每 every_sec 秒一帧找狗（排除人）。ffmpeg 抽帧 + 一批批送 GPU，跟 scan_video 一个路数。
 
-    out: list[tuple[float, list[list[float]]]] = []
+    shape=seg：实例分割，每只狗带一个掩码；分割模型不在就退回检测框。
+    分割分不出来、检测框找得到的那一帧，用检测框补上（分割比检测更容易漏）。"""
+    from . import dog, seek, segmask
+
+    out: list[tuple[float, list]] = []
     pending: list[tuple[float, object]] = []
+    use_seg = p.shape == "seg" and segmask.available()
 
     def flush():
         if not pending:
             return
-        res = dog.detect_batch([f for _t, f in pending], p.conf)
-        for (t, _f), boxes in zip(pending, res):
-            out.append((float(t), [b["bbox"] for b in boxes]))
+        frames = [f for _t, f in pending]
+        det = dog.detect_batch_no_person(frames, p.conf)
+        seg = segmask.instances_batch(frames, p.conf) if use_seg else None
+        for k, ((t, _f), boxes) in enumerate(zip(pending, det)):
+            objs: list = []
+            if seg is not None:
+                for inst in seg[k]:
+                    if inst.get("mask") is not None:
+                        objs.append({"bbox": inst["bbox"], "mask": pack_mask(inst["mask"], inst["bbox"], p.pad)})
+            # 检测找到、分割里对不上的狗：用方框补
+            for b in boxes:
+                bb = pad_box(b["bbox"], p.pad)
+                if not any(_same_obj(bb, pad_box(o["bbox"], p.pad)) for o in objs):
+                    objs.append(b["bbox"])
+            out.append((float(t), objs))
         pending.clear()
         if progress:
             progress(out[-1][0])
