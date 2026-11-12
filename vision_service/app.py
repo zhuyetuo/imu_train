@@ -194,7 +194,7 @@ class PrivacyMaskIn(BaseModel):
     hold_s: float = Field(3.0, ge=0.0, le=60.0)
     merge_s: float = Field(0.5, ge=0.0, le=5.0)
     every_sec: float = Field(0.25, ge=0.1, le=5.0)
-    conf: float = Field(0.2, ge=0.05, le=0.9)
+    conf: float = Field(0.15, ge=0.05, le=0.9)
     force: bool = False
     front: bool = False        # 插到队列最前面（平台上「先试这个任务」）
 

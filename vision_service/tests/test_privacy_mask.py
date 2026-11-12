@@ -222,3 +222,22 @@ def test_暂停_继续_停止(monkeypatch, tmp_path):
     assert started[:2] == ["a.mp4", "c.mp4"], "b 停掉了不该再做"
     assert pm.status(["a.mp4"])["a.mp4"]["state"] == "none"
     pm.cancel()
+
+
+def test_一只狗漏检_另一只一直在_漏的那只照样留着():
+    """2026-11-12 现场：大狗一直检得到，旁边趴在沙发上的小白狗几帧没检到，被涂黑一闪一闪。"""
+    big, small = [0.1, 0.1, 0.3, 0.3], [0.7, 0.7, 0.1, 0.1]
+    dets = [(0.25 * i, [big, small] if i <= 4 else [big]) for i in range(40)]   # 1 秒后小狗检不到了
+    tl = pm.Timeline(dets, P)
+    small_padded = pm.pad_box(small, P.pad)
+    rects, how = tl.rects_at(2.5)
+    assert how == "det" and small_padded in rects, "小狗 1 秒前还在，3 秒内要留着"
+    rects, _ = tl.rects_at(5.0)
+    assert small_padded not in rects, "超过 3 秒没检到就不留了"
+
+
+def test_狗在走_前几秒的位置不重复留():
+    dets = [(0.25 * i, [[0.1 + 0.01 * i, 0.1, 0.2, 0.2]]) for i in range(20)]   # 慢慢往右走
+    tl = pm.Timeline(dets, P)
+    # 4.0 秒前后半秒内最左是 3.5 秒那一帧（x=0.24，扩框后 0.18）；更早的位置跟它是同一只，不该再留
+    assert min(r[0] for r in tl.rects_at(4.0)[0]) >= 0.17, "同一只狗走动，不该把一路上的位置全留下来"
