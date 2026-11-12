@@ -284,3 +284,67 @@ def test_restart_warns_that_env_vars_do_not_take_effect():
         src = f.read()
     seg = src[src.index("-d|--restart)"):src.index("-u|--up)")]
     assert "LABEL_MODELS" in seg and "不生效" in seg
+
+
+# ── 额外模型的进程池要回收（2026-11-12：线上 7622 个线程 / 22GB）────────────
+
+
+class _FakePool:
+    def __init__(self, tag):
+        self.tag = tag
+        self.closed = False
+        self._pending_work_items = {}
+
+    def shutdown(self, wait=False, cancel_futures=False):
+        self.closed = True
+
+
+@pytest.fixture
+def pooled(monkeypatch, tmp_path):
+    import types
+
+    from label_service import config
+
+    monkeypatch.setattr(config, "MAX_LOADED_MODELS", 2)
+    monkeypatch.setattr(config, "MODEL_IDLE_S", 0)          # 不起后台线程，测试里手动调 reap_idle
+    # 不碰真模型 / 真进程池：pool、model_loader 换成假的（真的要拉训练代码，测试环境没有）
+    fake_pool = types.SimpleNamespace(create_pool=lambda path: _FakePool(path))
+    fake_loader = types.SimpleNamespace(load_model_bundle=lambda path: {"classes": ["a"], "model": object()})
+    monkeypatch.setitem(sys.modules, "label_service.pool", fake_pool)
+    monkeypatch.setitem(sys.modules, "label_service.model_loader", fake_loader)
+    import label_service
+
+    monkeypatch.setattr(label_service, "pool", fake_pool, raising=False)
+    monkeypatch.setattr(label_service, "model_loader", fake_loader, raising=False)
+    r = R.Registry()
+    for t in ("a", "b", "c"):
+        r.register(t, str(tmp_path / f"{t}.pkl"))
+    return r
+
+
+def test_额外模型超过上限_关最久没用的(pooled):
+    _, pa = pooled.get("a")
+    _, pb = pooled.get("b")
+    _, pc = pooled.get("c")
+    assert pa.closed and not pb.closed and not pc.closed
+    assert [d["tag"] for d in pooled.describe() if d["loaded"]] == ["b", "c"]
+    # 关掉的再用到会重新加载
+    _, pa2 = pooled.get("a")
+    assert pa2 is not pa and not pa2.closed and pb.closed
+
+
+def test_忙着的池不关(pooled):
+    _, pa = pooled.get("a")
+    pa._pending_work_items = {1: object()}
+    pooled.get("b")
+    pooled.get("c")
+    assert not pa.closed, "还有活儿没跑完的池不能关，不然那个请求直接报错"
+
+
+def test_空闲太久的关掉(pooled, monkeypatch):
+    from label_service import config
+
+    _, pa = pooled.get("a")
+    monkeypatch.setattr(config, "MODEL_IDLE_S", 600)
+    assert pooled.reap_idle(now=R.time.monotonic() + 10) == []
+    assert pooled.reap_idle(now=R.time.monotonic() + 601) == ["a"] and pa.closed

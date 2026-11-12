@@ -61,6 +61,12 @@ INFER_WORKERS    = int(_env("LABEL_INFER_WORKERS", "0")) or max(1, (os.cpu_count
 # 给交互式推理（工作台点「AI预标注」）留几个槽位，批量预标注最多占 INFER_WORKERS - 这个数，
 # 免得标注员点一下要排在几十个批量文件后面
 INFER_RESERVE    = int(_env("LABEL_INFER_RESERVE", "2"))
+# 额外模型（训练出来的各版、对比用的）的进程池：每个池按 INFER_WORKERS 起一排进程、各自加载一份模型，
+# 以前用过一次就一直挂着，版本用得多了几十个池、上千个进程、二十几 GB 内存（2026-11-12 线上 7622 个线程 / 22GB）。
+# 现在：同时最多留 MAX_LOADED_MODELS 个额外模型的池（最久没用的先关）；空闲超过 MODEL_IDLE_S 秒的也关掉。
+# 关掉的下次用到会自动重新加载（多等几秒）。默认模型的池不受影响
+MAX_LOADED_MODELS = int(_env("LABEL_MAX_LOADED_MODELS", "2"))
+MODEL_IDLE_S      = float(_env("LABEL_MODEL_IDLE_S", "600"))
 # 训练给机器上别的服务（标注平台的 api / 数据库 / 这里的推理接口）留几个核。
 # 以前 RF 是 n_jobs=-1，训练一跑把核全占满，平台接口 15 秒超时、页面像挂了一样
 TRAIN_RESERVE_CPUS = int(_env("TRAIN_RESERVE_CPUS", "2"))

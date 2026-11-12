@@ -34,6 +34,7 @@ import glob
 import logging
 import os
 import threading
+import time
 
 from label_service import config
 
@@ -96,7 +97,10 @@ class Registry:
         self._bundles: dict[str, dict] = {}
         # 训练出来的那几版带的说明（数据集、轴数、类别），给平台下拉起名字用
         self._meta: dict[str, dict] = {}
+        # 上次用到的时刻：空闲回收 / 超出上限时先关最久没用的
+        self._last_used: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._reaper: threading.Thread | None = None
 
     # -- 登记 ---------------------------------------------------------
 
@@ -165,8 +169,9 @@ class Registry:
         return tag
 
     def get(self, tag: str):
-        """→ (bundle, pool)。第一次用到某个模型时才真的加载它。"""
+        """→ (bundle, pool)。第一次用到某个模型时才真的加载它（被回收过的也是）。"""
         with self._lock:
+            self._last_used[tag] = time.monotonic()
             if tag not in self._pools:
                 from label_service import pool as pool_mod
                 from label_service.model_loader import load_model_bundle
@@ -178,7 +183,82 @@ class Registry:
                 b["model_path"] = path
                 self._bundles[tag] = b
                 self._pools[tag] = pool_mod.create_pool(path)
-            return self._bundles[tag], self._pools[tag]
+                to_close = self._over_limit_locked(keep=tag)
+            else:
+                to_close = []
+            self._ensure_reaper_locked()
+            out = self._bundles[tag], self._pools[tag]
+        self._close(to_close)
+        return out
+
+    # -- 回收：额外模型的进程池不能一直挂着 ------------------------------
+
+    @staticmethod
+    def _busy(p) -> bool:
+        """池里还有没跑完的活儿（ProcessPoolExecutor 的待办表）。有活儿的池不关：
+        cancel_futures 会让正在等结果的请求直接报错。"""
+        try:
+            return bool(getattr(p, "_pending_work_items", None))
+        except Exception:   # noqa: BLE001
+            return True
+
+    def _pop_locked(self, tag: str):
+        p = self._pools.pop(tag, None)
+        self._bundles.pop(tag, None)     # 元数据也丢掉，下次 get 重新加载（路径 / meta 留着）
+        return (tag, p) if p is not None else None
+
+    def _over_limit_locked(self, keep: str) -> list:
+        """额外模型的池超过上限：从最久没用的开始关，忙着的跳过（宁可暂时超一点）。"""
+        extra = [t for t in self._pools if t != DEFAULT_TAG]
+        n_over = len(extra) - max(0, config.MAX_LOADED_MODELS)
+        out = []
+        for t in sorted(extra, key=lambda x: self._last_used.get(x, 0.0)):
+            if n_over <= 0:
+                break
+            if t == keep or self._busy(self._pools[t]):
+                continue
+            item = self._pop_locked(t)
+            if item:
+                out.append(item)
+                n_over -= 1
+        return out
+
+    def reap_idle(self, now: float | None = None) -> list[str]:
+        """关掉空闲太久的额外模型池。返回关掉的标签。"""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            out = []
+            for t in [t for t in self._pools if t != DEFAULT_TAG]:
+                if now - self._last_used.get(t, 0.0) >= config.MODEL_IDLE_S and not self._busy(self._pools[t]):
+                    item = self._pop_locked(t)
+                    if item:
+                        out.append(item)
+        self._close(out)
+        return [t for t, _ in out]
+
+    def _close(self, items: list) -> None:
+        for tag, p in items:
+            log.info("关闭模型 %s 的进程池（%s），下次用到再加载", tag,
+                     "空闲太久" if self._last_used.get(tag) else "超出同时加载上限")
+            try:
+                p.shutdown(wait=False, cancel_futures=True)
+            except Exception:   # noqa: BLE001
+                log.exception("关闭模型 %s 的进程池失败", tag)
+
+    def _ensure_reaper_locked(self) -> None:
+        if config.MODEL_IDLE_S <= 0 or (self._reaper is not None and self._reaper.is_alive()):
+            return
+
+        def loop():
+            while True:
+                time.sleep(max(10.0, min(60.0, config.MODEL_IDLE_S / 4)))
+                try:
+                    self.reap_idle()
+                except Exception:   # noqa: BLE001 回收出错不能把线程带死
+                    log.exception("回收空闲模型池出错")
+
+        self._reaper = threading.Thread(target=loop, name="model-pool-reaper", daemon=True)
+        self._reaper.start()
 
     def describe(self) -> list[dict]:
         """给平台的下拉用。**已经加载的才报类别/几何**——为了列个下拉就把
