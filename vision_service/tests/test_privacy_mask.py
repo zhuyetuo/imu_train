@@ -133,3 +133,40 @@ def test_对不上就不交付(monkeypatch, tmp_path):
         pm.process("b.mp4", P, detector=lambda s, p, progress=None: [(0.0, [])])
     assert not os.path.exists(tmp_path / pm.MASK_DIR / "b.mp4")
     assert pm.read_info("b.mp4") is None
+
+
+def test_队列_多路同时做_插队的先做(monkeypatch, tmp_path):
+    import threading
+    import time as _t
+
+    monkeypatch.setattr(config, "VIDEO_ROOT", str(tmp_path))
+    for n in "abcd":
+        (tmp_path / f"{n}.mp4").write_bytes(b"x")
+    monkeypatch.setattr(pm, "WORKERS", 2)
+    gate = threading.Event()
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def fake_process(rel, p, progress=None, detector=None):
+        with lock:
+            started.append(rel)
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setattr(pm, "process", fake_process)
+    pm._workers.clear()
+    pm._state.clear()
+    pm.submit(["a.mp4", "b.mp4", "c.mp4"], P)
+    for _ in range(100):
+        if len(started) >= 2:
+            break
+        _t.sleep(0.02)
+    assert sorted(started) == ["a.mp4", "b.mp4"], "两路同时开工"
+    # c 还在排队：d 插队，空出位置时先做 d
+    pm.submit(["d.mp4"], P, front=True)
+    gate.set()
+    for _ in range(100):
+        if len(started) >= 4:
+            break
+        _t.sleep(0.02)
+    assert started[2] == "d.mp4" and started[3] == "c.mp4"
