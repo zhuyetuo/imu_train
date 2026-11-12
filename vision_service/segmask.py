@@ -215,3 +215,42 @@ def masked_crop_batch(frames: list, boxes_list: list, crop_fn, max_side: int = 5
 def masked_crop(frame, boxes: list[dict], crop_fn, max_side: int = 512):
     """单张版，查询 / 缩略图用。"""
     return masked_crop_batch([frame], [boxes], crop_fn, max_side)[0]
+
+
+def instances_batch(frames: list, conf: float = 0.2, imgsz: int | None = None) -> list | None:
+    """整帧实例分割，**排除人**：每帧 [{"bbox": [x,y,w,h] 归一化, "mask": HxW bool（模型分辨率）}, ...]。
+
+    人也一起进 agnostic NMS（人蹲着、黑头发会被认成熊 / 狗），最后把人的实例扔掉。
+    模型不在返回 None，调用方退回检测框。"""
+    if not frames:
+        return []
+    if not available():
+        return None
+    import numpy as np
+
+    from . import dog, meter
+
+    pc = dog.person_class(_model)
+    classes = list(_classes) + ([pc] if pc is not None else [])
+    with _lock, meter.timed("seg", frames=len(frames)):
+        res = _model.predict(list(frames), verbose=False, conf=conf, half=False,
+                             imgsz=imgsz or config.DETECT_IMGSZ, classes=classes or None,
+                             agnostic_nms=True, retina_masks=False, device=_device_used or "cpu")
+    out = []
+    for frame, r in zip(frames, res):
+        h, w = frame.shape[:2]
+        items = []
+        m = getattr(r, "masks", None)
+        boxes = getattr(r, "boxes", None)
+        if boxes is not None and len(boxes):
+            data = None
+            if m is not None and getattr(m, "data", None) is not None:
+                data = m.data.cpu().numpy() if hasattr(m.data, "cpu") else np.asarray(m.data)
+            for k, b in enumerate(boxes):
+                if pc is not None and int(b.cls[0]) == pc:
+                    continue
+                x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+                items.append({"bbox": [x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],
+                              "mask": (np.asarray(data[k]) > 0.5) if data is not None and k < len(data) else None})
+        out.append(items)
+    return out
