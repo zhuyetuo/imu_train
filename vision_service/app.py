@@ -18,7 +18,7 @@ import threading
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, gpumem, dog, embed, llm as llmmod, lowlight, models, sam, seek, tooth
+from . import config, gpumem, dog, embed, llm as llmmod, lowlight, models, privacy_mask, sam, seek, tooth
 
 _logger = logging.getLogger("vision_service")
 
@@ -186,6 +186,49 @@ def dog_scan(body: DogScanIn):
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"扫描失败: {type(e).__name__}: {e}") from e
+
+
+class PrivacyMaskIn(BaseModel):
+    paths: list[str] = Field(..., max_length=5000, description="相对 VIDEO_ROOT 的视频路径")
+    pad: float = Field(0.3, ge=0.0, le=2.0)
+    hold_s: float = Field(3.0, ge=0.0, le=60.0)
+    merge_s: float = Field(0.5, ge=0.0, le=5.0)
+    every_sec: float = Field(0.25, ge=0.1, le=5.0)
+    conf: float = Field(0.2, ge=0.05, le=0.9)
+    force: bool = False
+
+
+class PrivacyMaskStatusIn(BaseModel):
+    paths: list[str] = Field(..., max_length=5000)
+
+
+@app.get("/api/v1/privacy_mask/status")
+def privacy_mask_available():
+    """隐私遮罩能不能用（av 装没装、狗检测模型在不在）"""
+    return privacy_mask.available()
+
+
+@app.post("/api/v1/privacy_mask/submit")
+def privacy_mask_submit(body: PrivacyMaskIn):
+    """把一批视频排进遮罩队列（后台一个一个做，一小时的视频十来分钟）。已经做好的跳过，force 重做。"""
+    st = privacy_mask.available()
+    if not st["available"]:
+        raise HTTPException(503, st["error"])
+    p = privacy_mask.MaskParams(pad=body.pad, hold_s=body.hold_s, merge_s=body.merge_s,
+                                every_sec=body.every_sec, conf=body.conf)
+    try:
+        return privacy_mask.submit(body.paths, p, force=body.force)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+@app.post("/api/v1/privacy_mask/state")
+def privacy_mask_state(body: PrivacyMaskStatusIn):
+    """每个视频的遮罩状态：done / queued / running / failed / none"""
+    try:
+        return {"items": privacy_mask.status(body.paths)}
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
 
 
 class SeekLabelIn(BaseModel):
