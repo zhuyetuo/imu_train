@@ -171,6 +171,25 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
     assert load_model_bundle(str(mg_path))["hz"] == 15.625
 
 
+def test_静止活动按动作强度分_只改这两类本身():
+    from train_v2 import motion_of, still_by_motion
+
+    rng = np.random.default_rng(0)
+    X = np.zeros((6, 80, 8), np.float32)
+    X[:, :, 2] = 1.0
+    amp = [0.0005, 0.02, 0.0005, 0.02, 0.0005, 0.02]
+    for i, a in enumerate(amp):
+        X[i, :, 2] += rng.normal(0, a, 80)
+    mot = motion_of(X)
+    assert (mot[::2] < 0.003).all() and (mot[1::2] > 0.01).all()
+    # 0 静止 1 活动 2 进食（细类，不动）
+    y = np.array([1, 1, 0, 0, 2, 2])
+    plain = np.array([True, True, True, True, False, False])
+    y2, info = still_by_motion(y, mot, plain, 0, 1, 0.005)
+    assert y2.tolist() == [0, 1, 0, 1, 2, 2]
+    assert info["活动→静止"] == 1 and info["静止→活动"] == 1
+
+
 def test_平台把不用重力绝对大小传到训练():
     from label_service.app import DatasetSpec
 
@@ -180,6 +199,9 @@ def test_平台把不用重力绝对大小传到训练():
         assert json.load(open(_spec_file(99913), encoding="utf-8"))["drop_gravity_level"] is False
         jobs.build_command({**d, "drop_gravity_level": True}, "rf", None, 99913)
         assert json.load(open(_spec_file(99913), encoding="utf-8"))["drop_gravity_level"] is True
+        assert json.load(open(_spec_file(99913), encoding="utf-8"))["still_motion_g"] is None
+        jobs.build_command({**d, "still_motion_g": 0.004}, "rf", None, 99913)
+        assert json.load(open(_spec_file(99913), encoding="utf-8"))["still_motion_g"] == 0.004
     finally:
         if os.path.exists(_spec_file(99913)):
             os.remove(_spec_file(99913))

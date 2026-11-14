@@ -432,6 +432,7 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
         "fine_labels": dataset_spec.get("fine_labels"),
         "class_scale": dataset_spec.get("class_scale") or {},
         "drop_gravity_level": bool(dataset_spec.get("drop_gravity_level")),
+        "still_motion_g": dataset_spec.get("still_motion_g") or None,
         "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
     }
 

@@ -246,6 +246,30 @@ def blank_features(F: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return F
 
 
+# 「静止/休息」和「活动」按 IMU 动作强度分，不按人看视频的感觉分。
+# pool_20261107 上 4 秒内 |a| 标准差 0.002~0.01g 那一档，人标的活动 8775 窗、静止 5745 窗，
+# 289 段活动里 54 段大半时间狗根本没动（站着、坐着看）——项圈上看两者是同一种信号，
+# 模型怎么训都分不开，整体准确率卡在 85% 上下。这里把两类的界线定成「身体动没动」：
+# 只改标成这两类本身的窗口（进食 / 饮水 / 舔 这些细类不动），低于阈值算静止，高于算活动。
+STILL, ACTIVE = "静止/休息", "活动"
+
+
+def motion_of(Xm: np.ndarray) -> np.ndarray:
+    """每个窗口的动作强度：inv 通道里加速度模长（第 2 列）在窗口内的标准差，单位 g"""
+    return Xm[:, :, 2].std(axis=1)
+
+
+def still_by_motion(y: np.ndarray, motion: np.ndarray, plain: np.ndarray, i_still: int, i_active: int,
+                    thr: float) -> tuple[np.ndarray, dict]:
+    """plain：这个窗口所在片段的训练类别就是 静止 或 活动 本身（不是细类）"""
+    y = y.copy()
+    to_still = plain & (y == i_active) & (motion < thr)
+    to_active = plain & (y == i_still) & (motion >= thr)
+    y[to_still], y[to_active] = i_still, i_active
+    return y, {"活动→静止": int(to_still.sum()), "静止→活动": int(to_active.sum()),
+               "两类窗口": int((plain & np.isin(y, [i_still, i_active])).sum())}
+
+
 def forest_uses(model, mask: np.ndarray) -> list[int]:
     """森林里实际用到了哪些被屏蔽的列（应该是空的）"""
     idx = np.flatnonzero(mask)
@@ -322,6 +346,7 @@ def main(a):
         rf_kw["max_depth"] = int(rf_kw["max_depth"])
     run = spec["run_name"]
     drop_level = bool(spec.get("drop_gravity_level"))
+    still_g = float(spec.get("still_motion_g") or 0) or None
     t0 = time.time()
     print("=" * 60)
     print(f"  新版训练流程（v2）  {axes} 轴  采样率 {hz:g}Hz  窗口 {W} 点（{W / hz:.2f}s）  步长 {S} 点（{S / hz:.2f}s）")
@@ -368,7 +393,7 @@ def main(a):
     # 3. 窗口 + 特征：训练用的（短片段左右挪）和算指标用的（不挪）
     Xtr_raw, seg_tr = make_windows(tls, segs, W, S, short_shifts=2)
     Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
-    _, F_tr = featurize(Xtr_raw, hz)
+    Xtr_m, F_tr = featurize(Xtr_raw, hz)
     Xev_m, F_ev = featurize(Xev_raw, hz)
     masked = []
     if drop_level:
@@ -378,6 +403,15 @@ def main(a):
     name_idx = {n: i for i, n in enumerate(names)}
     yf_tr = np.array([name_idx[segs[s]["name"]] for s in seg_tr])
     y_ev = np.array([classes.index(segs[s]["coarse"]) for s in seg_ev])
+    still_info = None
+    if still_g:
+        if STILL not in classes or ACTIVE not in classes:
+            sys.exit(f"按动作强度分静止 / 活动要求类别里同时有「{STILL}」和「{ACTIVE}」")
+        plain_tr = np.array([segs[s]["name"] in (STILL, ACTIVE) for s in seg_tr])
+        plain_ev = np.array([segs[s]["name"] in (STILL, ACTIVE) for s in seg_ev])
+        yf_tr, _ = still_by_motion(yf_tr, motion_of(Xtr_m), plain_tr, name_idx[STILL], name_idx[ACTIVE], still_g)
+        y_ev, still_info = still_by_motion(y_ev, motion_of(Xev_m), plain_ev, classes.index(STILL), classes.index(ACTIVE), still_g)
+        print(f"▶ 静止 / 活动按动作强度分（4 秒内 |a| 标准差 < {still_g:g}g 算静止）：{still_info}", flush=True)
     g_tr = np.array([_group_of(segs[s]["sample_code"]) for s in seg_tr])
     g_ev = np.array([_group_of(segs[s]["sample_code"]) for s in seg_ev])
     print(f"▶ 窗口：训练 {len(yf_tr)}（含短片段增强），验证 {len(y_ev)}；{len(set(g_ev))} 组（天 × 项圈）", flush=True)
@@ -438,6 +472,8 @@ def main(a):
         "rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}, "n_nodes": n_nodes,
         # 训练时置成常数的特征（树里一次都不用）；推理照常算完整的特征向量
         "drop_gravity_level": drop_level, "masked_features": masked,
+        # 静止 / 活动按动作强度重新分（窗口级指标按改过的标签算；片段级指标仍按人标的片段）
+        "still_motion_g": still_g, "still_by_motion": still_info,
         "cv": f"按（天, 项圈）分组 {folds} 折" if pred is not None else None,
         # 主数据集（标注平台上点「用它训练」的那份，一般标得最干净）：列表上的各类 F1 默认看它
         "main_dataset": spec["datasets"][0]["name"],
