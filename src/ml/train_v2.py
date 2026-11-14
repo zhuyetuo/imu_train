@@ -219,6 +219,43 @@ def featurize(X_raw, hz):
     return Xm, extract_features_vec(Xm, hz).astype(np.float32)
 
 
+# 跟「这个项圈的加速度计怎么校准」有关、跟狗在干什么无关的特征：重力那一维的绝对大小。
+# inv 通道里 acc_x = 竖直分量、acc_z = 模长，静止时两者都 ≈ 1g，但每个项圈的读数不一样
+# （pool_20261107 上静止时 0.967 ~ 1.016g）。模型会学成「读数是多少 → 哪一类」：
+# #29 的分组交叉验证里 imu13 摘下来静放的 12 段 94% 被判成活动，SHAP 看主要就是这几维。
+# 去掉之后未佩戴 F1 0.95 → 0.99，抓挠也略好（见 ml_rf.json 的 masked_features）。
+GRAVITY_LEVEL_FEATURES = r"^(acc_x|acc_z|acc_mag)_(mean|min|max|rms)$|^sma_acc$"
+
+
+def gravity_level_mask(n_channels: int) -> tuple[np.ndarray, list[str]]:
+    """哪几列是重力绝对大小。返回 (bool 掩码, 特征名)"""
+    from features import feature_names
+
+    names = feature_names(int(n_channels))
+    m = np.array([bool(re.search(GRAVITY_LEVEL_FEATURES, n)) for n in names])
+    return m, [n for n, k in zip(names, m) if k]
+
+
+def blank_features(F: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """训练时把这几列置成常数 0：树永远不会在常数列上分裂，所以模型照样吃完整的特征向量，
+    推理 / 端侧一行不用改（它们算出来的真实值传进来也用不上）。"""
+    if mask.shape[0] != F.shape[1]:
+        raise ValueError(f"特征维度对不上：掩码 {mask.shape[0]} 维，特征 {F.shape[1]} 维")
+    F = F.copy()
+    F[:, mask] = 0.0
+    return F
+
+
+def forest_uses(model, mask: np.ndarray) -> list[int]:
+    """森林里实际用到了哪些被屏蔽的列（应该是空的）"""
+    idx = np.flatnonzero(mask)
+    used = set()
+    for est in model.estimators_:
+        f = est.tree_.feature
+        used |= set(int(x) for x in f[f >= 0])
+    return sorted(used & set(int(i) for i in idx))
+
+
 # ── 合并 + 校准做进树里 ─────────────────────────────────────────────────────
 
 def merge_forest(model, fine_names: list[str], coarse_names: list[str], back: list[int], scale: np.ndarray):
@@ -284,6 +321,7 @@ def main(a):
     if rf_kw["max_depth"] is not None:
         rf_kw["max_depth"] = int(rf_kw["max_depth"])
     run = spec["run_name"]
+    drop_level = bool(spec.get("drop_gravity_level"))
     t0 = time.time()
     print("=" * 60)
     print(f"  新版训练流程（v2）  {axes} 轴  采样率 {hz:g}Hz  窗口 {W} 点（{W / hz:.2f}s）  步长 {S} 点（{S / hz:.2f}s）")
@@ -332,6 +370,11 @@ def main(a):
     Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
     _, F_tr = featurize(Xtr_raw, hz)
     Xev_m, F_ev = featurize(Xev_raw, hz)
+    masked = []
+    if drop_level:
+        fmask, masked = gravity_level_mask(Xev_m.shape[2])
+        F_tr, F_ev = blank_features(F_tr, fmask), blank_features(F_ev, fmask)
+        print(f"▶ 不用重力绝对大小（跟项圈校准有关）：屏蔽 {len(masked)} 维 {masked}", flush=True)
     name_idx = {n: i for i, n in enumerate(names)}
     yf_tr = np.array([name_idx[segs[s]["name"]] for s in seg_tr])
     y_ev = np.array([classes.index(segs[s]["coarse"]) for s in seg_ev])
@@ -367,6 +410,10 @@ def main(a):
     model = merge_forest(model, names, classes, back, scale)
     n_nodes = int(sum(e.tree_.node_count for e in model.estimators_))
     print(f"▶ 全量训练完成：{len(model.estimators_)} 棵树，{n_nodes} 个节点", flush=True)
+    if drop_level:
+        bad = forest_uses(model, fmask)
+        if bad:
+            sys.exit(f"屏蔽的特征被树用到了（不应该发生）：列 {bad}")
 
     # 6. 存
     hz_tag = f"{int(hz) if float(hz).is_integer() else hz}"
@@ -389,6 +436,8 @@ def main(a):
         "label_mode": "segment", "n_channels": int(Xev_m.shape[2]),
         "fine_labels": fine, "train_classes": names, "class_scale": {c: float(s) for c, s in zip(classes, scale)},
         "rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}, "n_nodes": n_nodes,
+        # 训练时置成常数的特征（树里一次都不用）；推理照常算完整的特征向量
+        "drop_gravity_level": drop_level, "masked_features": masked,
         "cv": f"按（天, 项圈）分组 {folds} 折" if pred is not None else None,
         # 主数据集（标注平台上点「用它训练」的那份，一般标得最干净）：列表上的各类 F1 默认看它
         "main_dataset": spec["datasets"][0]["name"],

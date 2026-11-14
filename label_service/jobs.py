@@ -431,6 +431,7 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
         "classes": classes, "label_remap": remap,
         "fine_labels": dataset_spec.get("fine_labels"),
         "class_scale": dataset_spec.get("class_scale") or {},
+        "drop_gravity_level": bool(dataset_spec.get("drop_gravity_level")),
         "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
     }
 

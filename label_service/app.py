@@ -509,6 +509,8 @@ class DatasetSpec(BaseModel):
     pipeline: str | None = Field(None, description="v2 = 新版训练流程；不填走 train_custom.sh")
     fine_labels: list[str] | None = Field(None, description="v2：训练时单独成类、输出时并回的细类（默认 进食 / 饮水 / 甩身体）")
     class_scale: dict[str, float] | None = Field(None, description="v2：输出校准，各类概率乘的系数（如 抓挠 1.5）")
+    drop_gravity_level: bool = Field(False, description="v2：不用重力绝对大小那几维特征（跟各个项圈的校准有关，"
+                                                         "会让模型认项圈不认动作）。推理 / 端侧不用改")
     label_remap: dict[str, str] = Field(default_factory=dict,
         description="类别归并 {原名: 新名}，整理数据时改写。先按链的最后一级（细类）查，"
                     "查不到再按第一级（大类）。用来把太少的细类并进兄弟类别，"

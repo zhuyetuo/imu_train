@@ -150,6 +150,39 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
     # 端侧导出要的留出集
     d = np.load(tmp_path / "data/processed_v2pytest/15.625hz/val.npz")
     assert d["X"].shape[1:] == (62, 5) and set(np.unique(d["y"])) <= {0, 1, 2}
+    assert meta["drop_gravity_level"] is False and meta["masked_features"] == []
+    # 不用重力绝对大小：树里一次都不用那几列，特征维度不变（推理照常喂完整的向量）
+    from train_v2 import gravity_level_mask
+    specg = {**spec, "drop_gravity_level": True, "run_name": "v2pytestg"}
+    sp.write_text(json.dumps(specg, ensure_ascii=False), encoding="utf-8")
+    rg = subprocess.run([sys.executable, os.path.join(ROOT, "src", "ml", "train_v2.py"), "--spec", str(sp),
+                         "--repo", str(tmp_path), "--workers", "1", "--n_jobs", "1"], capture_output=True, text=True, timeout=600)
+    assert rg.returncode == 0, rg.stdout[-2000:] + rg.stderr[-2000:]
+    mg_path = tmp_path / "results/processed_v2pytestg/15.625hz_v2/rf/ml_rf.pkl"
+    mg = joblib.load(mg_path)
+    metag = json.load(open(str(mg_path).replace(".pkl", ".json"), encoding="utf-8"))
+    mask, names = gravity_level_mask(5)
+    assert metag["drop_gravity_level"] is True and metag["masked_features"] == names and "acc_z_mean" in names
+    assert mg.n_features_in_ == m.n_features_in_ == mask.size
+    for est in mg.estimators_:
+        f = est.tree_.feature
+        assert not mask[f[f >= 0]].any()
+    assert metag["macro_f1"] > 0.8
+    assert load_model_bundle(str(mg_path))["hz"] == 15.625
+
+
+def test_平台把不用重力绝对大小传到训练():
+    from label_service.app import DatasetSpec
+
+    d = DatasetSpec(date="pool", export_json="a.json", pipeline="v2", label_remap={"活动": "活动"}).model_dump()
+    try:
+        jobs.build_command(d, "rf", None, 99913)
+        assert json.load(open(_spec_file(99913), encoding="utf-8"))["drop_gravity_level"] is False
+        jobs.build_command({**d, "drop_gravity_level": True}, "rf", None, 99913)
+        assert json.load(open(_spec_file(99913), encoding="utf-8"))["drop_gravity_level"] is True
+    finally:
+        if os.path.exists(_spec_file(99913)):
+            os.remove(_spec_file(99913))
 
 
 def test_一起训练的数据集可以不用某几类(tmp_path):
