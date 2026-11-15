@@ -106,16 +106,25 @@ def _fmt_ts(t: datetime) -> str:
 
 
 def _zones(ts: list[datetime], window_s: float, stride_s: float, label_mode: str) -> list[tuple[datetime, datetime]]:
-    """每个窗口在时间轴上负责的区间，跟 infer_csv_scratch.window_zone 一致。"""
+    """每个窗口在时间轴上负责的区间，跟 infer_csv_scratch.window_zone 一致。
+
+    label_mode=segment（新版流程 train_v2 训的模型）：整体往后挪 (window_s - stride_s)/2。
+    这种模型的窗口是从标注片段**里面**切的，一个窗口判成抓挠 ≈ 这个窗口大半落在抓挠里，
+    代表的是窗口中间那段时间，不是窗口起点。按起点算的话片段整体早半个窗口——
+    pool_20261107 上连续推理 + 稳定版 v2 跟人标的抓挠比，开始时间中位数早 2.3 秒
+    （src/eval/scratch_event_cv.py）。挪的是整条时间轴，窗口之间的间隔不变，
+    合并 / 吞并 / 门槛这些判断一个都不受影响，只是片段的起止时间对上了。
+    板上（algo_tinyml tm_post）同理：喂给 tm_post 的窗口时间戳要加同样的偏移。"""
     out = []
     n = len(ts)
+    shift = timedelta(seconds=(window_s - stride_s) / 2) if label_mode == "segment" else timedelta(0)
     for k in range(n):
         if label_mode == "center":
             c = ts[k] + timedelta(seconds=window_s / 2)
             out.append((c - timedelta(seconds=stride_s / 2), c + timedelta(seconds=stride_s / 2)))
         else:
             end = ts[k + 1] if k + 1 < n else ts[k] + timedelta(seconds=window_s)
-            out.append((ts[k], end))
+            out.append((ts[k] + shift, end + shift))
     return out
 
 

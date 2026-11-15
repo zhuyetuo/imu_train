@@ -305,6 +305,11 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             half_pad = stride / 2
             return center - half_pad, center + half_pad
         next_s = start_indices[k + 1] if k + 1 < len(start_indices) else s + window_size
+        if label_mode == "segment":
+            # 新版流程的模型：窗口代表的是中间那段，整体往后挪 (窗口 - 步长)/2，
+            # 跟 label_service/postprocess._zones 一致（那里有原因）
+            sh = (window_size - stride) / 2
+            return s + sh, next_s + sh
         return s, next_s
 
     # 打印逐窗口结果（多类别时，一个窗口只可能是argmax出来的那一个类别，
