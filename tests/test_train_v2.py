@@ -169,6 +169,57 @@ def test_整条流程跑通_产物推理和端侧都认得(tmp_path):
         assert not mask[f[f >= 0]].any()
     assert metag["macro_f1"] > 0.8
     assert load_model_bundle(str(mg_path))["hz"] == 15.625
+    # XGBoost：直接训归并后的类别，产物是 ml_xgb.pkl + ml_xgb.json，推理侧照样认得
+    specx = {**spec, "model": "xgb", "drop_gravity_level": True, "run_name": "v2pytestx",
+             "model_params": {"n_estimators": 10, "max_depth": 4}}
+    sp.write_text(json.dumps(specx, ensure_ascii=False), encoding="utf-8")
+    rx = subprocess.run([sys.executable, os.path.join(ROOT, "src", "ml", "train_v2.py"), "--spec", str(sp),
+                         "--repo", str(tmp_path), "--workers", "1", "--n_jobs", "1"], capture_output=True, text=True, timeout=600)
+    assert rx.returncode == 0, rx.stdout[-2000:] + rx.stderr[-2000:]
+    assert jobs.parse_model_path(rx.stdout) == "results/processed_v2pytestx/15.625hz_v2/xgb/ml_xgb.pkl"
+    mx_path = tmp_path / "results/processed_v2pytestx/15.625hz_v2/xgb/ml_xgb.pkl"
+    metax = json.load(open(str(mx_path).replace(".pkl", ".json"), encoding="utf-8"))
+    assert metax["model"] == "xgb" and metax["train_classes"] == spec["classes"] and metax["fine_labels"] == []
+    assert metax["macro_f1"] > 0.8
+    bx = load_model_bundle(str(mx_path))
+    assert bx["classes"] == spec["classes"] and hasattr(bx["model"], "get_booster")
+    assert len(bx["model"].get_booster().get_dump()) == 10 * 3          # 10 轮 × 3 类
+
+
+def test_xgb_输出校准做进叶子_等于乘系数再归一化():
+    import xgboost  # noqa: F401
+    from train_v2 import bake_class_scale, fit_xgb, xgb_params
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(600, 6)).astype(np.float32)
+    y = rng.integers(0, 3, 600)
+    X[y == 1, 0] += 1.5
+    m, _ = fit_xgb(X, y, 3, xgb_params({"n_estimators": 8, "max_depth": 3}), 1)
+    before = m.predict_proba(X[:50])
+    s = np.array([1.0, 2.5, 0.5])
+    bake_class_scale(m, s, X[:200])
+    want = before * s
+    want /= want.sum(1, keepdims=True)
+    np.testing.assert_allclose(m.predict_proba(X[:50]), want, rtol=1e-4, atol=1e-6)
+    with pytest.raises(SystemExit):
+        xgb_params({"max_depth": 7})                                   # 端侧紧凑编码最多深 6
+
+
+def test_平台提交_xgb_走新版流程_端侧默认50轮深6():
+    from label_service.app import DatasetSpec
+
+    d = DatasetSpec(date="pool", export_json="a.json", pipeline="v2", label_remap={"活动": "活动"},
+                    edge_size=True).model_dump()
+    try:
+        jobs.build_command(d, "xgb", None, 99914)
+        spec = json.load(open(_spec_file(99914), encoding="utf-8"))
+        assert spec["model"] == "xgb" and spec["model_params"] == {"n_estimators": 50, "max_depth": 6}
+        jobs.build_command(d, "rf", None, 99914)
+        spec = json.load(open(_spec_file(99914), encoding="utf-8"))
+        assert spec["model"] == "rf" and spec["model_params"] == {"n_estimators": 20, "max_depth": 8}
+    finally:
+        if os.path.exists(_spec_file(99914)):
+            os.remove(_spec_file(99914))
 
 
 def test_静止活动按动作强度分_只改这两类本身():

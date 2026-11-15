@@ -282,6 +282,88 @@ def forest_uses(model, mask: np.ndarray) -> list[int]:
 
 # ── 合并 + 校准做进树里 ─────────────────────────────────────────────────────
 
+# ── XGBoost（端侧主力：algo_tinyml 的 GBDT 紧凑编码，同样大小下比随机森林准） ──
+# 跟随机森林两处不同：
+# 1. 直接训归并后的类别（不细分）。GBDT 多分类每轮每类一棵树、输出 softmax，没法像森林那样
+#    把细类的概率在叶子里并回去；端上要的是归并后的那几类。
+# 2. 输出校准做进第 k 类第一棵树的叶子：softmax 前给第 k 类的分数加 log(系数)，
+#    跟「概率乘系数再归一化」完全等价。存出来就是普通的 XGBClassifier，端侧导出不用改。
+XGB_DEFAULTS = dict(n_estimators=50, max_depth=6, learning_rate=0.2, subsample=0.8, colsample_bytree=0.8)
+
+
+def xgb_params(params: dict) -> dict:
+    kw = dict(XGB_DEFAULTS)
+    for k in ("n_estimators", "max_depth", "learning_rate", "subsample", "colsample_bytree"):
+        if params.get(k) not in (None, ""):
+            kw[k] = type(XGB_DEFAULTS[k])(params[k])
+    if kw["max_depth"] > 6:
+        # 端侧紧凑编码右孩子偏移只有 7 位：一棵树不能超过 127 个节点，深 6 正好 127
+        sys.exit(f"XGBoost 深度最多 6（端侧紧凑编码一棵树 ≤127 个节点），给的是 {kw['max_depth']}")
+    return kw
+
+
+def fit_xgb(F: np.ndarray, y: np.ndarray, n_classes: int, kw: dict, n_jobs: int):
+    """按类别均衡加权。返回 (模型, 这个模型认识的类别下标)——某一折里缺了某一类时 XGBoost
+    要求标签连续，所以先压缩成连续的再训"""
+    import xgboost as xgb
+
+    cls, cnt = np.unique(y, return_counts=True)
+    w = (len(y) / (len(cls) * cnt))[np.searchsorted(cls, y)]
+    lut = np.full(n_classes, -1)
+    lut[cls] = np.arange(len(cls))
+    m = xgb.XGBClassifier(**kw, tree_method="hist", n_jobs=n_jobs, random_state=42)
+    m.fit(F, lut[y], sample_weight=w)
+    return m, cls
+
+
+def xgb_proba(m, cls, F: np.ndarray, n_classes: int) -> np.ndarray:
+    p = np.zeros((len(F), n_classes))
+    p[:, cls] = m.predict_proba(F)
+    return p
+
+
+def bake_class_scale(model, scale: np.ndarray, check_x: np.ndarray | None = None):
+    """第 k 类的第一棵树（树 k）每片叶子加 log(scale[k])。做完用 check_x 验一下：
+    新概率 ∝ 旧概率 × scale（逐类的对数比应该处处等于 log scale 再差一个常数）"""
+    if np.allclose(scale, 1.0):
+        return model
+    b = model.get_booster()
+    raw = json.loads(bytes(b.save_raw("json")))
+    gb = raw["learner"]["gradient_booster"]["model"]
+    before = model.predict_proba(check_x) if check_x is not None else None
+    for k, s in enumerate(scale):
+        if s == 1.0:
+            continue
+        if int(gb["tree_info"][k]) != k:
+            sys.exit(f"XGBoost 的树 {k} 不属于第 {k} 类（tree_info={gb['tree_info'][k]}），校准没法做进叶子")
+        t, add = gb["trees"][k], float(np.log(s))
+        for i, lc in enumerate(t["left_children"]):
+            if lc == -1:
+                t["split_conditions"][i] += add
+                t["base_weights"][i] += add
+    b.load_model(bytearray(json.dumps(raw).encode()))
+    if before is not None:
+        after = model.predict_proba(check_x)
+        d = np.log(np.maximum(after, 1e-12)) - np.log(np.maximum(before, 1e-12)) - np.log(scale)[None, :]
+        if np.abs(d - d.mean(1, keepdims=True)).max() > 1e-3:
+            sys.exit("输出校准做进 XGBoost 叶子之后，概率跟「乘系数再归一化」对不上")
+    return model
+
+
+def xgb_nodes_and_features(model) -> tuple[int, set]:
+    """总节点数 + 树里用到的特征下标"""
+    n, used = 0, set()
+    for d in model.get_booster().get_dump(dump_format="json"):
+        stack = [json.loads(d)]
+        while stack:
+            nd = stack.pop()
+            n += 1
+            if "split" in nd:
+                used.add(int(str(nd["split"]).lstrip("f")))
+                stack += nd.get("children", [])
+    return n, used
+
+
 def merge_forest(model, fine_names: list[str], coarse_names: list[str], back: list[int], scale: np.ndarray):
     """训练用的细类森林 → 归并后类别的森林：叶子里细类的概率加到它归并到的那一类，
     再乘校准系数、每片叶子重新归一化。存出来就是普通的 sklearn 随机森林"""
@@ -344,6 +426,12 @@ def main(a):
                  n_jobs=int(a.n_jobs), random_state=42)
     if rf_kw["max_depth"] is not None:
         rf_kw["max_depth"] = int(rf_kw["max_depth"])
+    kind = str(spec.get("model") or "rf")
+    if kind not in ("rf", "xgb"):
+        sys.exit(f"新版流程的 model 只能是 rf / xgb，给的是 {kind!r}")
+    xgb_kw = xgb_params(params) if kind == "xgb" else None
+    if kind == "xgb":
+        fine = []          # GBDT 直接训归并后的类别，见 XGB_DEFAULTS 上面的说明
     run = spec["run_name"]
     drop_level = bool(spec.get("drop_gravity_level"))
     still_g = float(spec.get("still_motion_g") or 0) or None
@@ -353,7 +441,7 @@ def main(a):
     print(f"  类别：{classes}")
     print(f"  细分训练、合并输出：{fine or '不用'}")
     print(f"  输出校准：{ {c: s for c, s in zip(classes, scale) if s != 1} or '不用'}")
-    print(f"  随机森林：{rf_kw}")
+    print(f"  XGBoost：{xgb_kw}" if kind == "xgb" else f"  随机森林：{rf_kw}")
     print("=" * 60, flush=True)
 
     # 1. 片段
@@ -401,6 +489,7 @@ def main(a):
         F_tr, F_ev = blank_features(F_tr, fmask), blank_features(F_ev, fmask)
         print(f"▶ 不用重力绝对大小（跟项圈校准有关）：屏蔽 {len(masked)} 维 {masked}", flush=True)
     name_idx = {n: i for i, n in enumerate(names)}
+    back_arr = np.asarray(back)
     yf_tr = np.array([name_idx[segs[s]["name"]] for s in seg_tr])
     y_ev = np.array([classes.index(segs[s]["coarse"]) for s in seg_ev])
     still_info = None
@@ -428,9 +517,14 @@ def main(a):
         for k, (_, te) in enumerate(cv.split(F_ev, y_ev, g_ev)):
             test_g = set(g_ev[te])
             tr = ~np.isin(g_tr, list(test_g))
-            m = RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr])
-            m = merge_forest(m, names, classes, back, scale)
-            proba[te] = m.predict_proba(F_ev[te])
+            if kind == "xgb":
+                m, mc = fit_xgb(F_tr[tr], back_arr[yf_tr[tr]], len(classes), xgb_kw, int(a.n_jobs))
+                p_ = xgb_proba(m, mc, F_ev[te], len(classes)) * scale[None, :]
+                proba[te] = p_ / p_.sum(1, keepdims=True)
+            else:
+                m = RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr])
+                m = merge_forest(m, names, classes, back, scale)
+                proba[te] = m.predict_proba(F_ev[te])
             if holdout is None:
                 holdout = te
             print(f"  交叉验证 {k + 1}/{folds}", flush=True)
@@ -440,19 +534,29 @@ def main(a):
         pred = None
 
     # 5. 全量训练
-    model = RandomForestClassifier(**rf_kw).fit(F_tr, yf_tr)
-    model = merge_forest(model, names, classes, back, scale)
-    n_nodes = int(sum(e.tree_.node_count for e in model.estimators_))
-    print(f"▶ 全量训练完成：{len(model.estimators_)} 棵树，{n_nodes} 个节点", flush=True)
-    if drop_level:
-        bad = forest_uses(model, fmask)
-        if bad:
-            sys.exit(f"屏蔽的特征被树用到了（不应该发生）：列 {bad}")
+    if kind == "xgb":
+        model, mc = fit_xgb(F_tr, back_arr[yf_tr], len(classes), xgb_kw, int(a.n_jobs))
+        if len(mc) != len(classes):
+            sys.exit(f"全部数据里缺类别 {[classes[i] for i in set(range(len(classes))) - set(mc.tolist())]}，"
+                     "XGBoost 导到端侧要求每一类都有")
+        model = bake_class_scale(model, scale, F_ev[:2000])
+        n_nodes, used = xgb_nodes_and_features(model)
+        n_trees = len(model.get_booster().get_dump())
+        print(f"▶ 全量训练完成：{n_trees} 棵树（{xgb_kw['n_estimators']} 轮 × {len(classes)} 类），{n_nodes} 个节点", flush=True)
+        bad = sorted(used & set(np.flatnonzero(fmask).tolist())) if drop_level else []
+    else:
+        model = RandomForestClassifier(**rf_kw).fit(F_tr, yf_tr)
+        model = merge_forest(model, names, classes, back, scale)
+        n_nodes = int(sum(e.tree_.node_count for e in model.estimators_))
+        print(f"▶ 全量训练完成：{len(model.estimators_)} 棵树，{n_nodes} 个节点", flush=True)
+        bad = forest_uses(model, fmask) if drop_level else []
+    if bad:
+        sys.exit(f"屏蔽的特征被树用到了（不应该发生）：列 {bad}")
 
     # 6. 存
     hz_tag = f"{int(hz) if float(hz).is_integer() else hz}"
     proc_dir = os.path.join(a.repo, "data", f"processed_{run}", f"{hz_tag}hz")
-    out_dir = os.path.join(a.repo, a.results_dir, f"processed_{run}", f"{hz_tag}hz_v2", "rf")
+    out_dir = os.path.join(a.repo, a.results_dir, f"processed_{run}", f"{hz_tag}hz_v2", kind)
     os.makedirs(proc_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
     meta = {"hz": hz, "window_size": W, "stride": S, "n_channels": str(Xev_m.shape[2]), "classes": str(classes),
@@ -464,12 +568,13 @@ def main(a):
                             y_seq=np.repeat(y_ev[ho][:, None], W, 1), **meta)
 
     result = {
-        "hz": hz, "model": "rf", "pipeline": "v2",
+        "hz": hz, "model": kind, "pipeline": "v2",
         "classes": classes, "gravity_aligned": True, "channel_mode": "inv",
         "window_size": W, "stride": S, "window_s": round(W / hz, 3), "stride_s": round(S / hz, 3),
         "label_mode": "segment", "n_channels": int(Xev_m.shape[2]),
         "fine_labels": fine, "train_classes": names, "class_scale": {c: float(s) for c, s in zip(classes, scale)},
-        "rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}, "n_nodes": n_nodes,
+        **({"xgb": xgb_kw} if kind == "xgb" else {"rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}}),
+        "n_nodes": n_nodes,
         # 训练时置成常数的特征（树里一次都不用）；推理照常算完整的特征向量
         "drop_gravity_level": drop_level, "masked_features": masked,
         # 静止 / 活动按动作强度重新分（窗口级指标按改过的标签算；片段级指标仍按人标的片段）
@@ -535,10 +640,10 @@ def main(a):
         print(f"  （以上是全部数据集合在一起）片段级 macro F1 {result['segment_macro_f1']}" +
               (f"；抓挠按段 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
                if "scratch_segments" in result else ""))
-    with open(os.path.join(out_dir, "ml_rf.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir, f"ml_{kind}.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     import joblib
-    path = os.path.join(out_dir, "ml_rf.pkl")
+    path = os.path.join(out_dir, f"ml_{kind}.pkl")
     joblib.dump(model, path)
     print(f"\n▶ 完成，用时 {time.time() - t0:.0f}s")
     print(f"纯标注: {os.path.relpath(path, a.repo)}")

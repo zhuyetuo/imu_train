@@ -399,7 +399,7 @@ V2_DEFAULT_HZ = 20.0
 V2_MAX_WINDOW = 128
 
 
-def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
+def v2_spec(dataset_spec: dict, job_id: int | None, model_type: str = "rf") -> dict:
     """平台的 dataset_spec → train_v2.py 的输入。主数据集和一起训练的那几份都直接读 NAS 上的导出 JSON
     （不读 prepare_export 改写过的那份：那份已经按归并表改过类别名，细分训练要的「进食 / 饮水」就没了）"""
     hz = float(dataset_spec.get("hz") or V2_DEFAULT_HZ)
@@ -421,8 +421,9 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
         raise RuntimeError("新版训练流程只认标注平台导出的数据集（要有 export_json）")
     mp = dict(dataset_spec.get("model_params") or {})
     if dataset_spec.get("edge_size"):
-        mp.setdefault("n_estimators", dataset_spec.get("edge_trees") or 20)
-        mp.setdefault("max_depth", dataset_spec.get("edge_depth") or 8)
+        # XGBoost 端侧默认 50 轮 × 深 6（algo_tinyml 紧凑编码一棵树 ≤127 节点，深度最多 6）
+        mp.setdefault("n_estimators", dataset_spec.get("edge_trees") or (50 if model_type == "xgb" else 20))
+        mp.setdefault("max_depth", dataset_spec.get("edge_depth") or (6 if model_type == "xgb" else 8))
     run = re.sub(r"[^0-9A-Za-z_.-]", "_", f"{dataset_spec['date']}__job{job_id}" if job_id is not None else dataset_spec["date"])[:80]
     return {
         "hz": hz, "window": window, "stride_s": float(dataset_spec.get("stride_s") or 1.0),
@@ -433,6 +434,7 @@ def v2_spec(dataset_spec: dict, job_id: int | None) -> dict:
         "class_scale": dataset_spec.get("class_scale") or {},
         "drop_gravity_level": bool(dataset_spec.get("drop_gravity_level")),
         "still_motion_g": dataset_spec.get("still_motion_g") or None,
+        "model": model_type,
         "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
     }
 
@@ -449,9 +451,9 @@ def v2_stats_geom(dataset_spec: dict) -> tuple:
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
     if dataset_spec.get("pipeline") == "v2":
-        if model_type != "rf":
-            raise RuntimeError("新版训练流程目前只训随机森林（rf）")
-        spec = v2_spec(dataset_spec, job_id)
+        if model_type not in ("rf", "xgb"):
+            raise RuntimeError("新版训练流程只训随机森林（rf）或 XGBoost（xgb）")
+        spec = v2_spec(dataset_spec, job_id, model_type)
         os.makedirs(os.path.join(config.REPO_ROOT, "tmp"), exist_ok=True)
         rel = os.path.join("tmp", f"train_v2_job{job_id if job_id is not None else 'manual'}.json")
         with open(os.path.join(config.REPO_ROOT, rel), "w", encoding="utf-8") as f:
