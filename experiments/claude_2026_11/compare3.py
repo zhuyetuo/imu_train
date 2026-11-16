@@ -84,6 +84,7 @@ class Rule:
 # ── CNN (same structure algo_tinyml exports as int8) ───────────────────────
 CNN_INIT = None   # {"conv": state_dict, "mu", "sd"} from ssl_pretrain.py (--cnn_init)
 CNN_FILTERS, CNN_KERNEL = (32, 64, 128), 5   # --cnn_filters / --cnn_kernel (same structure algo_tinyml exports)
+UNL = None        # never-labeled windows for self-training (--pseudo_npz)
 
 
 def cnn_fit(X, y, epochs=30):
@@ -260,6 +261,17 @@ def main(a):
             pred["xgb"] = lambda X, F, R, xg=xg, xc=xc: T.xgb_proba(xg, xc, F, len(CLASSES))
         if "cnn" in methods:
             cnn = cnn_fit(Xtr[tr], yc_tr[tr], a.epochs)
+            if UNL is not None:
+                # self-training: this fold's model labels never-labeled windows; confident ones join this fold's
+                # training set (teacher saw only this fold's training groups → no test-fold leakage)
+                Pu = cnn(UNL)
+                conf = Pu.max(1) >= a.pseudo_thr
+                yu = Pu.argmax(1)
+                still_nw = np.isin(yu, [CLASSES.index("未佩戴"), CLASSES.index("静止/休息")])
+                keep = conf & ~still_nw          # static classes come from the motion rule anyway
+                print(f"  fold {k+1}: pseudo-labeled {int(keep.sum())} of {len(UNL)} "
+                      f"(scratch {int((keep & (yu == CLASSES.index('抓挠'))).sum())})", flush=True)
+                cnn = cnn_fit(np.concatenate([Xtr[tr], UNL[keep]]), np.concatenate([yc_tr[tr], yu[keep]]), a.epochs)
             pred["cnn"] = lambda X, F, R, cnn=cnn: cnn(X)
         for m in methods:
             P_ev[m][te] = pred[m](Xev[te], F_ev[te], R_ev[te])
@@ -349,7 +361,12 @@ if __name__ == "__main__":
     p.add_argument("--cnn_init", default="", help="ssl_pretrain.py checkpoint to initialize the CNN conv stack")
     p.add_argument("--cnn_filters", default="32,64,128"); p.add_argument("--cnn_kernel", type=int, default=5)
     p.add_argument("--xgb_rounds", type=int, default=50); p.add_argument("--xgb_depth", type=int, default=6)
+    p.add_argument("--pseudo_npz", default=""); p.add_argument("--pseudo_thr", type=float, default=0.95)
     args = p.parse_args()
+    if args.pseudo_npz:
+        UNL = np.load(args.pseudo_npz)["X"].astype(np.float32)
+        assert UNL.shape[1] == args.window, (UNL.shape, args.window)
+        print("pseudo-label pool", UNL.shape, flush=True)
     CNN_FILTERS = tuple(int(v) for v in args.cnn_filters.split(",")); CNN_KERNEL = args.cnn_kernel
     if args.cnn_init:
         import torch
