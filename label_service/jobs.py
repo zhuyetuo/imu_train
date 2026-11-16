@@ -451,8 +451,8 @@ def v2_stats_geom(dataset_spec: dict) -> tuple:
 def build_command(dataset_spec: dict, model_type: str, tag: str | None,
                   job_id: int | None = None) -> list[str]:
     if dataset_spec.get("pipeline") == "v2":
-        if model_type not in ("rf", "xgb"):
-            raise RuntimeError("新版训练流程只训随机森林（rf）或 XGBoost（xgb）")
+        if model_type not in ("rf", "xgb", "cnn"):
+            raise RuntimeError("新版训练流程只训随机森林（rf）、XGBoost（xgb）或端侧 1D-CNN（cnn）")
         spec = v2_spec(dataset_spec, job_id, model_type)
         os.makedirs(os.path.join(config.REPO_ROOT, "tmp"), exist_ok=True)
         rel = os.path.join("tmp", f"train_v2_job{job_id if job_id is not None else 'manual'}.json")

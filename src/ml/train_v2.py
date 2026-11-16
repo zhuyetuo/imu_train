@@ -364,6 +364,133 @@ def xgb_nodes_and_features(model) -> tuple[int, set]:
     return n, used
 
 
+# ── 1D-CNN（端侧 int8：algo_tinyml 的 tm_prep + tm_runtime，结构就是 src/dl/models/cnn.py） ──
+# [Conv1d(pad k//2) + BN + ReLU + MaxPool2 + Dropout] × 3 → flatten → Linear。直接吃原始窗口（inv 通道），
+# 不算 193 维特征、不做 FFT；int8 约 30 KB。跟 XGBoost 一样直接训归并后的类别。
+#
+# 动作门（motion_gate）：int8 量化之后，静止（|a| 抖动 ~0.005g）和未佩戴（~0.0005g）只差一两个 LSB，
+# CNN 根本看不见——#pool_20261116 交叉验证里 CNN 的静止 F1 只有 0.32。所以这两类不交给 CNN：
+# 窗口内 |a| 标准差 < notworn_g → 未佩戴，< still_g → 静止（still_g 就是 still_motion_g，静止本来就是这么定义的），
+# 其余窗口里这两类的概率清零、CNN 在剩下的类别里选。门限 notworn_g 在训练数据上挑（未佩戴 vs 静止分得最开的那个）。
+# 平台推理（infer_csv_scratch._load_dl_model）和端侧（algo_tinyml host / 固件）用同一个门，参数存在 dl_cnn_best.json。
+CNN_DEFAULTS = dict(filters=[32, 64, 128], kernel_size=5, dropout=0.2)
+NOTWORN = "未佩戴"
+
+
+def cnn_params(params: dict) -> tuple[dict, int]:
+    cfg = dict(CNN_DEFAULTS)
+    f = params.get("filters")
+    if f:
+        cfg["filters"] = [int(x) for x in (f.split(",") if isinstance(f, str) else f)]
+    if params.get("kernel_size"):
+        cfg["kernel_size"] = int(params["kernel_size"])
+    if params.get("dropout") not in (None, ""):
+        cfg["dropout"] = float(params["dropout"])
+    return cfg, int(params.get("epochs") or 20)
+
+
+def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int, seed: int = 0):
+    """X: [N, T, C] 原始窗口（inv 通道），y: 归并后的类别。返回 (网络（cpu、eval）, ch_mean, ch_std)"""
+    import torch
+    import torch.nn as nn
+
+    sys.path.insert(0, os.path.join(_HERE, "..", "dl"))
+    from models.cnn import CNN
+
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    C = X.shape[2]
+    mu = X.reshape(-1, C).mean(0)
+    sd = X.reshape(-1, C).std(0)
+    sd[sd < 1e-6] = 1.0
+    net = CNN(C, X.shape[1], n_classes, cfg).to(dev)
+    Xt = torch.tensor((X - mu) / sd, dtype=torch.float32).permute(0, 2, 1).contiguous()
+    yt = torch.tensor(y, dtype=torch.long)
+    cnt = np.bincount(y, minlength=n_classes).astype(float)
+    w = np.sqrt(len(y) / (n_classes * np.maximum(cnt, 1)))
+    lossf = nn.CrossEntropyLoss(weight=torch.tensor(w, dtype=torch.float32, device=dev), label_smoothing=0.05)
+    opt = torch.optim.AdamW(net.parameters(), 2e-3, weight_decay=1e-3)
+    bs = 512
+    nb = (len(y) + bs - 1) // bs
+    sch = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-3, total_steps=max(1, epochs * nb))
+    shift = max(1, X.shape[1] // 10)
+    for _ in range(epochs):
+        net.train()
+        perm = torch.randperm(len(y))
+        for b in range(nb):
+            ix = perm[b * bs:(b + 1) * bs]
+            xb = Xt[ix].to(dev)
+            # 增强：幅度缩放、小噪声、整体平移（窗口里动作出现的位置不固定）
+            xb = xb * (1 + 0.1 * torch.randn(len(ix), 1, 1, device=dev)) + 0.02 * torch.randn_like(xb)
+            xb = torch.roll(xb, int(rng.integers(-shift, shift + 1)), 2)
+            loss = lossf(net(xb), yt[ix].to(dev))
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sch.step()
+    return net.cpu().eval(), mu.astype(np.float64), sd.astype(np.float64)
+
+
+def cnn_proba(net, mu, sd, X: np.ndarray) -> np.ndarray:
+    import torch
+
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(X), 4096):
+            xb = torch.tensor((X[i:i + 4096] - mu) / sd, dtype=torch.float32).permute(0, 2, 1)
+            out.append(torch.softmax(net(xb), 1).numpy())
+    return np.concatenate(out) if out else np.zeros((0, net.fc.out_features))
+
+
+def bake_cnn_scale(net, scale: np.ndarray):
+    """输出校准做进最后一层的偏置：logit 加 log(系数) ≡ 概率乘系数再归一化"""
+    import torch
+
+    with torch.no_grad():
+        net.fc.bias += torch.tensor(np.log(scale), dtype=net.fc.bias.dtype)
+    return net
+
+
+def fit_motion_gate(mot: np.ndarray, y: np.ndarray, classes: list[str], still_g: float | None) -> dict | None:
+    """未佩戴 / 静止 这两类按 |a| 抖动判。notworn_g 在训练窗口上挑：两类之间分得最准的那个阈值"""
+    i_nw = classes.index(NOTWORN) if NOTWORN in classes else None
+    i_st = classes.index(STILL) if (STILL in classes and still_g) else None
+    if i_nw is None and i_st is None:
+        return None
+    best = (None, 0.0)
+    if i_nw is not None:
+        hi = still_g or 0.005
+        nw, st = mot[y == i_nw], (mot[y == i_st] if i_st is not None else np.zeros(0))
+        best = (-1.0, 0.0008)
+        for t in np.geomspace(1e-4, hi, 60):
+            acc = ((nw < t).sum() + (st >= t).sum()) / max(len(nw) + len(st), 1)
+            if acc > best[0]:
+                best = (float(acc), float(t))
+    return {"channel": 2, "notworn_g": round(best[1], 6), "still_g": still_g if i_st is not None else None,
+            "notworn": i_nw, "still": i_st,
+            "train_acc_notworn_vs_still": round(best[0], 4) if best[0] is not None else None}
+
+
+def apply_motion_gate(P: np.ndarray, mot: np.ndarray, gate: dict | None) -> np.ndarray:
+    if not gate:
+        return P
+    P = P.copy()
+    i_nw, i_st = gate.get("notworn"), gate.get("still")
+    low = (mot < gate["notworn_g"]) if i_nw is not None else np.zeros(len(P), bool)
+    still = ((mot < gate["still_g"]) & ~low) if (i_st is not None and gate.get("still_g")) else np.zeros(len(P), bool)
+    moving = ~low & ~still
+    for i in (i_nw, i_st if gate.get("still_g") else None):
+        if i is not None:
+            P[moving, i] = 0.0
+    P[moving] /= np.maximum(P[moving].sum(1, keepdims=True), 1e-12)
+    for m, i in ((low, i_nw), (still, i_st)):
+        if i is not None and m.any():
+            P[m] = 0.0
+            P[m, i] = 1.0
+    return P
+
+
 def merge_forest(model, fine_names: list[str], coarse_names: list[str], back: list[int], scale: np.ndarray):
     """训练用的细类森林 → 归并后类别的森林：叶子里细类的概率加到它归并到的那一类，
     再乘校准系数、每片叶子重新归一化。存出来就是普通的 sklearn 随机森林"""
@@ -429,11 +556,12 @@ def main(a):
     if rf_kw["max_depth"] is not None:
         rf_kw["max_depth"] = int(rf_kw["max_depth"])
     kind = str(spec.get("model") or "rf")
-    if kind not in ("rf", "xgb"):
-        sys.exit(f"新版流程的 model 只能是 rf / xgb，给的是 {kind!r}")
+    if kind not in ("rf", "xgb", "cnn"):
+        sys.exit(f"新版流程的 model 只能是 rf / xgb / cnn，给的是 {kind!r}")
     xgb_kw = xgb_params(params) if kind == "xgb" else None
-    if kind == "xgb":
-        fine = []          # GBDT 直接训归并后的类别，见 XGB_DEFAULTS 上面的说明
+    cnn_cfg, cnn_epochs = cnn_params(params) if kind == "cnn" else (None, 0)
+    if kind in ("xgb", "cnn"):
+        fine = []          # GBDT / CNN 直接训归并后的类别，见 XGB_DEFAULTS 上面的说明
     run = spec["run_name"]
     drop_level = bool(spec.get("drop_gravity_level"))
     still_g = float(spec.get("still_motion_g") or 0) or None
@@ -443,7 +571,8 @@ def main(a):
     print(f"  类别：{classes}")
     print(f"  细分训练、合并输出：{fine or '不用'}")
     print(f"  输出校准：{ {c: s for c, s in zip(classes, scale) if s != 1} or '不用'}")
-    print(f"  XGBoost：{xgb_kw}" if kind == "xgb" else f"  随机森林：{rf_kw}")
+    print(f"  XGBoost：{xgb_kw}" if kind == "xgb" else
+          f"  1D-CNN：{cnn_cfg}，{cnn_epochs} 轮" if kind == "cnn" else f"  随机森林：{rf_kw}")
     print("=" * 60, flush=True)
 
     # 1. 片段
@@ -509,6 +638,12 @@ def main(a):
     for c in range(len(classes)):
         print(f"  {classes[c]:<8} {int((y_ev == c).sum()):>7} 窗")
 
+    gate = None
+    if kind == "cnn":
+        mot_tr, mot_ev = motion_of(Xtr_m), motion_of(Xev_m)
+        gate = fit_motion_gate(mot_tr, back_arr[yf_tr], classes, still_g)
+        print(f"▶ 动作门：{gate}", flush=True)
+
     # 4. 分组交叉验证 → 指标
     n_groups = len(set(g_ev))
     folds = min(5, n_groups)
@@ -523,6 +658,10 @@ def main(a):
                 m, mc = fit_xgb(F_tr[tr], back_arr[yf_tr[tr]], len(classes), xgb_kw, int(a.n_jobs))
                 p_ = xgb_proba(m, mc, F_ev[te], len(classes)) * scale[None, :]
                 proba[te] = p_ / p_.sum(1, keepdims=True)
+            elif kind == "cnn":
+                net, mu, sd = fit_cnn(Xtr_m[tr], back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k)
+                p_ = cnn_proba(net, mu, sd, Xev_m[te]) * scale[None, :]
+                proba[te] = apply_motion_gate(p_ / p_.sum(1, keepdims=True), mot_ev[te], gate)
             else:
                 m = RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr])
                 m = merge_forest(m, names, classes, back, scale)
@@ -546,6 +685,15 @@ def main(a):
         n_trees = len(model.get_booster().get_dump())
         print(f"▶ 全量训练完成：{n_trees} 棵树（{xgb_kw['n_estimators']} 轮 × {len(classes)} 类），{n_nodes} 个节点", flush=True)
         bad = sorted(used & set(np.flatnonzero(fmask).tolist())) if drop_level else []
+    elif kind == "cnn":
+        yc = back_arr[yf_tr]
+        if len(set(yc.tolist())) != len(classes):
+            sys.exit(f"全部数据里缺类别 {[classes[i] for i in set(range(len(classes))) - set(yc.tolist())]}")
+        model, ch_mean, ch_std = fit_cnn(Xtr_m, yc, len(classes), cnn_cfg, cnn_epochs, seed=0)
+        model = bake_cnn_scale(model, scale)
+        n_nodes = int(sum(p.numel() for p in model.parameters()))
+        print(f"▶ 全量训练完成：1D-CNN {cnn_cfg}，{n_nodes} 个参数（int8 ≈ {n_nodes / 1024:.0f} KB）", flush=True)
+        bad = []
     else:
         model = RandomForestClassifier(**rf_kw).fit(F_tr, yf_tr)
         model = merge_forest(model, names, classes, back, scale)
@@ -575,8 +723,9 @@ def main(a):
         "window_size": W, "stride": S, "window_s": round(W / hz, 3), "stride_s": round(S / hz, 3),
         "label_mode": "segment", "n_channels": int(Xev_m.shape[2]),
         "fine_labels": fine, "train_classes": names, "class_scale": {c: float(s) for c, s in zip(classes, scale)},
-        **({"xgb": xgb_kw} if kind == "xgb" else {"rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}}),
-        "n_nodes": n_nodes,
+        **({"xgb": xgb_kw} if kind == "xgb" else {"cnn": {**cnn_cfg, "epochs": cnn_epochs}} if kind == "cnn"
+           else {"rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}}),
+        "n_nodes": n_nodes, "motion_gate": gate,
         # 训练时置成常数的特征（树里一次都不用）；推理照常算完整的特征向量
         "drop_gravity_level": drop_level, "masked_features": masked,
         # 静止 / 活动按动作强度重新分（窗口级指标按改过的标签算；片段级指标仍按人标的片段）
@@ -642,6 +791,24 @@ def main(a):
         print(f"  （以上是全部数据集合在一起）片段级 macro F1 {result['segment_macro_f1']}" +
               (f"；抓挠按段 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
                if "scratch_segments" in result else ""))
+    if kind == "cnn":
+        # 跟 src/dl/train.py 同一套产物：dl_cnn_best.pt（state_dict）+ dl_cnn_best.json（推理元数据）
+        # + dl_cnn.json（指标）。平台推理（infer_csv_scratch._load_dl_model）和端侧导出（algo_tinyml
+        # export_train.export_cnn）都认这一套
+        import torch
+        path = os.path.join(out_dir, "dl_cnn_best.pt")
+        torch.save(model.state_dict(), path)
+        infer_meta = {"model": "cnn", "hz": hz, "window_size": W, "stride": S, "n_channels": int(Xev_m.shape[2]),
+                      "classes": classes, "gravity_aligned": True, "channel_mode": "inv", "label_mode": "segment",
+                      "m2m": False, "ch_mean": ch_mean.tolist(), "ch_std": ch_std.tolist(), "model_cfg": cnn_cfg,
+                      "remap": None, "motion_gate": gate, "pipeline": "v2"}
+        with open(os.path.join(out_dir, "dl_cnn_best.json"), "w", encoding="utf-8") as f:
+            json.dump(infer_meta, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(out_dir, "dl_cnn.json"), "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"\n▶ 完成，用时 {time.time() - t0:.0f}s")
+        print(f"纯标注: {os.path.relpath(path, a.repo)}")
+        return
     with open(os.path.join(out_dir, f"ml_{kind}.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     import joblib

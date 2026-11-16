@@ -45,7 +45,7 @@ def test_平台勾新版流程_命令和输入都对():
         sp_ = json.load(open(_spec_file(99911), encoding="utf-8"))
         assert sp_["hz"] == 20.0 and sp_["window"] == 80
         with pytest.raises(RuntimeError):
-            jobs.build_command(d, "cnn", None, 99911)
+            jobs.build_command(d, "lgbm", None, 99911)
     finally:
         if os.path.exists(_spec_file(99911)):
             os.remove(_spec_file(99911))
@@ -310,3 +310,57 @@ def test_新版流程的训练集统计_按它自己的窗口_短片段不算进
     # 老流程还是按 2 秒窗口说「切不出来」
     old = dataset_stats.compute({**spec, "pipeline": None}, ["old__job7"])
     assert any("切不出来" in h or "进不了训练" in h for h in old["hints"])
+
+
+def test_cnn_动作门_未佩戴静止按抖动判_其余窗口这两类清零():
+    from train_v2 import apply_motion_gate, fit_motion_gate
+
+    classes = ["未佩戴", "静止/休息", "活动", "抓挠"]
+    mot = np.array([0.0002, 0.0003, 0.002, 0.003, 0.05, 0.2])
+    y = np.array([0, 0, 1, 1, 2, 3])
+    gate = fit_motion_gate(mot, y, classes, 0.005)
+    assert 0.0003 <= gate["notworn_g"] < 0.002 and gate["still_g"] == 0.005
+    P = np.full((6, 4), 0.25)
+    G = apply_motion_gate(P, mot, gate)
+    assert G.argmax(1).tolist()[:4] == [0, 0, 1, 1]
+    assert (G[4:, :2] == 0).all() and np.allclose(G.sum(1), 1)
+
+
+def test_cnn_端到端_产物平台推理认得_门生效(tmp_path):
+    pytest.importorskip("torch")
+    from infer_csv_scratch import _load_dl_model
+
+    rng = np.random.default_rng(3)
+    nas = tmp_path / "nas"
+    (nas / "raw").mkdir(parents=True)
+    tasks = []
+    for i, imu in enumerate(["imu1", "imu2", "imu3"]):
+        rel = f"raw/multicam_2026103{i}_100000000_cam1_{imu}_raw.csv"
+        still = lambda t, k: np.full_like(t, [0.0, 0.0, -1.0][k])
+        move = lambda t, k: np.sin(2 * np.pi * (1 + k) * 0.7 * t) * 0.4 + [0, 0, -1.0][k]
+        scratch = lambda t, k: np.sin(2 * np.pi * 6 * t + k) * 1.2 + [0, 0, -1.0][k]
+        f = lambda t, k: np.where(t < 60, still(t, k), np.where(t < 120, move(t, k), scratch(t, k)))
+        _fake_csv(nas / rel, 180, rng, f)
+        seg = lambda a, b, labs: {"value": {"start_ms": int(a * 1000), "end_ms": int(b * 1000), "timeserieslabels": labs}}
+        tasks.append({"id": i, "data": {"csv": rel, "sample_code": f"multicam_2026103{i}_100000000_{imu}"},
+                      "annotations": [{"id": i, "result": [seg(1, 59, ["静止/休息"]), seg(61, 119, ["活动"]), seg(121, 179, ["抓挠"])]}]})
+    exp = tmp_path / "merged_tmp.json"
+    exp.write_text(json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+    spec = {"hz": 15.625, "window": 62, "stride_s": 1.0, "classes": ["静止/休息", "活动", "抓挠"], "model": "cnn", "axes": 3,
+            "label_remap": {"静止/休息": "静止/休息", "活动": "活动", "抓挠": "抓挠"}, "still_motion_g": 0.05,
+            "model_params": {"epochs": 3, "filters": [8, 8, 8]}, "run_name": "v2pytestc", "nas_root": str(nas),
+            "datasets": [{"name": "fake", "export_json": str(exp), "source_hz": 50}]}
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "src", "ml", "train_v2.py"), "--spec", str(sp),
+                        "--repo", str(tmp_path), "--workers", "1", "--n_jobs", "1"], capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    rel = "results/processed_v2pytestc/15.625hz_v2/cnn/dl_cnn_best.pt"
+    assert jobs.parse_model_path(r.stdout) == rel
+    meta = json.load(open(tmp_path / rel.replace(".pt", ".json"), encoding="utf-8"))
+    assert meta["model"] == "cnn" and meta["n_channels"] == 5 and meta["motion_gate"]["still_g"] == 0.05
+    assert meta["model_cfg"]["filters"] == [8, 8, 8]
+    m, _ = _load_dl_model(str(tmp_path / rel))
+    X = np.zeros((2, 62, 5), np.float32)
+    X[:, :, 2] = 1.0                                     # 完全不动 → 门判成静止（这个模型没有未佩戴类）
+    assert m.predict_proba(X).argmax(1).tolist() == [0, 0]

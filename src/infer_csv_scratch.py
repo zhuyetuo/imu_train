@@ -111,9 +111,33 @@ def _load_dl_model(model_path):
                     probs = F.softmax(logits, dim=1).mean(dim=2)
                 else:
                     probs = F.softmax(logits, dim=1)
-            return probs.cpu().numpy()
+            probs = probs.cpu().numpy()
+            gate = dl_meta.get("motion_gate")
+            if gate:
+                probs = _apply_motion_gate(probs, X[:, :, int(gate.get("channel", 2))].astype(np.float64).std(axis=1), gate)
+            return probs
 
     return _DLModelWrapper(), dl_meta
+
+
+def _apply_motion_gate(P, mot, gate):
+    """train_v2 训的端侧 CNN：未佩戴 / 静止 不交给 CNN（int8 之后这两类只差一两个 LSB，看不见），
+    按窗口内 |a| 抖动（inv 通道 2 的标准差）判；其余窗口里这两类概率清零。
+    **跟 src/ml/train_v2.apply_motion_gate、algo_tinyml 的 tm_gate.h 同一套规则**，改一处三处一起改。"""
+    P = P.copy()
+    i_nw, i_st = gate.get("notworn"), gate.get("still")
+    low = (mot < gate["notworn_g"]) if i_nw is not None else np.zeros(len(P), bool)
+    still = ((mot < gate["still_g"]) & ~low) if (i_st is not None and gate.get("still_g")) else np.zeros(len(P), bool)
+    moving = ~low & ~still
+    for i in (i_nw, i_st if gate.get("still_g") else None):
+        if i is not None:
+            P[moving, i] = 0.0
+    P[moving] /= np.maximum(P[moving].sum(1, keepdims=True), 1e-12)
+    for m, i in ((low, i_nw), (still, i_st)):
+        if i is not None and m.any():
+            P[m] = 0.0
+            P[m, i] = 1.0
+    return P
 
 # 默认目标类别只有"抓挠"——保持旧调用方式（不传 --target_labels / 不设
 # TARGET_LABELS 环境变量）时行为跟改造前完全一致，不会因为这次多类别
