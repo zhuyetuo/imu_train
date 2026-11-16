@@ -256,7 +256,7 @@ def main(a):
                                 names, CLASSES, list(back), np.ones(len(CLASSES)))
             pred["rf"] = lambda X, F, R, rf=rf: rf.predict_proba(F)
         if "xgb" in methods:
-            xg, xc = T.fit_xgb(F_tr[tr], yc_tr[tr], len(CLASSES), T.xgb_params({"n_estimators": 50, "max_depth": 6}), a.n_jobs)
+            xg, xc = T.fit_xgb(F_tr[tr], yc_tr[tr], len(CLASSES), T.xgb_params({"n_estimators": a.xgb_rounds, "max_depth": a.xgb_depth}), a.n_jobs)
             pred["xgb"] = lambda X, F, R, xg=xg, xc=xc: T.xgb_proba(xg, xc, F, len(CLASSES))
         if "cnn" in methods:
             cnn = cnn_fit(Xtr[tr], yc_tr[tr], a.epochs)
@@ -348,6 +348,7 @@ if __name__ == "__main__":
     p.add_argument("--methods", default="rule,rf,xgb,cnn")
     p.add_argument("--cnn_init", default="", help="ssl_pretrain.py checkpoint to initialize the CNN conv stack")
     p.add_argument("--cnn_filters", default="32,64,128"); p.add_argument("--cnn_kernel", type=int, default=5)
+    p.add_argument("--xgb_rounds", type=int, default=50); p.add_argument("--xgb_depth", type=int, default=6)
     args = p.parse_args()
     CNN_FILTERS = tuple(int(v) for v in args.cnn_filters.split(",")); CNN_KERNEL = args.cnn_kernel
     if args.cnn_init:
