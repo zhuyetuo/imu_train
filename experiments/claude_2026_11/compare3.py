@@ -85,16 +85,50 @@ class Rule:
 CNN_INIT = None   # {"conv": state_dict, "mu", "sd"} from ssl_pretrain.py (--cnn_init)
 CNN_FILTERS, CNN_KERNEL = (32, 64, 128), 5   # --cnn_filters / --cnn_kernel (same structure algo_tinyml exports)
 UNL = None        # never-labeled windows for self-training (--pseudo_npz)
+CNN_ARCH, RES_CH, RES_BLOCKS = "plain", 128, 8   # --cnn_arch res: server-side model, no edge constraint
+
+
+def ResNet1D(C, K, ch, blocks):
+    """Server-side model (not for the board): stem + residual blocks with growing dilation (1,2,4,8,...) so the
+    receptive field covers the whole window, then mean+max pooling over time."""
+    import torch, torch.nn as nn
+
+    class Block(nn.Module):
+        def __init__(s, ch, d):
+            super().__init__()
+            s.c1 = nn.Conv1d(ch, ch, 5, padding=2 * d, dilation=d); s.b1 = nn.BatchNorm1d(ch)
+            s.c2 = nn.Conv1d(ch, ch, 5, padding=2 * d, dilation=d); s.b2 = nn.BatchNorm1d(ch)
+            s.dp = nn.Dropout(0.1)
+
+        def forward(s, x):
+            y = torch.relu(s.b1(s.c1(x)))
+            y = s.b2(s.c2(s.dp(y)))
+            return torch.relu(x + y)
+
+    class Net(nn.Module):
+        def __init__(s):
+            super().__init__()
+            s.stem = nn.Sequential(nn.Conv1d(C, ch, 7, padding=3), nn.BatchNorm1d(ch), nn.ReLU())
+            s.blocks = nn.Sequential(*[Block(ch, 2 ** (i % 4)) for i in range(blocks)])
+            s.head = nn.Sequential(nn.Dropout(0.2), nn.Linear(2 * ch, K))
+
+        def forward(s, x):
+            z = s.blocks(s.stem(x))
+            return s.head(torch.cat([z.mean(2), z.amax(2)], 1))
+    return Net()
 
 
 def cnn_fit(X, y, epochs=30):
     import torch, torch.nn as nn
     dev = "cuda"; C = X.shape[2]; K = len(CLASSES)
     mu = X.reshape(-1, C).mean(0); sd = X.reshape(-1, C).std(0) + 1e-6
-    L, ci = [], C
-    for co in CNN_FILTERS:
-        L += [nn.Conv1d(ci, co, CNN_KERNEL, padding=CNN_KERNEL // 2), nn.BatchNorm1d(co), nn.ReLU(), nn.MaxPool1d(2), nn.Dropout(0.2)]; ci = co
-    net = nn.Sequential(*L, nn.Flatten(), nn.Linear(ci * (X.shape[1] // 8), K)).to(dev)
+    if CNN_ARCH == "res":
+        net = ResNet1D(C, K, RES_CH, RES_BLOCKS).to(dev)
+    else:
+        L, ci = [], C
+        for co in CNN_FILTERS:
+            L += [nn.Conv1d(ci, co, CNN_KERNEL, padding=CNN_KERNEL // 2), nn.BatchNorm1d(co), nn.ReLU(), nn.MaxPool1d(2), nn.Dropout(0.2)]; ci = co
+        net = nn.Sequential(*L, nn.Flatten(), nn.Linear(ci * (X.shape[1] // 8), K)).to(dev)
     if CNN_INIT is not None:
         # same layer order as models.cnn.CNN.conv → keys "0.weight", "1.running_mean", ... line up
         missing, unexpected = net.load_state_dict(CNN_INIT["conv"], strict=False)
@@ -257,7 +291,10 @@ def main(a):
                                 names, CLASSES, list(back), np.ones(len(CLASSES)))
             pred["rf"] = lambda X, F, R, rf=rf: rf.predict_proba(F)
         if "xgb" in methods:
-            xg, xc = T.fit_xgb(F_tr[tr], yc_tr[tr], len(CLASSES), T.xgb_params({"n_estimators": a.xgb_rounds, "max_depth": a.xgb_depth}), a.n_jobs)
+            xkw = (T.xgb_params({"n_estimators": a.xgb_rounds, "max_depth": a.xgb_depth}) if a.xgb_depth <= 6 else
+                   dict(n_estimators=a.xgb_rounds, max_depth=a.xgb_depth, learning_rate=0.08, subsample=0.8,
+                        colsample_bytree=0.7, min_child_weight=2))          # server-side: no edge depth limit
+            xg, xc = T.fit_xgb(F_tr[tr], yc_tr[tr], len(CLASSES), xkw, a.n_jobs)
             pred["xgb"] = lambda X, F, R, xg=xg, xc=xc: T.xgb_proba(xg, xc, F, len(CLASSES))
         if "cnn" in methods:
             cnn = cnn_fit(Xtr[tr], yc_tr[tr], a.epochs)
@@ -362,7 +399,10 @@ if __name__ == "__main__":
     p.add_argument("--cnn_filters", default="32,64,128"); p.add_argument("--cnn_kernel", type=int, default=5)
     p.add_argument("--xgb_rounds", type=int, default=50); p.add_argument("--xgb_depth", type=int, default=6)
     p.add_argument("--pseudo_npz", default=""); p.add_argument("--pseudo_thr", type=float, default=0.95)
+    p.add_argument("--cnn_arch", default="plain"); p.add_argument("--res_ch", type=int, default=128)
+    p.add_argument("--res_blocks", type=int, default=8)
     args = p.parse_args()
+    CNN_ARCH, RES_CH, RES_BLOCKS = args.cnn_arch, args.res_ch, args.res_blocks
     if args.pseudo_npz:
         UNL = np.load(args.pseudo_npz)["X"].astype(np.float32)
         assert UNL.shape[1] == args.window, (UNL.shape, args.window)
