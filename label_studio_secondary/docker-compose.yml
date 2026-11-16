@@ -10,8 +10,8 @@
 # 即可，不用额外拷贝一份媒体文件。
 #
 # 用法:
-#   1. 改下面environment里的LABEL_STUDIO_USERNAME/LABEL_STUDIO_PASSWORD
-#      成你自己要用的邮箱和密码（不能用默认占位值，必须改）
+#   1. cp .env.example .env，把里面的LABEL_STUDIO_USERNAME/LABEL_STUDIO_PASSWORD
+#      改成你自己要用的邮箱和密码（不能用默认占位值，必须改）
 #   2. cd label_studio_secondary && docker compose up -d
 #   3. 浏览器打开 http://<服务器IP>:8081，用上面设置的邮箱+密码登录——
 #      DISABLE_SIGNUP_WITHOUT_LINK=true关掉了自助注册，页面只会显示登录，
@@ -37,11 +37,11 @@ services:
       # 关掉"允许任何人自助注册"，避免陌生人自己注册账号就能看到project——
       # 只应该由管理员在后台手动邀请指定的外部标注员
       - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
-      # 第一个管理员账号，启动时自动创建——必须改成你自己的邮箱和密码，
-      # 不要用下面这两个占位值。用户名必须是邮箱格式（Label Studio的账号
-      # 系统按邮箱识别）
-      - LABEL_STUDIO_USERNAME=change-me@example.com
-      - LABEL_STUDIO_PASSWORD=change-me-to-a-real-password
+      # 第一个管理员账号，启动时自动创建——值在 .env 里（见 .env.example），
+      # 不要把账号密码写进这个文件。用户名必须是邮箱格式（Label Studio 的
+      # 账号系统按邮箱识别）
+      - LABEL_STUDIO_USERNAME=${LABEL_STUDIO_USERNAME:?请在 .env 里设置}
+      - LABEL_STUDIO_PASSWORD=${LABEL_STUDIO_PASSWORD:?请在 .env 里设置}
     volumes:
       # 独立的数据目录（数据库、上传文件等），不跟主实例共用，保证project
       # 和用户数据完全隔离——这就是"真隔离"这个效果的来源
