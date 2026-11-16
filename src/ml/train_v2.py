@@ -491,6 +491,98 @@ def apply_motion_gate(P: np.ndarray, mot: np.ndarray, gate: dict | None) -> np.n
     return P
 
 
+# ── 片段级评估（经过后处理之后）────────────────────────────────────────────
+# 窗口对了不代表片段对：片段还要过稳定版 v2 的后处理（viterbi 解码、合并间隔、最短窗口数 / 平均概率门槛、
+# 抓挠吞并甩身体……），这一步会改片段的个数和起止。用户最后看到的是片段，所以按片段评：
+# 交叉验证里每个留出文件，在它的标注范围内按步长连续推理（没见过这个文件的模型）→ 平台同一份
+# label_service/postprocess.stabilize（viterbi）→ 出来的片段跟人标的同类片段配对。
+EVENT_EVAL = ("抓挠", "甩头/抖身")
+
+
+def labeled_span_windows(tl: dict, segs_of_file: list[dict], W: int, S: int, hz: float):
+    """这个文件人标过的范围 [最早开始, 最晚结束] 里按步长切窗口（跳过掉包）。返回 (窗口, 起点下标, (lo, hi) 秒)"""
+    ss = [s for s in segs_of_file if s.get("start_ms") is not None]
+    if not ss:
+        return None
+    lo, hi = min(s["start_ms"] for s in ss) / 1000, max(s["end_ms"] for s in ss) / 1000
+    x, bad = tl["x"], tl["bad"]
+    a0, a1 = max(0, int(lo * hz) - W // 2), min(len(x) - W, int(hi * hz))
+    st = [s for s in range(a0, max(a0, a1) + 1, S) if not bad[s:s + W].any()]
+    if not st:
+        return None
+    return np.stack([x[s:s + W] for s in st]).astype(np.float32), np.asarray(st), (lo, hi)
+
+
+def _iou(a, b):
+    i = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+    u = max(a[1], b[1]) - min(a[0], b[0])
+    return i / u if u > 0 else 0.0
+
+
+def _ov(a, b):
+    return min(a[1], b[1]) - max(a[0], b[0]) > 0
+
+
+def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
+    """per_file: [{gt: {类: [(s,e)]}, pred: {类: [(s,e)]}, other: {类: [(s,e)] 标成别的类的时间}}]"""
+    out = {}
+    for c in EVENT_EVAL:
+        if c not in classes:
+            continue
+        n_gt = hit = n_iou = fp = n_pred_judged = 0
+        other_h = 0.0
+        on, off, cnt = [], [], []
+        for f in per_file:
+            gt, pr, other = f["gt"].get(c, []), f["pred"].get(c, []), f["other"].get(c, [])
+            n_gt += len(gt)
+            hit += sum(any(_ov(g, p) for p in pr) for g in gt)
+            pairs = sorted(((_iou(g, p), i, j) for i, g in enumerate(gt) for j, p in enumerate(pr) if _iou(g, p) >= 0.5), reverse=True)
+            ug, up = set(), set()
+            for _, i, j in pairs:
+                if i not in ug and j not in up:
+                    ug.add(i); up.add(j)
+                    on.append(pr[j][0] - gt[i][0]); off.append(pr[j][1] - gt[i][1])
+            n_iou += len(ug)
+            other_h += sum(e - s for s, e in other) / 3600
+            for p in pr:
+                tp = any(_ov(p, g) for g in gt)
+                in_other = any(_ov(p, o) for o in other)
+                if tp or in_other:           # 落在没标的时间里的不算对也不算错（那里没标不等于没有）
+                    n_pred_judged += 1
+                    fp += (not tp) and in_other
+            if gt:
+                cnt.append(len(pr) - len(gt))
+        med = (lambda v: round(float(np.median(np.abs(v))), 2) if v else None)
+        out[c] = {"n_gt": n_gt, "recall_hit": round(hit / max(n_gt, 1), 4), "recall_iou50": round(n_iou / max(n_gt, 1), 4),
+                  "precision": round(1 - fp / max(n_pred_judged, 1), 4), "fp_per_h_other": round(fp / max(other_h, 1e-9), 2),
+                  "other_hours": round(other_h, 1), "onset_abs_err_s": med(on), "offset_abs_err_s": med(off),
+                  "count_diff_mean_abs": round(float(np.mean(np.abs(cnt))), 2) if cnt else None}
+    return out
+
+
+def postprocess_segments(P: np.ndarray, starts: np.ndarray, t0, classes: list[str], W: int, S: int, hz: float, repo: str):
+    """一个文件的逐窗口概率 → 稳定版 v2（viterbi，平台 STABLE_* 参数）→ {类: [(开始秒, 结束秒)]}"""
+    from datetime import timedelta
+
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    from label_service import config as ls_cfg, postprocess as pp
+
+    sp = pp.StableParams(event_labels=tuple(ls_cfg.STABLE_EVENT_LABELS), smooth_windows=ls_cfg.STABLE_SMOOTH_WINDOWS,
+                         min_state_s=ls_cfg.STABLE_MIN_STATE_S, event_enter=ls_cfg.STABLE_EVENT_ENTER,
+                         event_stay=ls_cfg.STABLE_EVENT_STAY, event_gap_s=ls_cfg.STABLE_EVENT_GAP_S,
+                         shake_absorb_s=ls_cfg.STABLE_SHAKE_ABSORB_S, event_min_windows=ls_cfg.STABLE_EVENT_MIN_WINDOWS,
+                         event_min_mean=ls_cfg.STABLE_EVENT_MIN_MEAN, event_single_conf=ls_cfg.STABLE_EVENT_SINGLE_CONF,
+                         spectral_min=ls_cfg.STABLE_SPECTRAL_MIN, viterbi_switch=ls_cfg.STABLE_VITERBI_SWITCH,
+                         notworn_min_s=ls_cfg.STABLE_NOTWORN_MIN_S)
+    wins = [{"ts": pp._fmt_ts(t0 + timedelta(seconds=float(s) / hz)), "label": classes[int(q.argmax())], "conf": float(q.max()),
+             "probs": {c: float(v) for c, v in zip(classes, q)}} for s, q in zip(starts, P)]
+    targets = [c for c in EVENT_EVAL if c in classes]
+    segs = pp.stabilize(wins, classes, targets, W / hz, S / hz, "segment", sp, algo="viterbi")
+    return {c: [((pp._parse_ts(x["start_ts"]) - t0).total_seconds(), (pp._parse_ts(x["end_ts"]) - t0).total_seconds())
+                for x in segs.get(c, [])] for c in targets}
+
+
 def merge_forest(model, fine_names: list[str], coarse_names: list[str], back: list[int], scale: np.ndarray):
     """训练用的细类森林 → 归并后类别的森林：叶子里细类的概率加到它归并到的那一类，
     再乘校准系数、每片叶子重新归一化。存出来就是普通的 sklearn 随机森林"""
@@ -648,24 +740,48 @@ def main(a):
     n_groups = len(set(g_ev))
     folds = min(5, n_groups)
     proba = np.zeros((len(y_ev), len(classes)))
+    seg_files: list[dict] = []
     holdout = None
     if folds >= 2:
         cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=0)
         for k, (_, te) in enumerate(cv.split(F_ev, y_ev, g_ev)):
             test_g = set(g_ev[te])
             tr = ~np.isin(g_tr, list(test_g))
+            def _feats(Xraw):
+                Xm_, F_ = featurize(Xraw, hz)
+                return Xm_, (blank_features(F_, fmask) if drop_level else F_)
             if kind == "xgb":
                 m, mc = fit_xgb(F_tr[tr], back_arr[yf_tr[tr]], len(classes), xgb_kw, int(a.n_jobs))
-                p_ = xgb_proba(m, mc, F_ev[te], len(classes)) * scale[None, :]
-                proba[te] = p_ / p_.sum(1, keepdims=True)
+                def _pred(Xm_, F_, m=m, mc=mc):
+                    p_ = xgb_proba(m, mc, F_, len(classes)) * scale[None, :]
+                    return p_ / p_.sum(1, keepdims=True)
             elif kind == "cnn":
                 net, mu, sd = fit_cnn(Xtr_m[tr], back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k)
-                p_ = cnn_proba(net, mu, sd, Xev_m[te]) * scale[None, :]
-                proba[te] = apply_motion_gate(p_ / p_.sum(1, keepdims=True), mot_ev[te], gate)
+                def _pred(Xm_, F_, net=net, mu=mu, sd=sd):
+                    p_ = cnn_proba(net, mu, sd, Xm_) * scale[None, :]
+                    return apply_motion_gate(p_ / p_.sum(1, keepdims=True), motion_of(Xm_), gate)
             else:
-                m = RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr])
-                m = merge_forest(m, names, classes, back, scale)
-                proba[te] = m.predict_proba(F_ev[te])
+                m = merge_forest(RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr]), names, classes, back, scale)
+                def _pred(Xm_, F_, m=m):
+                    return m.predict_proba(F_)
+            proba[te] = _pred(Xev_m[te], F_ev[te])
+            # 片段级（后处理之后）：这一折留出的文件，在标注范围内连续推理
+            for p_csv, tl in tls.items():
+                ss = by_csv.get(p_csv) or []
+                if not ss or _group_of(ss[0]["sample_code"]) not in test_g:
+                    continue
+                cw = labeled_span_windows(tl, ss, W, S, hz)
+                if cw is None:
+                    continue
+                Xc, st_c, _span = cw
+                Xm_c, F_c = _feats(Xc)
+                # 代码根目录（label_service 在这里），不是 --repo（产物目录，测试里是临时目录）
+                pred_seg = postprocess_segments(_pred(Xm_c, F_c), st_c, tl["t0"], classes, W, S, hz,
+                                                os.path.abspath(os.path.join(_HERE, "..", "..")))
+                hs = [(s["start_ms"] / 1000, s["end_ms"] / 1000, s["coarse"]) for s in ss if s.get("start_ms") is not None]
+                seg_files.append({"gt": {c: [(x0, x1) for x0, x1, cc in hs if cc == c] for c in EVENT_EVAL},
+                                  "other": {c: [(x0, x1) for x0, x1, cc in hs if cc != c] for c in EVENT_EVAL},
+                                  "pred": pred_seg})
             if holdout is None:
                 holdout = te
             print(f"  交叉验证 {k + 1}/{folds}", flush=True)
@@ -749,6 +865,9 @@ def main(a):
         sy = np.array([classes.index(segs[s]["coarse"]) for s in su])
         sp = np.array([proba[seg_ev == s].mean(0).argmax() for s in su])
         result["segment_macro_f1"] = round(float(f1_score(sy, sp, average="macro")), 4)
+        # 片段级（经过稳定版 v2 后处理）：用户最后看到的是这个
+        result["postprocess_segments"] = segment_metrics(seg_files, classes)
+        print(f"  片段级（后处理后）：{result['postprocess_segments']}", flush=True)
         if "抓挠" in classes:
             k = classes.index("抓挠")
             result["scratch_segments"] = {"recall": round(float((sp[sy == k] == k).mean()), 3) if (sy == k).any() else None,
