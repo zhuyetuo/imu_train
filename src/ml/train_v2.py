@@ -370,7 +370,9 @@ def merge_forest(model, fine_names: list[str], coarse_names: list[str], back: li
     from sklearn.tree._tree import Tree
 
     K = len(coarse_names)
-    M = np.zeros((len(fine_names), K))
+    # 行数按**森林实际见过的类别**，不是全部细类：某一折的训练数据里恰好没有某个细类（比如饮水）时，
+    # 叶子里的概率列就少一列，按全部细类开矩阵会维度对不上（交叉验证当场崩）
+    M = np.zeros((len(model.classes_), K))
     for i, c in enumerate(model.classes_):
         M[i, back[int(c)]] = 1.0
     for est in model.estimators_:
