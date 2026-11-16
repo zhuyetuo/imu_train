@@ -83,6 +83,7 @@ class Rule:
 
 # ── CNN (same structure algo_tinyml exports as int8) ───────────────────────
 CNN_INIT = None   # {"conv": state_dict, "mu", "sd"} from ssl_pretrain.py (--cnn_init)
+CNN_FILTERS, CNN_KERNEL = (32, 64, 128), 5   # --cnn_filters / --cnn_kernel (same structure algo_tinyml exports)
 
 
 def cnn_fit(X, y, epochs=30):
@@ -90,9 +91,9 @@ def cnn_fit(X, y, epochs=30):
     dev = "cuda"; C = X.shape[2]; K = len(CLASSES)
     mu = X.reshape(-1, C).mean(0); sd = X.reshape(-1, C).std(0) + 1e-6
     L, ci = [], C
-    for co in (32, 64, 128):
-        L += [nn.Conv1d(ci, co, 5, padding=2), nn.BatchNorm1d(co), nn.ReLU(), nn.MaxPool1d(2), nn.Dropout(0.2)]; ci = co
-    net = nn.Sequential(*L, nn.Flatten(), nn.Linear(128 * (X.shape[1] // 8), K)).to(dev)
+    for co in CNN_FILTERS:
+        L += [nn.Conv1d(ci, co, CNN_KERNEL, padding=CNN_KERNEL // 2), nn.BatchNorm1d(co), nn.ReLU(), nn.MaxPool1d(2), nn.Dropout(0.2)]; ci = co
+    net = nn.Sequential(*L, nn.Flatten(), nn.Linear(ci * (X.shape[1] // 8), K)).to(dev)
     if CNN_INIT is not None:
         # same layer order as models.cnn.CNN.conv → keys "0.weight", "1.running_mean", ... line up
         missing, unexpected = net.load_state_dict(CNN_INIT["conv"], strict=False)
@@ -123,6 +124,49 @@ def cnn_fit(X, y, epochs=30):
     return proba
 
 
+CACHE = os.path.expanduser("~/claude_exp/tl_cache")
+
+
+def _cached_timeline(args):
+    """load_timeline with a local-disk cache (NAS reads dominate run time). Returns (path, tl or None)."""
+    import hashlib
+    path, hz, axes, decl = args
+    key = hashlib.md5(f"{path}|{hz}|{axes}|{decl}".encode()).hexdigest()
+    f = os.path.join(CACHE, key + ".npz")
+    if os.path.exists(f):
+        z = np.load(f, allow_pickle=True)
+        if z["ok"]:
+            return path, {"x": z["x"], "bad": z["bad"], "t0": z["t0"].item(), "src": float(z["src"])}
+        return path, None
+    try:
+        tl = T.load_timeline(path, hz, decl, axes, False) if os.path.exists(path) else None
+    except Exception:
+        tl = None
+    os.makedirs(CACHE, exist_ok=True)
+    if tl is None:
+        np.savez(f, ok=False)
+    else:
+        np.savez(f, ok=True, x=tl["x"], bad=tl["bad"], t0=np.array(tl["t0"], dtype=object), src=tl["src"])
+    return path, tl
+
+
+def build_tls(by_csv, hz, axes, workers):
+    """timelines for all csvs (cached) + per-sample segment index arrays (same rule as train_v2._build_one)"""
+    tls = {}
+    args = [(p, hz, axes, ss[0].get("source_hz")) for p, ss in by_csv.items()]
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for p, tl in ex.map(_cached_timeline, args, chunksize=4):
+            if tl is None:
+                continue
+            n = len(tl["x"]); lab = np.full(n, -1, np.int32)
+            for s in by_csv[p]:
+                if s["start_ms"] is None: continue
+                a0, b0 = max(int(np.ceil(s["start_ms"] / 1000 * hz)), 0), min(int(np.floor(s["end_ms"] / 1000 * hz)), n)
+                if b0 > a0: lab[a0:b0] = s["idx"]
+            tls[p] = dict(tl, seg=lab)
+    return tls
+
+
 def main(a):
     from sklearn.model_selection import StratifiedGroupKFold
     from sklearn.ensemble import RandomForestClassifier
@@ -142,10 +186,7 @@ def main(a):
     back = np.array([CLASSES.index(n) if n in CLASSES else CLASSES.index(next(s["coarse"] for s in segs if s["name"] == n)) for n in names])
     by_csv = {}
     for s in segs: by_csv.setdefault(s["csv"], []).append(s)
-    tls = {}
-    with ProcessPoolExecutor(max_workers=a.workers) as ex:
-        for p, tl, err in ex.map(T._build_one, [(p, ss, hz, axes, False) for p, ss in by_csv.items()], chunksize=4):
-            if tl is not None: tls[p] = tl
+    tls = build_tls(by_csv, hz, axes, a.workers)
     print(f"segments {len(segs)} csv {len(tls)}/{len(by_csv)} names {names} {time.time()-t0:.0f}s", flush=True)
 
     # training labels may come from another export of the same files (e.g. the auto-relabeled dataset);
@@ -306,7 +347,9 @@ if __name__ == "__main__":
     p.add_argument("--train_ds", default="", help="take training labels from this export (eval stays on DATASETS)")
     p.add_argument("--methods", default="rule,rf,xgb,cnn")
     p.add_argument("--cnn_init", default="", help="ssl_pretrain.py checkpoint to initialize the CNN conv stack")
+    p.add_argument("--cnn_filters", default="32,64,128"); p.add_argument("--cnn_kernel", type=int, default=5)
     args = p.parse_args()
+    CNN_FILTERS = tuple(int(v) for v in args.cnn_filters.split(",")); CNN_KERNEL = args.cnn_kernel
     if args.cnn_init:
         import torch
         CNN_INIT = torch.load(args.cnn_init, map_location="cpu", weights_only=False)

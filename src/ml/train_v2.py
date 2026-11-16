@@ -373,7 +373,9 @@ def xgb_nodes_and_features(model) -> tuple[int, set]:
 # 窗口内 |a| 标准差 < notworn_g → 未佩戴，< still_g → 静止（still_g 就是 still_motion_g，静止本来就是这么定义的），
 # 其余窗口里这两类的概率清零、CNN 在剩下的类别里选。门限 notworn_g 在训练数据上挑（未佩戴 vs 静止分得最开的那个）。
 # 平台推理（infer_csv_scratch._load_dl_model）和端侧（algo_tinyml host / 固件）用同一个门，参数存在 dl_cnn_best.json。
-CNN_DEFAULTS = dict(filters=[32, 64, 128], kernel_size=5, dropout=0.2)
+# 默认 [64,128,128]、k=7：数据池全部、只用加速度、分组 5 折比过 [32,64,128] k5 / 加宽 / k7 / 两两集成，
+# 这个单模型跟集成一样好（相同误报下抓挠检测率 +2~3 点）；int8 约 180 KB，GR5515 的 1 MB flash 放得下
+CNN_DEFAULTS = dict(filters=[64, 128, 128], kernel_size=7, dropout=0.2)
 NOTWORN = "未佩戴"
 
 
