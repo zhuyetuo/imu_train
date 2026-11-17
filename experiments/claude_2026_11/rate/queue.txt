@@ -1,0 +1,9 @@
+r3_10|spec_3ax_10.json
+r3_12p5|spec_3ax_12p5.json
+r3_15|spec_3ax_15.json
+r3_25|spec_3ax_25.json
+r6_10|spec_6ax_10.json
+r6_15|spec_6ax_15.json
+r6_25|spec_6ax_25.json
+r3_20|spec_3ax_20.json
+r6_20|spec_6ax_20.json

@@ -1,0 +1,118 @@
+{
+ "20.0": {
+  "3 轴 delta+rice": {
+   "bytes_per_s": 49.5,
+   "mb_per_day": 4.28
+  },
+  "3 轴 delta+vlq": {
+   "bytes_per_s": 71.9,
+   "mb_per_day": 6.21
+  },
+  "3 轴 lzma(delta)": {
+   "bytes_per_s": 55.1,
+   "mb_per_day": 4.76
+  },
+  "3 轴 lzma(raw)": {
+   "bytes_per_s": 58.0,
+   "mb_per_day": 5.01
+  },
+  "3 轴 raw16": {
+   "bytes_per_s": 120.0,
+   "mb_per_day": 10.37
+  },
+  "3 轴 zstd(delta)": {
+   "bytes_per_s": 60.9,
+   "mb_per_day": 5.26
+  },
+  "3 轴 有损 delta+rice": {
+   "bytes_per_s": 29.3,
+   "mb_per_day": 2.53
+  },
+  "6 轴 delta+rice": {
+   "bytes_per_s": 94.8,
+   "mb_per_day": 8.19
+  },
+  "6 轴 delta+vlq": {
+   "bytes_per_s": 142.9,
+   "mb_per_day": 12.35
+  },
+  "6 轴 lzma(delta)": {
+   "bytes_per_s": 105.2,
+   "mb_per_day": 9.09
+  },
+  "6 轴 lzma(raw)": {
+   "bytes_per_s": 115.1,
+   "mb_per_day": 9.95
+  },
+  "6 轴 raw16": {
+   "bytes_per_s": 240.0,
+   "mb_per_day": 20.74
+  },
+  "6 轴 zstd(delta)": {
+   "bytes_per_s": 116.4,
+   "mb_per_day": 10.06
+  },
+  "6 轴 有损 delta+rice": {
+   "bytes_per_s": 56.0,
+   "mb_per_day": 4.84
+  }
+ },
+ "25.0": {
+  "3 轴 delta+rice": {
+   "bytes_per_s": 60.8,
+   "mb_per_day": 5.25
+  },
+  "3 轴 delta+vlq": {
+   "bytes_per_s": 89.1,
+   "mb_per_day": 7.7
+  },
+  "3 轴 lzma(delta)": {
+   "bytes_per_s": 67.6,
+   "mb_per_day": 5.84
+  },
+  "3 轴 lzma(raw)": {
+   "bytes_per_s": 71.8,
+   "mb_per_day": 6.2
+  },
+  "3 轴 raw16": {
+   "bytes_per_s": 150.0,
+   "mb_per_day": 12.96
+  },
+  "3 轴 zstd(delta)": {
+   "bytes_per_s": 74.6,
+   "mb_per_day": 6.45
+  },
+  "3 轴 有损 delta+rice": {
+   "bytes_per_s": 35.7,
+   "mb_per_day": 3.09
+  },
+  "6 轴 delta+rice": {
+   "bytes_per_s": 115.9,
+   "mb_per_day": 10.01
+  },
+  "6 轴 delta+vlq": {
+   "bytes_per_s": 176.9,
+   "mb_per_day": 15.28
+  },
+  "6 轴 lzma(delta)": {
+   "bytes_per_s": 128.3,
+   "mb_per_day": 11.09
+  },
+  "6 轴 lzma(raw)": {
+   "bytes_per_s": 142.3,
+   "mb_per_day": 12.3
+  },
+  "6 轴 raw16": {
+   "bytes_per_s": 300.0,
+   "mb_per_day": 25.92
+  },
+  "6 轴 zstd(delta)": {
+   "bytes_per_s": 141.8,
+   "mb_per_day": 12.25
+  },
+  "6 轴 有损 delta+rice": {
+   "bytes_per_s": 67.9,
+   "mb_per_day": 5.87
+  }
+ }
+}

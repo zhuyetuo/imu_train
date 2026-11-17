@@ -1,0 +1,7 @@
+a6_valid|spec_6ax_20.json|valid
+a6_valid_small|spec_6ax_20.json|valid_small
+a6_dsc_small|spec_6ax_20.json|dsc_small
+a3_valid_small|spec_3ax_20.json|valid_small
+a3_dsc_small|spec_3ax_20.json|dsc_small
+r3_31p25|spec_3ax_31p25.json|cnn
+a3_small_25|spec_3ax_25.json|small

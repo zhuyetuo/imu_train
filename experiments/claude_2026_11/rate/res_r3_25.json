@@ -1,0 +1,57 @@
+{
+ "model": "cnn",
+ "epochs": 30,
+ "folds_run": 5,
+ "n_params": 241029,
+ "window": 200,
+ "fine": [],
+ "all": {
+  "抓挠": {
+   "n_gt": 4651,
+   "recall_hit": 0.8757,
+   "recall_iou50": 0.4472,
+   "precision": 0.9467,
+   "fp_per_h_other": 3.33,
+   "other_hours": 57.9,
+   "onset_abs_err_s": 0.85,
+   "offset_abs_err_s": 1.62,
+   "count_diff_mean_abs": 1.57
+  },
+  "甩头/抖身": {
+   "n_gt": 471,
+   "recall_hit": 0.7665,
+   "recall_iou50": 0.0403,
+   "precision": 0.3589,
+   "fp_per_h_other": 9.17,
+   "other_hours": 68.4,
+   "onset_abs_err_s": 0.51,
+   "offset_abs_err_s": 1.49,
+   "count_diff_mean_abs": 3.28
+  }
+ },
+ "own": {
+  "抓挠": {
+   "n_gt": 4651,
+   "recall_hit": 0.8757,
+   "recall_iou50": 0.4472,
+   "precision": 0.949,
+   "fp_per_h_other": 5.22,
+   "other_hours": 35.3,
+   "onset_abs_err_s": 0.85,
+   "offset_abs_err_s": 1.62,
+   "count_diff_mean_abs": 1.57
+  },
+  "甩头/抖身": {
+   "n_gt": 174,
+   "recall_hit": 0.6092,
+   "recall_iou50": 0.0977,
+   "precision": 0.1763,
+   "fp_per_h_other": 10.61,
+   "other_hours": 45.8,
+   "onset_abs_err_s": 0.51,
+   "offset_abs_err_s": 1.49,
+   "count_diff_mean_abs": 4.51
+  }
+ },
+ "seconds": 480
+}
