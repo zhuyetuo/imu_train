@@ -117,8 +117,8 @@ class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
     mode: Literal["raw", "stable", "viterbi",
-                  "stable_noshake", "viterbi_noshake"] = Field(
-        "raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码）；**_noshake 后缀**=同样的解码但不让抓挠吞并甩身体，用来并排对比那条规则值不值（见 postprocess.py）")
+                  "stable_noshake", "viterbi_noshake", "viterbi_precise"] = Field(
+        "raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码）；**_noshake 后缀**=同样的解码但不让抓挠吞并甩身体，用来并排对比那条规则值不值；viterbi_precise=精准版：同 v2 的片段，起止先校正系统偏差、再按抓挠节律能量对齐（见 postprocess.py）")
     device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
@@ -254,7 +254,14 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
                      len(cands), config.CAND_MAX, os.path.basename(full_path))
             cands = cands[: config.CAND_MAX]
         result["candidates"] = cands
-        if config.REFINE_ENABLED:
+        if postprocess.is_precise(mode):
+            # 精准版：不用老的边界微调（它按总能量找，起点会被抓之前的动作带早），换成平移 + 3–9 Hz 能量对齐
+            for lab in list(result["segments"]):
+                if postprocess.is_event_for_precise(lab):
+                    postprocess.precise_boundaries(result["segments"].get(lab) or [], envelope,
+                                                   postprocess.precise_bias(lab, *geom), params)
+            postprocess.precise_boundaries(result["candidates"], envelope, postprocess.precise_bias("抓挠", *geom), params)
+        elif config.REFINE_ENABLED:
             # 按前缀认：拆了二级之后类别叫「抓挠-头颈耳」，只认精确相等的话
             # 这些段就没人给它对齐边界了
             for lab in list(result["segments"]):
@@ -346,7 +353,7 @@ class InferSamplesRequest(BaseModel):
     acc: list[list[float]] = Field(..., description="[[ax, ay, az], ...]，单位 g（跟采集 CSV 一样）")
     gyro: list[list[float]] | None = Field(None, description="[[gx, gy, gz], ...] °/s；没有（项圈只有加速度）就不传，按 0")
     hz: float = Field(..., gt=0, description="这批数据的采样率（项圈 31.25）")
-    mode: Literal["raw", "stable", "viterbi", "stable_noshake", "viterbi_noshake"] = "raw"
+    mode: Literal["raw", "stable", "viterbi", "stable_noshake", "viterbi_noshake", "viterbi_precise"] = "raw"
     model: str | None = None
 
 
@@ -421,7 +428,7 @@ class InferBatchItem(BaseModel):
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
     mode: Literal["raw", "stable", "viterbi",
-                  "stable_noshake", "viterbi_noshake"] = "raw"
+                  "stable_noshake", "viterbi_noshake", "viterbi_precise"] = "raw"
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
 

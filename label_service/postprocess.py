@@ -46,6 +46,14 @@ _TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
 # 更划算，只能拿真实样本并排跑一遍看——所以做成两个版本，而不是一个配置。
 NOSHAKE_SUFFIX = "_noshake"
 
+#: 版本串后缀：同样的解码（viterbi），**只改片段起止**——先平移掉 v2 的系统偏差，再按抓挠节律能量对齐。
+#: 片段的个数、类别一个都不变，所以跟 v2 并排比时差的只有起止。做成版本（不是配置）的理由同 _noshake。
+PRECISE_SUFFIX = "_precise"
+
+
+def is_precise(algo: str | None) -> bool:
+    return bool(algo) and str(algo).endswith(PRECISE_SUFFIX)
+
 
 @dataclass
 class StableParams:
@@ -88,6 +96,15 @@ class StableParams:
     # 边界微调：在片段起止各 ±refine_margin_s 内按陀螺仪能量找真正的起止
     refine_margin_s: float = 1.0
     refine_ratio: float = 0.3      # 能量高于片段内中位数 × 这个比例才算"在动"
+    # 精准版（viterbi_precise）起止：先平移校正 v2 的系统偏差，再按陀螺仪 3–9 Hz（抓挠节律）能量对齐。
+    # 数值来自 2026-11-18 的 5 折交叉验证（experiments/claude_2026_11/boundary_eval.py），见 precise_boundaries
+    precise_ratio: float = 0.5        # 3–9 Hz 能量高于片段内中位数 × 这个比例才算"在抓"
+    precise_pre_s: float = 1.0        # 起点往前最多找多少秒
+    precise_start_in_s: float = 2.0   # 起点往里最多收多少秒
+    precise_end_in_s: float = 2.0     # 终点往里最多收多少秒
+    precise_end_out_s: float = 1.0    # 终点往后最多找多少秒
+    precise_smooth_bins: int = 3      # 包络先做几格（0.1 s 一格）滑动平均
+    precise_sustain_bins: int = 3     # 连续几格高于阈值才算开始 / 结束
 
 
 def _parse_ts(s: str | None) -> datetime | None:
@@ -439,6 +456,81 @@ def refine_boundaries(segments: list[dict], envelope: dict | None, params: Stabl
             seg["start_ts"], seg["end_ts"] = _fmt_ts(at(new_s)), _fmt_ts(at(new_e + 1))
 
 
+# v2（8 s 窗口、label_mode=segment）片段起止的系统偏差，秒：(起点, 终点)，正 = 偏晚。
+# 2026-11-18 5 折交叉验证、只算我们自己的项圈数据：抓挠起点早约 0.5 s、终点晚约 1.1 s；
+# 甩头 / 抖身终点晚约 2 s。8 s 窗口判「里面有抓挠」，动作停了之后窗口还要再滑一阵才不报。
+# 别的窗口长度没量过，不平移，只做能量对齐。
+PRECISE_BIAS_8S = {"抓挠": (-0.5, 1.1), "_other": (-0.5, 2.0)}
+
+
+def is_event_for_precise(label: str) -> bool:
+    """精准起止只管事件类（抓挠、甩头 / 抖身 / 甩身体及其二级），状态类（静止、活动……）不动"""
+    return label.startswith("抓挠") or label.startswith("甩")
+
+
+def precise_bias(label: str, window_s: float, stride_s: float, label_mode: str,
+                 scratch_label: str = "抓挠") -> tuple[float, float]:
+    if label_mode != "segment" or abs(window_s - 8.0) > 0.5:
+        return 0.0, 0.0
+    key = scratch_label if (label == scratch_label or label.startswith(scratch_label + "-")) else "_other"
+    return PRECISE_BIAS_8S[key]
+
+
+def precise_boundaries(segments: list[dict], envelope: dict | None, bias: tuple[float, float],
+                       params: StableParams | None = None) -> None:
+    """精准版起止，原地改 start_ts / end_ts：
+    1. 平移掉系统偏差（bias，见 PRECISE_BIAS_8S）；
+    2. 用陀螺仪 3–9 Hz 能量包络（pool.py 算的 envelope["band"]，10 Hz）在附近找真正开始 / 停下的点：
+       起点在 [-pre, +start_in] 里找第一个「连续 sustain 格高于阈值」的点，终点在 [-end_in, +end_out] 里倒着找。
+       阈值 = 片段内能量中位数 × precise_ratio。只看抓挠节律那段频率，转身、走动这类低频大动作不会把起点带偏
+       ——平台原来的 refine_boundaries 用的是总能量，实测起点反而早了 1.4 s。
+    找不到、或收完不到 0.5 s 的，保留平移后的起止。没有陀螺仪（没 band）就只平移。"""
+    p = params or StableParams()
+    if not segments:
+        return
+    ds, de = bias
+    for seg in segments:
+        s, e = _parse_ts(seg["start_ts"]), _parse_ts(seg["end_ts"])
+        if s is None or e is None:
+            continue
+        s2, e2 = s - timedelta(seconds=ds), e - timedelta(seconds=de)
+        if (e2 - s2).total_seconds() < 0.5:      # 短片段别被平移收没了：留中间 0.5 s
+            mid = s + (e - s) / 2
+            s2, e2 = mid - timedelta(seconds=0.25), mid + timedelta(seconds=0.25)
+        seg["start_ts"], seg["end_ts"] = _fmt_ts(s2), _fmt_ts(e2)
+    band = (envelope or {}).get("band") or []
+    t0 = _parse_ts((envelope or {}).get("t0"))
+    hz = float((envelope or {}).get("hz") or 0)
+    if not band or t0 is None or hz <= 0:
+        return
+    k = max(1, int(p.precise_smooth_bins))
+    raw = band
+    n = len(raw)
+    # 滑动平均（same 长度）
+    csum = [0.0]
+    for v in raw:
+        csum.append(csum[-1] + v)
+    half = k // 2
+    sm = [(csum[min(n, i + half + 1)] - csum[max(0, i - half)]) / (min(n, i + half + 1) - max(0, i - half)) for i in range(n)]
+    sus = max(1, int(p.precise_sustain_bins))
+    for seg in segments:
+        s, e = _parse_ts(seg["start_ts"]), _parse_ts(seg["end_ts"])
+        si = int(round((s - t0).total_seconds() * hz))
+        ei = int(round((e - t0).total_seconds() * hz))
+        core = sorted(sm[max(0, si):min(n, ei)])
+        if not core:
+            continue
+        thr = core[len(core) // 2] * p.precise_ratio
+        on = [v >= thr for v in sm]
+        lo, hi = max(0, si - int(p.precise_pre_s * hz)), min(n - sus, si + int(p.precise_start_in_s * hz))
+        new_s = next((i for i in range(lo, hi + 1) if all(on[i:i + sus])), None)
+        lo, hi = max(sus - 1, ei - int(p.precise_end_in_s * hz)), min(n - 1, ei + int(p.precise_end_out_s * hz))
+        new_e = next((i for i in range(hi, lo - 1, -1) if all(on[i - sus + 1:i + 1])), None)
+        if new_s is not None and new_e is not None and (new_e + 1 - new_s) / hz >= 0.5:
+            seg["start_ts"] = _fmt_ts(t0 + timedelta(seconds=new_s / hz))
+            seg["end_ts"] = _fmt_ts(t0 + timedelta(seconds=(new_e + 1) / hz))
+
+
 def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
               window_s: float, stride_s: float, label_mode: str,
               params: StableParams | None = None, algo: str = "stable") -> dict[str, list[dict]]:
@@ -447,6 +539,7 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
     algo 认这几个：
       stable / viterbi                    两套解码，见模块顶部
       stable_noshake / viterbi_noshake    同上，但**不让抓挠吞并甩身体**
+      viterbi_precise                     解码跟 viterbi 一样，起止在 app.py 里按 precise_boundaries 调
 
     `_noshake` 后缀单独做成一个 algo、而不是让调用方改 params，是为了让它
     在平台上是一个**独立的版本**：结果按 (样本, 模型, 版本) 存，版本串不同
@@ -454,6 +547,9 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
     "viterbi"，后一次直接把前一次顶掉。
     """
     p = params or StableParams()
+    if algo.endswith(PRECISE_SUFFIX):
+        # 解码跟不带后缀的完全一样；起止的调整在 app.py 里拿到能量包络之后做（precise_boundaries）
+        algo = algo[: -len(PRECISE_SUFFIX)]
     if algo.endswith(NOSHAKE_SUFFIX):
         # 只改这一个参数，别的一律照旧——要比的就是"吞不吞"这一件事
         p = replace(p, shake_absorb_s=0.0)

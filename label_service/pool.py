@@ -120,6 +120,17 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             env = sq[: n_bins * step].reshape(n_bins, step).mean(axis=1)
             envelope = {"t0": ts.iloc[0].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], "hz": hz / step,
                         "energy": [round(float(v), 4) for v in env]}
+            # 精准版起止用：只留 3–9 Hz（抓挠时后腿往复的节律）再算能量。转身、走动这些低频大动作
+            # 在总能量里很大、在这里很小，所以不会把起点带到抓之前的动作上（postprocess.precise_boundaries）
+            try:
+                from scipy.signal import butter, sosfiltfilt
+                if len(mag) > 30 and hz > 12:
+                    sos = butter(4, [3.0, min(9.0, hz / 2 * 0.95)], btype="band", fs=hz, output="sos")
+                    bm = sosfiltfilt(sos, np.nan_to_num(dm))
+                    bsq = bm * bm
+                    envelope["band"] = [round(float(v), 5) for v in bsq[: n_bins * step].reshape(n_bins, step).mean(axis=1)]
+            except Exception:  # noqa: BLE001 算不出来就只平移，不影响别的版本
+                pass
         freqs = np.fft.rfftfreq(n_samp, d=1.0 / hz)
         band = (freqs >= 4) & (freqs <= 8)
         wide = (freqs >= 1) & (freqs <= 15)
