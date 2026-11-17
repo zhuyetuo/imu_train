@@ -1,0 +1,59 @@
+"""负例挖掘：模型里单独训出来的「容易被判成抓挠的动作」（进食 / 饮水 / 嗅闻 / 舔 / 啃 / 蹭…），
+不进正式片段，改成候选给人确认。
+
+为什么：抓挠误报主要来自这些低头、有节律的小动作。它们在「活动」里占得太少，模型学不到跟抓挠的区别，
+要单独补标注。标注最贵的是「从几十个小时里找到那几分钟」——让模型先把像的片段挑出来，
+人在工作台「疑似」列表里确认 / 排除就行，走的还是疑似抓挠那条现成通道。
+
+正式片段（草稿）里那段时间记作 merge_to（默认「活动」）：项目里的类别不变，跟以前一样。
+"""
+from __future__ import annotations
+
+from label_service.postprocess import _parse_ts
+
+REASON = "model_neg"
+
+
+def _overlaps(c: dict, spans: list[tuple]) -> bool:
+    a, b = _parse_ts(c.get("start_ts")), _parse_ts(c.get("end_ts"))
+    if a is None or b is None:
+        return True
+    return any(a < tb and b > ta for ta, tb in spans)
+
+
+def _spans(items) -> list[tuple]:
+    out = []
+    for s in items or []:
+        a, b = _parse_ts(s.get("start_ts")), _parse_ts(s.get("end_ts"))
+        if a and b:
+            out.append((a, b))
+    return out
+
+
+def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], classes: list[str],
+                   labels: list[str], merge_to: str = "活动", max_per_label: int = 40,
+                   scratch_head: str = "抓挠") -> tuple[dict[str, list[dict]], list[dict]]:
+    """返回 (改过的 segments, 新候选)。segments 原地改：负例类别的片段挪进 merge_to。
+
+    跟抓挠（正式片段，含「抓挠-xx」二级）和已有候选重叠的不给：那段已经有人在看了。
+    上限按类别各算，按平均置信度从高到低留。"""
+    mine = [c for c in classes if c in labels]
+    if not mine:
+        return segments, []
+    taken = _spans([s for lab, segs in segments.items()
+                    if lab == scratch_head or lab.startswith(scratch_head + "-") for s in (segs or [])])
+    taken += _spans(candidates)
+    out: list[dict] = []
+    moved = False
+    for lab in mine:
+        segs = segments.pop(lab, None) or []
+        if segs:
+            segments.setdefault(merge_to, []).extend(dict(s) for s in segs)
+            moved = True
+        one = [{**s, "label": lab, "reason": REASON} for s in segs]
+        one = [c for c in one if not _overlaps(c, taken)]
+        one.sort(key=lambda c: c.get("conf_mean") or 0, reverse=True)
+        out += one[:max_per_label]
+    if moved:
+        segments[merge_to].sort(key=lambda s: s.get("start_ts") or "")
+    return segments, out

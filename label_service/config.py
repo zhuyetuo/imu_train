@@ -111,6 +111,11 @@ CAND_MAX                 = int(_env("CAND_MAX", "40"))           # 每个文件�
 GROOM_ENABLED            = _env("GROOM_ENABLED", "1") == "1"
 GROOM_LABEL              = _env("GROOM_LABEL", "舔身体")
 GROOM_MAX                = int(_env("GROOM_MAX", "40"))           # 每个文件最多给几条
+# 负例挖掘（label_service/mining.py）：模型里单独训出来的这些类别不进正式片段（草稿里那段记作
+# MINE_MERGE_TO），改成候选给人确认，用来快速补「容易被判成抓挠」的负例标注。模型没有这些类别就什么都不变
+MINE_LABELS              = [t.strip() for t in _env("MINE_LABELS", "进食,饮水,嗅闻,舔,啃,蹭,舔身体,啃身体,蹭擦身体").split(",") if t.strip()]
+MINE_MERGE_TO            = _env("MINE_MERGE_TO", "活动")
+MINE_MAX                 = int(_env("MINE_MAX", "40"))           # 每个文件每类最多几条
 GROOM_TILT_MIN_DEG       = float(_env("GROOM_TILT_MIN_DEG", "25"))  # 头偏离平时姿态多少度起算
 GROOM_MOTION_MIN         = float(_env("GROOM_MOTION_MIN", "0.03"))  # 动作量下限（低于 = 趴着不动）
 GROOM_MOTION_MAX         = float(_env("GROOM_MOTION_MAX", "0.35"))  # 动作量上限（高于 = 走/跑）

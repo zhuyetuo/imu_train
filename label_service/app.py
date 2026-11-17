@@ -142,7 +142,7 @@ class WindowOut(BaseModel):
 
 
 class Candidate(Segment):
-    # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判 / grooming=姿态像舔啃 /
+    # low_conf=模型低置信 / spectral=频谱像抓挠但模型没判 / grooming=姿态像舔啃 / model_neg=模型判成负例类别（mining.py）/
     # eating、drinking=姿态段按节律像进食、饮水 / barking=一串孤立冲击像吠叫（见 behaviors.py）
     reason: str
     # 这条候选是哪个类别的。不给 = 抓挠（老调用方的约定）；疑似舔/啃候选给「舔身体」，
@@ -283,6 +283,13 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
                     one = sorted(one, key=lambda c: c.get("conf_mean") or 0, reverse=True)[: config.GROOM_MAX]
                 kept += one
             result["candidates"] = result["candidates"] + kept
+        # 负例挖掘：模型单独训了进食 / 饮水 / 嗅闻…这些类别的话，它们的片段挪成候选（见 mining.py）
+        from label_service import mining as _mining
+        result["segments"], mined = _mining.mine_negatives(
+            result["segments"], result["candidates"], b["classes"], config.MINE_LABELS,
+            config.MINE_MERGE_TO, config.MINE_MAX)
+        if mined:
+            result["candidates"] = result["candidates"] + mined
     if holes:
         result["segments"] = {k: postprocess.drop_missing(v, holes) for k, v in result["segments"].items()}
         result["candidates"] = postprocess.drop_missing(result["candidates"], holes)
