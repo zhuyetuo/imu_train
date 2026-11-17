@@ -117,6 +117,8 @@ MINE_LABELS              = [t.strip() for t in _env("MINE_LABELS", "进食,饮�
 MINE_MERGE_TO            = _env("MINE_MERGE_TO", "活动")
 MINE_MAX                 = int(_env("MINE_MAX", "40"))           # 每个文件每类最多几条
 MINE_MIN_MEAN            = float(_env("MINE_MIN_MEAN", "0.3"))   # 整段平均概率低于这个不给（噪声）
+MINE_GAP_S               = float(_env("MINE_GAP_S", "2"))       # 同类断开不超过这么久连成一段
+MINE_MIN_S               = float(_env("MINE_MIN_S", "3"))       # 连完还短于这个的不给
 GROOM_TILT_MIN_DEG       = float(_env("GROOM_TILT_MIN_DEG", "25"))  # 头偏离平时姿态多少度起算
 GROOM_MOTION_MIN         = float(_env("GROOM_MOTION_MIN", "0.03"))  # 动作量下限（低于 = 趴着不动）
 GROOM_MOTION_MAX         = float(_env("GROOM_MOTION_MAX", "0.35"))  # 动作量上限（高于 = 走/跑）

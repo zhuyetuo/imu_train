@@ -50,6 +50,15 @@ def test_low_confidence_dropped():
     assert [c["conf_mean"] for c in cands] == [0.6]
 
 
+def test_fragments_merged_then_short_dropped():
+    """逐窗口解码切碎的连成一段；连完还短于 min_s 的不给"""
+    segments = {"饮水": [seg(0, 1, 0.9), seg(2, 3, 0.9), seg(4, 6, 0.6), seg(20, 21, 0.9)]}
+    _, cands = mine_negatives(segments, [], ["活动", "饮水"], ["饮水"], gap_s=2, min_s=3)
+    assert len(cands) == 1
+    assert cands[0]["start_ts"].endswith("00.000") and cands[0]["end_ts"].endswith("06.000")
+    assert abs(cands[0]["conf_mean"] - (0.9 * 1 + 0.9 * 1 + 0.6 * 2) / 4) < 1e-9
+
+
 def test_model_without_negative_classes_unchanged():
     segments = {"活动": [seg(0, 5)], "抓挠": [seg(6, 9)]}
     out, cands = mine_negatives(segments, [], ["活动", "抓挠"], ["进食"])

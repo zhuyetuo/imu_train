@@ -287,7 +287,8 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         from label_service import mining as _mining
         result["segments"], mined = _mining.mine_negatives(
             result["segments"], result["candidates"], b["classes"], config.MINE_LABELS,
-            config.MINE_MERGE_TO, config.MINE_MAX, min_mean=config.MINE_MIN_MEAN)
+            config.MINE_MERGE_TO, config.MINE_MAX, min_mean=config.MINE_MIN_MEAN,
+            gap_s=config.MINE_GAP_S, min_s=config.MINE_MIN_S)
         if mined:
             result["candidates"] = result["candidates"] + mined
     if holes:

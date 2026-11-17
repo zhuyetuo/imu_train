@@ -30,6 +30,33 @@ def _overlaps(c: dict, spans: list[tuple]) -> bool:
     return cov / dur > COVER_MAX
 
 
+def _merge_close(segs: list[dict], gap_s: float) -> list[dict]:
+    """同一类、断开不超过 gap_s 的连成一段。「稳定版 v2」是逐窗口解码，一段饮水会被切成十几截 1 秒的，
+    原样给人就是一屏碎候选（2026-11-17 实测一个文件 40 条，大半 1~3 秒）。gap_s <= 0 = 不合并"""
+    if gap_s <= 0:
+        return [dict(s) for s in segs]
+    rows = sorted((s for s in segs if _parse_ts(s.get("start_ts")) and _parse_ts(s.get("end_ts"))),
+                  key=lambda s: s["start_ts"])
+    out: list[dict] = []
+    for s in rows:
+        if out and (_parse_ts(s["start_ts"]) - _parse_ts(out[-1]["end_ts"])).total_seconds() <= gap_s:
+            o = out[-1]
+            n0, n1 = o.get("n_windows") or 1, s.get("n_windows") or 1
+            o["conf_mean"] = ((o.get("conf_mean") or 0) * n0 + (s.get("conf_mean") or 0) * n1) / (n0 + n1)
+            o["conf_max"] = max(o.get("conf_max") or 0, s.get("conf_max") or 0)
+            o["n_windows"] = n0 + n1
+            if s["end_ts"] > o["end_ts"]:
+                o["end_ts"] = s["end_ts"]
+        else:
+            out.append(dict(s))
+    return out
+
+
+def _dur(c: dict) -> float:
+    a, b = _parse_ts(c.get("start_ts")), _parse_ts(c.get("end_ts"))
+    return (b - a).total_seconds() if a and b else 0.0
+
+
 def _spans(items) -> list[tuple]:
     out = []
     for s in items or []:
@@ -41,7 +68,8 @@ def _spans(items) -> list[tuple]:
 
 def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], classes: list[str],
                    labels: list[str], merge_to: str = "活动", max_per_label: int = 40,
-                   scratch_head: str = "抓挠", min_mean: float = 0.0) -> tuple[dict[str, list[dict]], list[dict]]:
+                   scratch_head: str = "抓挠", min_mean: float = 0.0, gap_s: float = 0.0,
+                   min_s: float = 0.0) -> tuple[dict[str, list[dict]], list[dict]]:
     """返回 (改过的 segments, 新候选)。segments 原地改：负例类别的片段挪进 merge_to。
 
     不给的只有两种（都按「一半以上时间被盖住」算，擦边不算）：跟抓挠重叠（正式片段含「抓挠-xx」二级、
@@ -67,9 +95,10 @@ def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], clas
             segments.setdefault(merge_to, []).extend(dict(s) for s in segs)
             moved = True
         taken = scratch + _spans([c for c in candidates if c.get("label") == lab])
-        one = [{**s, "label": lab, "reason": REASON} for s in segs]
-        # 整段平均概率太低的不给（实测有 0.07 的，纯噪声）。这几段在草稿里照样是「活动」
-        one = [c for c in one if (c.get("conf_mean") or 0) >= min_mean and not _overlaps(c, taken)]
+        one = [{**s, "label": lab, "reason": REASON} for s in _merge_close(segs, gap_s)]
+        # 整段平均概率太低的（实测有 0.07 的，纯噪声）、连起来还是太短的不给。这几段在草稿里照样是「活动」
+        one = [c for c in one if (c.get("conf_mean") or 0) >= min_mean and _dur(c) >= min_s
+               and not _overlaps(c, taken)]
         one.sort(key=lambda c: c.get("conf_mean") or 0, reverse=True)
         out += one[:max_per_label]
     if moved:
