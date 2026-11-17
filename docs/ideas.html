@@ -27,13 +27,24 @@
   <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
 </header>
 
+<h2 id="new7">11-18 新提的 7 个方向（一个个来）</h2>
+<div class="scroll"><table>
+<tr><th>方向</th><th>状态</th><th>思路 / 先做什么</th><th>代价</th></tr>
+<tr><td><b>1. 陀螺仪按需开（一天 ≤2 小时）</b></td><td><span class="state mid">待做</span></td><td>3 轴比 6 轴同误报低 2–3 个点。3 轴常开当触发器，疑似抓挠 / 剧烈活动时开陀螺仪 30–60 s 让 6 轴模型确认。先离线模拟「命中 vs 陀螺仪开机时长」；没明显提升就不用</td><td>1 天（离线模拟）</td></tr>
+<tr><td><b>2. 加速度计也智能开关</b></td><td><span class="state mid">待做</span></td><td>不能全关（它是触发器）；静止 / 没戴时降采样率，或用 IMU 硬件的运动唤醒中断让主控睡觉。先量静止 / 未佩戴占全天多少</td><td>半天</td></tr>
+<tr><td><b>3. 原始 IMU 压缩上传</b></td><td><span class="state mid">待做</span></td><td>类似卫星下传：20 Hz 6 轴原始约 20 MB/天。差分 + 熵编码无损、有损量化、只传疑似事件前后几秒、充电时批量传。先拿已有数据量各方案压缩率，再按蓝牙每字节能耗算电量</td><td>1 天</td></tr>
+<tr><td><b>4. 变采样率（30 / 20 Hz…智能切换）</b></td><td><span class="state mid">待做</span></td><td>离线重采样到 10–31.25 Hz 各训一版，画「精度 vs 采样率」；再定静止低频、活动高频的切换策略</td><td>1 天（GPU）</td></tr>
+<tr><td><b>5. CMSIS-NN vs 现在的推理</b></td><td><span class="state mid">待做</span></td><td>包里已经同时出 CMSIS-NN 版（跟普通版输出一致）。上板实测速度 / Flash / RAM；跟推理框架（多一个解释器，Flash 多几十 KB）做对比表</td><td>半天 + 上板</td></tr>
+<tr><td><b>6. 端侧别的模型 / 自己改造</b></td><td><span class="state mid">待做</span></td><td>最值得先试：<b>流式（增量）卷积</b>——现在每秒重算整个 8 s 窗口，7/8 是重复计算，缓存中间层可省约 8 倍。另有深度可分离卷积、小 GRU、蒸馏、二值网络、按预算搜结构</td><td>1–3 天</td></tr>
+<tr><td><b>7. 皮肤评估：兽医照片结果 + 抓挠不准 + 人工改了数据不跟着变</b></td><td><span class="state ok">先做</span></td><td>先查「项目联动」的抓挠日统计是从 AI 结果还是人工结果算的、人工改了有没有重算；再用兽医照片评级重训模型 B</td><td>先查 bug</td></tr>
+</table></div>
+
 <h2 id="behavior">① 行为识别</h2>
 <div class="scroll"><table>
 <tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
 <tr><td><b>用已确认的负例重训</b></td><td><span class="state ok">进行中</span></td><td>误报主要来自吃、喝、舔、啃。标注员按“现在重点补”一次确认一类；判完一批就重训主模型和负例挖掘模型。目标误报 4–5 → 2–3 次/小时</td><td>等标注；训练 1–2 小时</td></tr>
-<tr><td><b>GR5513 小模型（≤128 KB）</b></td><td><span class="state ok">进行中</span></td><td>11-18：通道减半 [32,64,64] 只有 6.4 万参数，抓挠命中 90.3%（只低 1.5 个点）。下一步导出 int8、量真实 Flash / RAM、上板跑</td><td>半天</td></tr>
-<tr><td><b>负例单独类别：同样误报下比命中</b></td><td><span class="state mid">待做</span></td><td>11-18：误报 5.7 → 3.7 次/h，但命中 91.8% → 82.7%。现在的阈值是按旧模型定的，要把两边拉到同样误报再比，才知道换不换</td><td>小（已有预测，不用重训）</td></tr>
-<tr><td><b>精准版起止移植到板上</b></td><td><span class="state mid">待做</span></td><td>平台上已经有了（11-18）。板上 tm_post 要加：平移 + 3–9 Hz 能量对齐；带通滤波要在板上流式算</td><td>1 天</td></tr>
+<tr><td><b>GR5513 小模型上板</b></td><td><span class="state ok">进行中</span></td><td>11-18：训练记录 #44（train40，6 轴，命中 90.6%，Flash 71.6 KB）/ #45（train41，3 轴，86.9%，70.7 KB），端侧包已出（停用中，由你启用）。剩下：真板子上跑</td><td>上板</td></tr>
+<tr><td><b>板上精准版：3–9 Hz 能量对齐</b></td><td><span class="state mid">待定</span></td><td>平移那一步 11-18 已经进板上后处理（给设备的包自动打开）。能量对齐要流式带通 + 缓存几分钟包络，约 2–8 KB RAM，跟 GR5513 预算冲突</td><td>1 天</td></tr>
 <tr><td><b>级联省电</b></td><td><span class="state mid">待做</span></td><td>极便宜的“有没有在动 / 有没有节律”门先过，可能是抓挠才跑 CNN</td><td>中</td></tr>
 <tr><td><b>Mantis / MOMENT 特征找负例</b></td><td><span class="state mid">待做</span></td><td>现在 IMU 相似度检索前 10 只命中 17–23%。预训练时序模型冻结当特征提取器，只在服务端用</td><td>半天</td></tr>
 <tr><td><b>MiniRocket 对照组</b></td><td><span class="state mid">待做</span></td><td>随机卷积核 + 线性分类，几乎不用调参，看我们的 CNN 有没有被便宜方法追上</td><td>小</td></tr>
