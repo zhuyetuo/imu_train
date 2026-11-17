@@ -138,3 +138,30 @@
 - 训练：平台「提交训练」勾新版流程，或 `python src/ml/train_v2.py --spec <spec.json>`（spec 见 tmp/train_v2_*.json）
 - 三类方法对比：`~/claude_exp/compare3.py --axes 3|6 --out <dir>`，然后 `eval_events.py --dir <dir>`
 - 事件级评估（单个模型）：`src/eval/scratch_event_cv.py --spec <spec.json>`
+
+## 2026-11-17 导出 8 s 窗口端侧 CNN（3 轴 + 6 轴）给人测
+
+- 配置：pool_20261116_all，20Hz，窗口 160 点（8 s），步长 1 s，1D-CNN [64,128,128] k9，30 epoch，
+  drop_gravity_level，静止/活动按 |a| 标准差 0.005g 重分，动作门（未佩戴/静止交给门，CNN 只管动的）。
+  宿主机 GPU 上直接跑 train_v2（容器只有 CPU，这么大的模型要 10 h 左右），spec 在 imu_train_wt/tmp/train_v2_cnn_w8_{3,6}ax.json。
+- 五折交叉验证（按天 × 项圈分组），后处理之后按片段算：
+
+  | | 抓挠查全（命中） | 抓挠查准 | 其它时间误报 | 起点误差 | 窗口准确率 |
+  |---|---|---|---|---|---|
+  | 3 轴（只开加速度） | 86.0% | 94.9% | 5.2 次/h | 0.8 s | 93.7% |
+  | 6 轴 | 88.4% | 94.8% | 5.4 次/h | 0.9 s | 94.3% |
+
+  甩头/抖身在 8 s 窗口下很差（查准 0.25），8 s 窗口太长、甩头只有 1~2 s，被淹掉了；要用甩头的话还得用短窗口那版。
+- 导出（algo_tinyml export_train）：int8 + 动作门，C 自检 golden 逐位一致；留出集（val，偏乐观）上抓挠 P/R 3 轴 0.96/0.97、6 轴 0.97/0.98。
+  int8 跟 float 判决一致只有 85%（量程分位数 3 轴 99.9、6 轴 99.0），量化有损失，后面要做量化感知训练（QAT）。
+- 板上占用：模型 ~236 KB flash，RAM ~23~25 KB，每窗 1230 万次乘加。
+  **超过 GR5513 给模型留的 128 KB 预算**（GR5515 1 MB flash 放得下）。要上 GR5513 得缩：filters 减半 / 窗口 6.4 s / 剪枝。
+- 平台：端侧服务里登记为 edge:cnn_w8_3ax、edge:cnn_w8_6ax，raw / stable / board 三种模式都实测跑通（1 小时 CSV 约 1 分钟）。
+- 顺手修的：
+  - imu_train 新版训练窗口上限 128 → 256 点（085913e），网页上也能选 8 s 窗口。
+  - algo_tinyml export_train 登记模型改记相对路径（f0588ce）：宿主机上导出的 /home/... 在容器里找不到，模型挂不上。
+
+TODO
+- [ ] 量化感知训练，把 int8 跟 float 的一致率拉回 95%+
+- [ ] GR5513 版：filters [32,64,64] 或窗口 6.4 s，压到 128 KB 以内再比一次
+- [ ] 甩头/抖身：短窗口模型或双窗口（短窗口管甩头，8 s 管抓挠）
