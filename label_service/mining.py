@@ -41,7 +41,7 @@ def _spans(items) -> list[tuple]:
 
 def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], classes: list[str],
                    labels: list[str], merge_to: str = "活动", max_per_label: int = 40,
-                   scratch_head: str = "抓挠") -> tuple[dict[str, list[dict]], list[dict]]:
+                   scratch_head: str = "抓挠", min_mean: float = 0.0) -> tuple[dict[str, list[dict]], list[dict]]:
     """返回 (改过的 segments, 新候选)。segments 原地改：负例类别的片段挪进 merge_to。
 
     不给的只有两种（都按「一半以上时间被盖住」算，擦边不算）：跟抓挠重叠（正式片段含「抓挠-xx」二级、
@@ -68,7 +68,8 @@ def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], clas
             moved = True
         taken = scratch + _spans([c for c in candidates if c.get("label") == lab])
         one = [{**s, "label": lab, "reason": REASON} for s in segs]
-        one = [c for c in one if not _overlaps(c, taken)]
+        # 整段平均概率太低的不给（实测有 0.07 的，纯噪声）。这几段在草稿里照样是「活动」
+        one = [c for c in one if (c.get("conf_mean") or 0) >= min_mean and not _overlaps(c, taken)]
         one.sort(key=lambda c: c.get("conf_mean") or 0, reverse=True)
         out += one[:max_per_label]
     if moved:

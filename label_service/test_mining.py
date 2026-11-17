@@ -39,9 +39,15 @@ def test_other_kind_rule_candidates_do_not_block_same_kind_does():
     segments = {"饮水": [seg(10, 20, conf=0.99)], "进食": [seg(30, 40, conf=0.9)]}
     existing = [{**seg(12, 15), "label": "舔身体", "reason": "grooming"},
                 {**seg(13, 14), "label": "甩头/抖身", "reason": "shaking"},
-                {**seg(31, 33), "label": "进食", "reason": "eating"}]
+                {**seg(30, 38), "label": "进食", "reason": "eating"}]   # 同类盖住 8/10，算重复
     _, cands = mine_negatives(segments, existing, ["活动", "进食", "饮水"], ["进食", "饮水"])
     assert [c["label"] for c in cands] == ["饮水"]
+
+
+def test_low_confidence_dropped():
+    segments = {"饮水": [seg(0, 10, conf=0.07), seg(20, 30, conf=0.6)]}
+    _, cands = mine_negatives(segments, [], ["活动", "饮水"], ["饮水"], min_mean=0.3)
+    assert [c["conf_mean"] for c in cands] == [0.6]
 
 
 def test_model_without_negative_classes_unchanged():
