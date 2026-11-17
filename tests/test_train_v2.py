@@ -364,3 +364,12 @@ def test_cnn_端到端_产物平台推理认得_门生效(tmp_path):
     X = np.zeros((2, 62, 5), np.float32)
     X[:, :, 2] = 1.0                                     # 完全不动 → 门判成静止（这个模型没有未佩戴类）
     assert m.predict_proba(X).argmax(1).tolist() == [0, 0]
+
+
+def test_xgb_depth_cap_only_for_edge():
+    import pytest
+    import importlib.util as _u
+    _s = _u.spec_from_file_location("tv2", os.path.join(ROOT, "src", "ml", "train_v2.py")); tv = _u.module_from_spec(_s); _s.loader.exec_module(tv)
+    with pytest.raises(SystemExit):
+        tv.xgb_params({"max_depth": 8})
+    assert tv.xgb_params({"max_depth": 8}, server=True)["max_depth"] == 8

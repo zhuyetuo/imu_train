@@ -435,6 +435,8 @@ def v2_spec(dataset_spec: dict, job_id: int | None, model_type: str = "rf") -> d
         "drop_gravity_level": bool(dataset_spec.get("drop_gravity_level")),
         "still_motion_g": dataset_spec.get("still_motion_g") or None,
         "model": model_type,
+        # 勾了「端侧体积」就是要上板的版本；没勾 = 服务端版本，XGBoost 深度不受端侧编码限制
+        "target": "edge" if dataset_spec.get("edge_size") else "server",
         "model_params": mp, "run_name": run, "nas_root": config.NAS_ROOT, "datasets": datasets,
     }
 

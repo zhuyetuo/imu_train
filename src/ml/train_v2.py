@@ -291,12 +291,13 @@ def forest_uses(model, mask: np.ndarray) -> list[int]:
 XGB_DEFAULTS = dict(n_estimators=50, max_depth=6, learning_rate=0.2, subsample=0.8, colsample_bytree=0.8)
 
 
-def xgb_params(params: dict) -> dict:
+def xgb_params(params: dict, server: bool = False) -> dict:
+    """server=True：服务端版本，不上板，深度不限（端侧紧凑编码的 127 节点限制管不着它）"""
     kw = dict(XGB_DEFAULTS)
     for k in ("n_estimators", "max_depth", "learning_rate", "subsample", "colsample_bytree"):
         if params.get(k) not in (None, ""):
             kw[k] = type(XGB_DEFAULTS[k])(params[k])
-    if kw["max_depth"] > 6:
+    if kw["max_depth"] > 6 and not server:
         # 端侧紧凑编码右孩子偏移只有 7 位：一棵树不能超过 127 个节点，深 6 正好 127
         sys.exit(f"XGBoost 深度最多 6（端侧紧凑编码一棵树 ≤127 个节点），给的是 {kw['max_depth']}")
     return kw
@@ -652,7 +653,9 @@ def main(a):
     kind = str(spec.get("model") or "rf")
     if kind not in ("rf", "xgb", "cnn"):
         sys.exit(f"新版流程的 model 只能是 rf / xgb / cnn，给的是 {kind!r}")
-    xgb_kw = xgb_params(params) if kind == "xgb" else None
+    # target：edge = 要导到板上（默认）；server = 只在服务端跑，放开端侧的体积限制
+    target = str(spec.get("target") or "edge")
+    xgb_kw = xgb_params(params, server=target == "server") if kind == "xgb" else None
     cnn_cfg, cnn_epochs = cnn_params(params) if kind == "cnn" else (None, 0)
     if kind in ("xgb", "cnn"):
         fine = []          # GBDT / CNN 直接训归并后的类别，见 XGB_DEFAULTS 上面的说明
@@ -843,7 +846,7 @@ def main(a):
         "fine_labels": fine, "train_classes": names, "class_scale": {c: float(s) for c, s in zip(classes, scale)},
         **({"xgb": xgb_kw} if kind == "xgb" else {"cnn": {**cnn_cfg, "epochs": cnn_epochs}} if kind == "cnn"
            else {"rf": {k: v for k, v in rf_kw.items() if k != "n_jobs"}}),
-        "n_nodes": n_nodes, "motion_gate": gate,
+        "n_nodes": n_nodes, "motion_gate": gate, "target": target,
         # 训练时置成常数的特征（树里一次都不用）；推理照常算完整的特征向量
         "drop_gravity_level": drop_level, "masked_features": masked,
         # 静止 / 活动按动作强度重新分（窗口级指标按改过的标签算；片段级指标仍按人标的片段）
