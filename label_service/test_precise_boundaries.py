@@ -33,7 +33,7 @@ def test_没有包络时只平移():
     seg = [{"start_ts": pp._fmt_ts(T0 + timedelta(seconds=20)), "end_ts": pp._fmt_ts(T0 + timedelta(seconds=30))}]
     pp.precise_boundaries(seg, None, pp.precise_bias("抓挠", 8.0, 1.0, "segment"))
     s, e = _span(seg[0])
-    assert abs(s - 20.5) < 1e-6 and abs(e - 28.9) < 1e-6        # 起点往后 0.5，终点往前 1.1
+    assert abs(s - 20.75) < 1e-6 and abs(e - 28.3) < 1e-6       # 起点往后 0.75，终点往前 1.7
 
 
 def test_按能量对齐到真正开始和停下():
@@ -56,7 +56,7 @@ def test_抓之前的低频大动作不影响起点():
 def test_别的窗口长度不平移():
     assert pp.precise_bias("抓挠", 4.0, 1.0, "segment") == (0.0, 0.0)
     assert pp.precise_bias("抓挠", 8.0, 1.0, "majority") == (0.0, 0.0)
-    assert pp.precise_bias("甩头/抖身", 8.0, 1.0, "segment") == (-0.5, 2.0)
+    assert pp.precise_bias("甩头/抖身", 8.0, 1.0, "segment") == (-0.5, 1.45)
 
 
 def test_短片段不会被收没():
