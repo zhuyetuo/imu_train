@@ -7,6 +7,13 @@ def seg(a, b, conf=0.8):
             "conf_max": conf, "conf_mean": conf, "n_windows": b - a}
 
 
+def test_edge_touch_with_scratch_still_given():
+    """一段长饮水开头跟短抓挠擦边（盖住不到一半）照样给"""
+    segments = {"抓挠": [seg(0, 5)], "饮水": [seg(4, 40)]}
+    _, cands = mine_negatives(segments, [], ["活动", "抓挠", "饮水"], ["饮水"])
+    assert [c["label"] for c in cands] == ["饮水"]
+
+
 def test_negatives_become_candidates_and_activity():
     segments = {"活动": [seg(0, 5)], "抓挠": [seg(20, 25)], "进食": [seg(6, 10), seg(22, 24)], "饮水": [seg(30, 33)]}
     classes = ["未佩戴", "静止/休息", "活动", "抓挠", "甩头/抖身", "进食", "饮水", "嗅闻"]

@@ -14,11 +14,20 @@ from label_service.postprocess import _parse_ts
 REASON = "model_neg"
 
 
+COVER_MAX = 0.5   # 候选有一半以上的时间被盖住才算「已经有人在看了」
+
+
 def _overlaps(c: dict, spans: list[tuple]) -> bool:
+    """按比例算，不是"碰到就算"：2026-11-17 一段 2 分半的饮水（模型概率 ~1.0）开头跟一段 5 秒的抓挠
+    擦了 1 秒，按"碰到就丢"整段没了"""
     a, b = _parse_ts(c.get("start_ts")), _parse_ts(c.get("end_ts"))
     if a is None or b is None:
         return True
-    return any(a < tb and b > ta for ta, tb in spans)
+    dur = (b - a).total_seconds()
+    if dur <= 0:
+        return True
+    cov = sum(max(0.0, (min(b, tb) - max(a, ta)).total_seconds()) for ta, tb in spans)
+    return cov / dur > COVER_MAX
 
 
 def _spans(items) -> list[tuple]:
@@ -35,8 +44,8 @@ def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], clas
                    scratch_head: str = "抓挠") -> tuple[dict[str, list[dict]], list[dict]]:
     """返回 (改过的 segments, 新候选)。segments 原地改：负例类别的片段挪进 merge_to。
 
-    不给的只有两种：跟抓挠重叠（正式片段含「抓挠-xx」二级、疑似抓挠候选——那段已经有人在看了），
-    跟**同一类**的已有候选重叠（重复）。跟别的类的规则候选（姿态像舔、振荡像甩头…）重叠照样给：
+    不给的只有两种（都按「一半以上时间被盖住」算，擦边不算）：跟抓挠重叠（正式片段含「抓挠-xx」二级、
+    疑似抓挠候选——那段已经有人在看了），跟**同一类**的已有候选重叠（重复）。跟别的类的规则候选（姿态像舔、振荡像甩头…）重叠照样给：
     那些规则候选一个文件几十条、铺得很开，按"重叠就丢"的话模型判得最准的那段饮水会被它们整段挤掉
     （2026-11-17 实测：11:50–11:53 模型饮水概率 ~1.0，候选里一条都没有）。人看到两条，选对的那条确认。
     上限按类别各算，按平均置信度从高到低留。"""
