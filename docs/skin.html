@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第二步 · 皮肤评估</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗狗皮肤评估</span>
+  <a href="index.html">总览</a>
+  <a href="behavior.html">① 行为识别</a>
+  <a href="skin.html" class="on">② 皮肤评估</a>
+  <a href="history.html">来时路</a>
+  <a href="landscape.html">业界进展</a>
+  <a href="ideas.html">想法清单</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">第二步 · 皮肤评估 · 更新于 2026-11-17</div>
+  <h1>把每天的抓挠，变成“皮肤正常 / 留意 / 建议看兽医”</h1>
+  <p class="lead">输入是第一步给出的抓挠事件，加上主人填的问卷（皮肤颜色、异味、皮损、秃毛、毛发状态），以后还有照片。输出两个分：<strong>C 值</strong>只看行为，<strong>S 总分</strong>把行为、皮肤、毛发合在一起。对外只展示三档，不展示分数，文案只说“检测到变化 / 建议咨询兽医”，不说“诊断”。</p>
+</header>
+
+<h2 id="flow">怎么算</h2>
+<div class="flow">
+  <div class="step"><b>抓挠事件</b><span>来自第一步，只算戴着的时段，人工核对过的片段优先</span></div>
+  <div class="step"><b>日统计</b><span>次数、时长、每佩戴小时、夜间占比、扎堆程度、被抓醒</span></div>
+  <div class="step"><b>跟自己比</b><span>14 天中位数基线；满 21 天前用文献阈值兜底</span></div>
+  <div class="step"><b>C 值</b><span>变化幅度 30 + 聚集 20 + 持续 20 + 打断正常行为 30</span></div>
+  <div class="step"><b>S 总分</b><span>C 值 × 40% + 皮肤组 × 35% + 毛发组 × 25%</span></div>
+</div>
+<div class="tiles">
+  <div class="tile"><div class="k">C0 正常</div><div class="v"><b>0–29</b></div><div class="n">On Track</div></div>
+  <div class="tile"><div class="k">C1 留意</div><div class="v"><b>30–49</b></div><div class="n">Watch Closely</div></div>
+  <div class="tile"><div class="k">C2 建议看兽医</div><div class="v"><b>50–100</b></div><div class="n">Vet Check Recommended</div></div>
+  <div class="tile"><div class="k">红旗直接升级</div><div class="v"><b>×3 基线</b></div><div class="n">或连续抓 ≥1 分钟、连续 3 天偏离等</div></div>
+</div>
+
+<h2 id="modules">算法模块和进展</h2>
+<div class="cards">
+  <div class="card">
+    <h3>PM 规则版<span class="state ok">已上线</span></h3>
+    <div class="big">C 值 / S 总分</div>
+    <p>按产品《算法定义文档 V0.4》实现，问卷分组加权。平台上可以整批算、出周报表，跟兽医评级对照。</p>
+  </div>
+  <div class="card">
+    <h3>个人基线<span class="state mid">已实现，待验证</span></h3>
+    <div class="big">14 天 <small>中位数；满 21 天启用</small></div>
+    <p>PM 文档里留白的部分由算法侧补上。冷启动期用 Whistle FIT 公开的抓挠参考值兜底。参数都还要用真实数据校准。</p>
+  </div>
+  <div class="card">
+    <h3>模型 A（行为）<span class="state mid">合成数据</span></h3>
+    <div class="big">44 <small>个 IMU 特征 → C 档</small></div>
+    <p>频率 / 时长、时间分布、跟基线比、滚动趋势、发作史。标签是 PM 规则算出来的 C 档，本质是规则的近似，好处是能解释每个特征的贡献。</p>
+  </div>
+  <div class="card">
+    <h3>模型 B（综合）<span class="state mid">等真实标签</span></h3>
+    <div class="big">54 <small>个特征 → S 档</small></div>
+    <p>模型 A 的 44 个 + A 的预测 3 个 + 问卷 7 个。S0/S1/S2 跟兽医看照片的评级一一对应；评级攒够后用真实标签重训，交叉验证比 PM 规则准才启用。</p>
+  </div>
+  <div class="card">
+    <h3>分层贝叶斯<span class="state mid">合成数据验证过</span></h3>
+    <div class="big">品种 → 狗 → 天</div>
+    <p>两版：对兽医有序评级建模；直接对抓挠次数建模（不要兽医标签）。新狗能借同品种的数据，并给出不确定性。现在 4 只影棚狗品种都不一样，群体层还没意义。</p>
+  </div>
+  <div class="card">
+    <h3>模型 C：照片看皮肤<span class="state bad">方案阶段</span></h3>
+    <div class="big">IMU × 视觉</div>
+    <p>抓得多不等于皮肤差，抓得少也可能已经有问题（疼得不敢抓、部位不痒）。照片检测皮损 / 秃毛，和 IMU 两路互相印证。检测类别要兽医确认。</p>
+  </div>
+</div>
+
+<h2 id="data">数据现状</h2>
+<div class="note">现在只有 4 只影棚狗、每只几天到几周的历史，兽医照片评级还在攒。所以模型 A / B 只在合成数据上训过，<b>平台上显示的模型结果只能看方向，不能当准确率</b>。真正能验证的是：PM 规则的四个子分和兽医判断的方向是否一致。</div>
+
+<h2 id="next">接下来</h2>
+<ol class="road">
+  <li><b>攒“算法评级 vs 兽医评级”对照数据</b><br><span>每日对照表格已备好；先验证方向，再校准参数。</span></li>
+  <li><b>评分层换成稳健 Z 分数 / CUSUM 变点检测</b><br><span>现在的四项加权 + 红旗例外分支多、没有统一目标；变点检测只要个体历史就能跑。</span></li>
+  <li><b>模型 B 用真实标签重训</b><br><span>比 PM 规则准才启用。</span></li>
+  <li><b>模型 C 的 MVP</b><br><span>先跟兽医定类别，小范围标照片。</span></li>
+</ol>
+
+<footer>设计文档在仓库 skin_health/docs/ 目录。</footer>
+</div>
+<script src="toc.js" defer></script>
+</body>
+</html>

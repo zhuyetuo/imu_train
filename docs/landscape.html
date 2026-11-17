@@ -8,9 +8,13 @@
 </head>
 <body>
 <nav class="top">
-  <span class="brand">狗项圈行为识别</span>
-  <a href="index.html">项目总览</a>
-  <a href="landscape.html" class="on">业界进展与可选模型</a>
+  <span class="brand">狗狗皮肤评估</span>
+  <a href="index.html">总览</a>
+  <a href="behavior.html">① 行为识别</a>
+  <a href="skin.html">② 皮肤评估</a>
+  <a href="history.html">来时路</a>
+  <a href="landscape.html" class="on">业界进展</a>
+  <a href="ideas.html">想法清单</a>
   <span class="sp"></span>
   <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
 </nav>
@@ -25,14 +29,14 @@
 <h2 id="answer">结论：按优先级该试什么</h2>
 <div class="scroll"><table>
 <tr><th>优先级</th><th>模型 / 方法</th><th>解决我们的什么问题</th><th>用在哪</th><th>成本</th></tr>
-<tr><td class="y">1</td><td><b>自监督预训练 + 微调</b><br><span class="muted">对比学习 / 掩码重建，参考 ssl-wearables、BEBE 的做法；用我们自己的大量未标数据预训练同一个 1D-CNN</span></td><td>标签少；新狗、新项圈泛化差</td><td>端侧和服务端都受益（结构不变，只换初始权重）</td><td>低：不改部署</td></tr>
-<tr><td class="y">2</td><td><b>逐帧时序切分</b><br><span class="muted">MS-TCN / ASFormer 一类，或在 CNN 后加带边界损失的 TCN 头</span></td><td>甩头、抖身这类 1–2 秒短动作被 8 秒窗口稀释；事件边界</td><td>先服务端，再看能不能缩到端侧</td><td>中</td></tr>
+<tr><td class="y">1</td><td><b>FilterNet 式逐点输出</b><br><span class="muted">Whistle（Mars Petcare）项圈用的结构：多尺度卷积 + 双向 LSTM，整段进、每 0.3 秒出一个判断；或 MS-TCN 一类逐帧切分</span></td><td>甩头、抖身这类 1–2 秒短动作被 8 秒窗口稀释；事件边界</td><td>先服务端，再看能不能缩到端侧</td><td>中</td></tr>
+<tr><td class="y">2</td><td><b>更长上下文 + 蒸馏</b><br><span class="muted">膨胀卷积 / TCN 看 8–16 秒；大模型当老师教小 CNN</span></td><td>区分持续抓挠和一下一下的舔啃；误报</td><td>端侧结构不变或略变</td><td>中</td></tr>
 <tr><td class="y">3</td><td><b>MiniRocket / InceptionTime</b></td><td>服务端复核的强基线，几乎不用调参</td><td>服务端，替换或补充 XGB</td><td>低</td></tr>
 <tr><td class="y">4</td><td><b>时间序列基础模型当特征提取器</b><br><span class="muted">Mantis（约 8M 参数，专做分类）、MOMENT</span></td><td>负例挖掘、相似片段检索（现在 IMU 相似度只有 17%）</td><td>只在服务端 / 平台用</td><td>低：冻结编码器 + 简单分类器</td></tr>
-<tr><td class="y">5</td><td><b>知识蒸馏 + 剪枝</b><br><span class="muted">大模型当老师，教一个更窄的 int8 CNN</span></td><td>GR5513 只有 128 KB 预算</td><td>端侧</td><td>中</td></tr>
+<tr><td class="y">5</td><td><b>深度可分离卷积 + 剪枝</b><br><span class="muted">更窄的 int8 CNN</span></td><td>GR5513 只有 128 KB 预算</td><td>端侧</td><td>中</td></tr>
 <tr><td class="y">6</td><td><b>传感器内置 ML（ST MLC 决策树）</b></td><td>只做“动/不动/没戴”，主芯片可以睡觉，更省电</td><td>端侧动作门</td><td>换传感器才行</td></tr>
 </table></div>
-<div class="note">不建议现在做的：直接上大 Transformer 放端侧（太大，量化后精度掉得比 CNN 多）；把通用大模型（LLM）当分类器（对 1–2 秒的抓挠没有优势）。</div>
+<div class="note">我们试过、暂时不排在前面的：<b>自监督预训练</b>（业界在标签少时普遍有效；我们 11-16 试了 1500 和 6000 个文件，窗口准确率涨了，抓挠没涨——我们的瓶颈是负例不够，不是数据量）。<br>不建议现在做的：直接上大 Transformer 放端侧（太大，量化后精度掉得比 CNN 多）；把通用大模型（LLM）当分类器（对 1–2 秒的抓挠没有优势）。</div>
 
 <h2 id="now">一眼看现在</h2>
 <div class="tiles">
@@ -49,9 +53,10 @@
 <tr><td class="y">2016</td><td>人体 HAR</td><td>DeepConvLSTM</td><td>卷积 + LSTM 端到端，取代手工特征成为基线</td></tr>
 <tr><td class="y">2019</td><td>时序切分</td><td>MS-TCN</td><td>空洞卷积多阶段逐帧分类，“一段动作从哪到哪”</td></tr>
 <tr><td class="y">2019–20</td><td>时序分类</td><td>InceptionTime、ROCKET</td><td>通用时序分类强基线；ROCKET 训练极快</td></tr>
+<tr><td class="y">2020</td><td>宠物 / 时序分类</td><td>FilterNet（Whistle / Pet Insight Project） <span class="tag vendor">厂商</span></td><td>多对多：整段信号进、逐点出结果，不再一窗一个标签；后来用在 Whistle 项圈上</td></tr>
 <tr><td class="y">2019</td><td>传感器内置 ML</td><td>ST LSM6DSOX MLC</td><td>决策树直接跑在 IMU 里，最多 8 棵树</td></tr>
 <tr class="yr"><td colspan="4">2021–2023</td></tr>
-<tr><td class="y">2021</td><td>宠物</td><td>Whistle / Mars 的项圈深度学习研究 <span class="tag vendor">厂商</span></td><td>单个项圈加速度计识别抓挠、舔、吃喝等</td></tr>
+<tr><td class="y">2021</td><td>宠物</td><td>Whistle / Mars 的项圈深度学习研究 <span class="tag vendor">厂商</span></td><td>基于 FilterNet，单个 3 轴项圈 50 Hz，每 320 ms 判一次；抓挠、舔、蹭、吃、喝都有</td></tr>
 <tr><td class="y">2021</td><td>时序切分</td><td>ASFormer</td><td>Transformer 做逐帧切分</td></tr>
 <tr><td class="y">2022</td><td>公开数据</td><td>Vehkaoja 等狗行为 IMU 数据集</td><td>项圈 + 胸背带，多只狗、视频标注；我们已用</td></tr>
 <tr><td class="y">2023</td><td>时序骨干</td><td>PatchTST、TimesNet</td><td>把时序切成“块”给 Transformer；主要用于预测</td></tr>
@@ -84,7 +89,8 @@
 <tr><td class="y">2019–20</td><td>InceptionTime</td><td>多尺度卷积核并联</td><td>服务端可试；也能当蒸馏老师</td></tr>
 <tr><td class="y">2020–21</td><td>ROCKET / MiniRocket</td><td>大量随机卷积核 + 线性分类器</td><td>服务端快速基线</td></tr>
 <tr><td class="y">2019</td><td>MS-TCN</td><td>多阶段空洞卷积，逐帧输出</td><td>短动作、事件边界</td></tr>
-<tr><td class="y">2020–21</td><td>SimCLR / 掩码重建（用于 HAR）</td><td>不用标签，靠数据增强或遮挡学表示</td><td>优先级第 1 的做法</td></tr>
+<tr><td class="y">2020</td><td>FilterNet</td><td>全分辨率卷积 + 两路带步长卷积（多尺度）+ 双向 LSTM，逐点 softmax；约 34 万参数；推理时 512 点一段、重叠一半拼回</td><td>优先级第 1；仓库里已有代码</td></tr>
+<tr><td class="y">2020–21</td><td>SimCLR / 掩码重建（用于 HAR）</td><td>不用标签，靠数据增强或遮挡学表示</td><td>我们试过，抓挠没涨</td></tr>
 <tr><td class="y">2023</td><td>PatchTST、TimesNet</td><td>分块 Transformer；周期分解</td><td>主要做预测，分类收益不明显</td></tr>
 <tr><td class="y">2024</td><td>MOMENT</td><td>大规模通用时序预训练</td><td>服务端特征提取</td></tr>
 <tr><td class="y">2025</td><td>LSM / LSM-2</td><td>可穿戴多传感器基础模型；能处理缺数据</td><td>思路可借，权重不公开</td></tr>
@@ -96,7 +102,7 @@
 <tr><th>现象</th><th>原因</th><th>对应办法</th></tr>
 <tr><td>抓挠误报 4–5 次/小时</td><td>吃、喝、舔、啃的动作和抓挠很像，负例太少</td><td>负例挖掘 + 一次一类确认（在做）；再重训</td></tr>
 <tr><td>甩头 / 抖身 F1 只有 0.2 左右</td><td>动作 1–2 秒，8 秒窗口里信号被稀释</td><td>短窗口或逐帧切分（MS-TCN 一类）</td></tr>
-<tr><td>换狗、换项圈掉点</td><td>标签只覆盖少数狗</td><td>自监督预训练；加公开数据（已加 22.8 h）</td></tr>
+<tr><td>换狗、换项圈掉点</td><td>标签只覆盖少数狗</td><td>加公开数据（已加 22.8 h）；方向无关输入 + 旋转增强（已用）</td></tr>
 <tr><td>3 轴比 6 轴低约 4.5 个点</td><td>少了陀螺仪的转动信息</td><td>省电型号用 3 轴，精度型号用 6 轴；蒸馏可缩小差距</td></tr>
 <tr><td>GR5513 放不下</td><td>236 KB &gt; 128 KB</td><td>蒸馏到窄网络、剪枝、共享卷积核</td></tr>
 </table></div>
@@ -104,12 +110,23 @@
 <h2 id="compare">我们和他们比</h2>
 <div class="scroll"><table>
 <tr><th>方向</th><th>我们</th><th>别家公开最好</th><th>能不能直接比</th></tr>
-<tr><td>狗抓挠</td><td>片段命中 91.8%，查准约 94–95%</td><td>Whistle 研究：抓挠灵敏度约 0.87 <span class="tag vendor">厂商</span></td><td>不能直接比：他们按窗口算，数据和口径都不同</td></tr>
+<tr><td>狗抓挠</td><td>片段命中 91.8%，查准约 94–95%</td><td>Whistle（2021）：抓挠灵敏度 0.870、特异度 0.997；舔 0.772 / 0.990；蹭 0.729 / 0.996 <span class="tag vendor">厂商</span></td><td>不能直接比：他们按 320 ms 逐点算，数据和口径都不同</td></tr>
+<tr><td>狗吃 / 喝</td><td>只作负例，没单独评</td><td>Whistle：进食 0.988 / 0.983，饮水 0.949 / 0.999 <span class="tag vendor">厂商</span></td><td>说明吃喝是能认准的，值得当正类训</td></tr>
 <tr><td>狗行为（宠物医疗项圈）</td><td>—</td><td>Vetrax：灵敏度 76.9%、特异度 99.73% <span class="tag vendor">厂商</span></td><td>只能看量级</td></tr>
 <tr><td>端侧大小</td><td>236 KB Flash、约 24 KB RAM</td><td>论文里的 TinyML HAR 常见几十到几百 KB</td><td>量级相当</td></tr>
 <tr><td>量化损失</td><td>0.4–1.4 个点</td><td>1D-CNN int8 一般几乎不掉，LSTM 掉得多</td><td>一致</td></tr>
 </table></div>
 <div class="note">标 <span class="tag vendor">厂商</span> 的数字来自厂商或厂商合作研究，口径未必公开，只作参考。</div>
+
+<h2 id="skin">第二步：皮肤评估业界怎么做</h2>
+<div class="scroll"><table>
+<tr><th>做法</th><th>谁在用</th><th>怎么做</th><th>对我们</th></tr>
+<tr><td>项圈抓挠趋势 + 提醒</td><td>Whistle、Vetrax <span class="tag vendor">厂商</span></td><td>统计每天抓挠 / 舔的时长和次数，比群体参考值或自己过去高就提醒</td><td>和我们的 C 值思路一致；Whistle 的公开参考值我们用来做冷启动兜底</td></tr>
+<tr><td>兽医瘙痒评分</td><td>兽医临床（PVAS 瘙痒视觉评分）</td><td>主人按 0–10 的描述给“痒的程度”打分</td><td>可以加进问卷，当模型 B 的辅助标签</td></tr>
+<tr><td>皮损评分</td><td>兽医临床（CADESI-04，特应性皮炎）</td><td>按身体部位给红斑、抓痕、秃毛打分</td><td>模型 C 照片检测的类别可以参考它的部位和病变划分</td></tr>
+<tr><td>照片 AI 看皮肤</td><td>部分宠物 App</td><td>拍照识别皮损类型</td><td>模型 C 方向；单靠照片不知道“痒不痒”，和 IMU 互补</td></tr>
+</table></div>
+<div class="note">业界产品基本只做到“行为趋势 + 提醒”，把行为、问卷、照片合起来给分级的公开做法很少，这是我们第二步的差异点，也意味着没有现成的基准可比，只能靠兽医评级来验证。</div>
 
 <h2 id="track">跟踪方式</h2>
 <ol class="road">
@@ -120,6 +137,8 @@
 
 <h2 id="refs">参考</h2>
 <ul class="muted">
+  <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC8228965/">Whistle：单个项圈加速度计的狗行为深度学习（Animals 2021）</a></li>
+  <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7249062/">FilterNet：多对多时序分类结构（Sensors 2020）</a></li>
   <li><a href="https://movementecologyjournal.biomedcentral.com/articles/10.1186/s40462-024-00511-8">BEBE：动物行为 IMU 基准（Movement Ecology 2024）</a></li>
   <li><a href="https://proceedings.iclr.cc/paper_files/paper/2025/file/94b25992757a549470c8f8dfe73d8df6-Paper-Conference.pdf">Scaling Wearable Foundation Models（LSM，ICLR 2025）</a></li>
   <li><a href="https://arxiv.org/pdf/2412.11276">Wearable Accelerometer Foundation Models via Knowledge Distillation</a></li>

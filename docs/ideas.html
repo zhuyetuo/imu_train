@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>想法清单</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗狗皮肤评估</span>
+  <a href="index.html">总览</a>
+  <a href="behavior.html">① 行为识别</a>
+  <a href="skin.html">② 皮肤评估</a>
+  <a href="history.html">来时路</a>
+  <a href="landscape.html">业界进展</a>
+  <a href="ideas.html" class="on">想法清单</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-17</div>
+  <h1>想法清单</h1>
+  <p class="lead">先把手上的做完，再回来这里挑。每条写清楚：为什么值得做、现在到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
+  <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
+</header>
+
+<h2 id="behavior">① 行为识别</h2>
+<div class="scroll"><table>
+<tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
+<tr><td><b>用已确认的负例重训</b></td><td><span class="state ok">进行中</span></td><td>误报主要来自吃、喝、舔、啃。标注员按“现在重点补”一次确认一类；判完一批就重训主模型和负例挖掘模型。目标误报 4–5 → 2–3 次/小时</td><td>等标注；训练 1–2 小时</td></tr>
+<tr><td><b>FilterNet 式逐点输出</b></td><td><span class="state mid">待做</span></td><td>Whistle 的做法：整段信号进去、每 0.3 秒出一个判断，不是一窗一个标签。专治甩头 / 抖身这类 1–2 秒的短动作和事件边界。仓库 6 月就有 FilterNet 代码，要接到 train_v2 的分组评估上再比</td><td>1–2 天；端侧要另算体积</td></tr>
+<tr><td><b>更长上下文（膨胀卷积 / TCN）</b></td><td><span class="state mid">待做</span></td><td>看 8–16 秒，区分“持续地抓”和“一下一下地舔、啃”</td><td>半天到 1 天</td></tr>
+<tr><td><b>GR5513 小模型（≤128 KB）</b></td><td><span class="state mid">待做</span></td><td>现在 236 KB。深度可分离卷积、剪枝、大模型蒸馏到窄网络</td><td>1–2 天</td></tr>
+<tr><td><b>级联省电</b></td><td><span class="state mid">待做</span></td><td>极便宜的“有没有在动 / 有没有节律”门先过，可能是抓挠才跑 CNN</td><td>中</td></tr>
+<tr><td><b>Mantis / MOMENT 特征找负例</b></td><td><span class="state mid">待做</span></td><td>现在 IMU 相似度检索前 10 只命中 17–23%。预训练时序模型冻结当特征提取器，只在服务端用</td><td>半天</td></tr>
+<tr><td><b>MiniRocket 对照组</b></td><td><span class="state mid">待做</span></td><td>随机卷积核 + 线性分类，几乎不用调参，看我们的 CNN 有没有被便宜方法追上</td><td>小</td></tr>
+<tr><td><b>伪标签</b></td><td><span class="state mid">待做</span></td><td>高置信的抓挠 / 非抓挠片段加进训练，尤其补负样本</td><td>中</td></tr>
+<tr><td><b>聚类用来查标注</b></td><td><span class="state mid">待做</span></td><td>标了抓挠却落在活动簇里的，多半标错；也能给主动学习挑数据</td><td>小</td></tr>
+<tr><td><b>甩头 / 抖身补数据</b></td><td><span class="state bad">缺数据</span></td><td>只有约 170 段，换什么模型都难；规则候选在攒</td><td>标注</td></tr>
+<tr><td><b>用画面找喝水</b></td><td><span class="state bad">暂停</span></td><td>SigLIP 画面向量先找候选，再回到 IMU 确认。先记着</td><td>半天</td></tr>
+<tr><td><b>自监督预训练加大规模</b></td><td><span class="state bad">暂停</span></td><td>1500 → 6000 个文件抓挠都没涨，瓶颈不在数据量。除非换更大的编码器 + 蒸馏</td><td>GPU 几小时起</td></tr>
+<tr><td><b>量化感知训练（QAT）</b></td><td><span class="state bad">暂停</span></td><td>代码有了，默认关；量化损失只有 0.4–1.4 个点，压到更小模型时再开</td><td>小</td></tr>
+<tr><td><b>传感器内置决策树（ST MLC）</b></td><td><span class="state bad">暂停</span></td><td>动作门放进 IMU 里跑，主芯片可以睡；要换传感器</td><td>硬件</td></tr>
+</table></div>
+
+<h2 id="skin">② 皮肤评估</h2>
+<div class="scroll"><table>
+<tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
+<tr><td><b>算法评级 vs 兽医评级对照</b></td><td><span class="state ok">进行中</span></td><td>每日对照表已备好。先验证 C 值四个子分和兽医判断方向一致，再校准参数</td><td>数据</td></tr>
+<tr><td><b>模型 B 用真实标签重训</b></td><td><span class="state bad">缺数据</span></td><td>接口已有：兽医照片评级攒够就重训，交叉验证比 PM 规则准才启用</td><td>兽医评级</td></tr>
+<tr><td><b>评分层换稳健 Z 分数 / CUSUM 变点检测</b></td><td><span class="state mid">待做</span></td><td>现在的四项加权 + 红旗例外分支多、没有统一目标。变点检测只要个体历史就能跑，性价比最高</td><td>1–2 天</td></tr>
+<tr><td><b>个人基线参数校准</b></td><td><span class="state bad">缺数据</span></td><td>14 天中位数、满 21 天启用、红旗 3 倍，这些都是经验值</td><td>每只狗 3 周以上历史</td></tr>
+<tr><td><b>分层贝叶斯接真实数据</b></td><td><span class="state bad">缺数据</span></td><td>合成数据验证过。现在 4 只狗品种都不同，群体层没意义；早期用户里有同品种时先试两层版</td><td>用户数据</td></tr>
+<tr><td><b>模型 C：照片看皮肤</b></td><td><span class="state mid">待做</span></td><td>抓得多 ≠ 皮肤差；照片检测皮损 / 秃毛，和 IMU 互相印证。先和兽医定类别，再做 MVP</td><td>标注 + 1 周</td></tr>
+<tr><td><b>无监督异常检测</b></td><td><span class="state mid">待做</span></td><td>Isolation Forest 等离线跑一遍，看有没有规则没覆盖到的异常模式</td><td>小</td></tr>
+<tr><td><b>抓挠 / 舔啃的部位</b></td><td><span class="state mid">待做</span></td><td>同样是抓，抓耳朵和抓肚子对应的皮肤问题不同。已经开始用姿态给“哪个部位”攒标注</td><td>标注</td></tr>
+<tr><td><b>生存分析：多久会恶化</b></td><td><span class="state bad">缺数据</span></td><td>直接回答“要不要预警”，但要有“恶化 → 就诊”的真实记录</td><td>长期</td></tr>
+</table></div>
+
+<footer>这一页随时更新；挑哪条做，由你定。</footer>
+</div>
+<script src="toc.js" defer></script>
+</body>
+</html>

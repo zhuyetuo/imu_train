@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>来时路</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗狗皮肤评估</span>
+  <a href="index.html">总览</a>
+  <a href="behavior.html">① 行为识别</a>
+  <a href="skin.html">② 皮肤评估</a>
+  <a href="history.html" class="on">来时路</a>
+  <a href="landscape.html">业界进展</a>
+  <a href="ideas.html">想法清单</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">迭代历程 · 每轮训练 / 实验都记一条 · 更新于 2026-11-17</div>
+  <h1>来时路：每一轮试了什么、结果怎样</h1>
+  <p class="lead">成功的、失败的都记。卡住的时候回头看：哪类改法有效、哪类总是白费，往往比再想一个新点子更有用。项目从 2026-06-08 开始，到现在约 1240 次提交。</p>
+</header>
+
+<h2 id="milestones">里程碑</h2>
+<div class="scroll"><table>
+<tr><th>时间</th><th>步骤</th><th>里程碑</th></tr>
+<tr><td class="y">2026-06-08</td><td>① 行为</td><td>项目起步：公开狗项圈数据集上跑通 RF / XGB / LightGBM / CatBoost，复现 Whistle 论文的 CollarCNN 和 FilterNet</td></tr>
+<tr><td class="y">2026-06-29</td><td>① 行为</td><td>蓝牙实时推理：项圈数据边收边判（规则 + 机器学习）</td></tr>
+<tr><td class="y">2026-07-21</td><td>① 行为</td><td>离线抓挠检测脚本 + 抓挠数据增强；开始用自己项圈的数据</td></tr>
+<tr><td class="y">2026-08-07</td><td>② 皮肤</td><td>皮肤健康评估方案（对齐产品《算法定义文档 V0.4》）</td></tr>
+<tr><td class="y">2026-08-11</td><td>② 皮肤</td><td>分层贝叶斯模型第一版；“算法评级 vs 兽医目测”每日对照表</td></tr>
+<tr><td class="y">2026-08-20</td><td>② 皮肤</td><td>问卷页面 + S 总分公式（C 值 40% + 皮肤组 35% + 毛发组 25%）</td></tr>
+<tr><td class="y">2026-09-06</td><td>平台</td><td>推理 / 训练服务接进标注平台：模型自动给疑似片段</td></tr>
+<tr><td class="y">2026-09-07</td><td>② 皮肤</td><td>皮肤评估接口上平台：PM 规则 + 模型 A / B</td></tr>
+<tr><td class="y">2026-09-13–18</td><td>平台</td><td>视觉服务：SAM 2.1 辅助标注、狗检测、SigLIP 画面检索</td></tr>
+<tr><td class="y">2026-09-24</td><td>① 行为</td><td>平台训练记录一键导出端侧代码</td></tr>
+<tr><td class="y">2026-10-02</td><td>① 行为</td><td>网页上能训 1D-CNN，交叉编译量真实 Flash / RAM</td></tr>
+<tr><td class="y">2026-11-04</td><td>② 皮肤</td><td>皮肤 ML 版整批预测；兽医照片评级可重训模型 B</td></tr>
+<tr><td class="y">2026-11-06</td><td>① 行为</td><td>新版训练流程 train_v2：按“天 × 项圈”分组交叉验证、片段级评估</td></tr>
+<tr><td class="y">2026-11-16</td><td>① 行为</td><td>端侧 CNN 上线（只用加速度版 Flash 约 70 KB、RAM 6.6 KB）</td></tr>
+<tr><td class="y">2026-11-17</td><td>① 行为</td><td>6 轴 8 s 窗口 CNN：抓挠片段命中 91.8%；公开数据并入训练；负例挖掘模型</td></tr>
+</table></div>
+
+<h2 id="lessons">回头看：到目前为止的规律</h2>
+<ol class="lessons">
+  <li><b>先怀疑评估，再怀疑模型</b><span>int8 “只有 89% 一致”其实是评估时浮点没过动作门，修好是 99%；TF 卡数据“抓挠 0%”是单位没换算；25 Hz 数据被按 16 Hz 跳过。三次都不是模型的问题。</span></li>
+  <li><b>训练和推理必须完全一致</b><span>重力对齐、降采样方法、采样率，任何一处不一样，线上结果就和交叉验证对不上。</span></li>
+  <li><b>划分方式决定数字是真是假</b><span>早期把所有狗随机混着切，同一只狗同一天的相邻窗口跑进训练和测试两边，数字虚高；换成按“天 × 项圈”分组才可信。</span></li>
+  <li><b>瓶颈在负例，不在数据量</b><span>自监督预训练从 1500 加到 6000 个文件，抓挠没涨；误报主要来自吃、喝、舔、啃。所以现在花力气补负例。</span></li>
+  <li><b>指标要贴近用户感受</b><span>逐窗准确率好看不代表好用；改成“片段命中 + 每小时误报几次”后，选模型的结论变了（XGB 命中略高但误报多一倍）。</span></li>
+  <li><b>一次只补一类</b><span>“负例”整组太宽，标注员来回切换效率低；改成一次集中一类、带负例标志。</span></li>
+  <li><b>抓得多不等于皮肤差</b><span>行为信号有天花板，所以皮肤评估要加问卷、照片（模型 C）两路互相印证。</span></li>
+</ol>
+
+<h2 id="timeline">时间线</h2>
+<div class="chips filter">
+  <button data-f="all" class="on">全部</button>
+  <button data-f="b">① 行为识别</button>
+  <button data-f="s">② 皮肤评估</button>
+  <button data-f="p">平台 / 工程</button>
+</div>
+<div class="legend"><i class="ok"></i>采用<i class="no"></i>没采用<i class="mid"></i>部分 / 默认关闭 / 等数据</div>
+<div class="tl" style="margin-top:14px">
+
+<div class="ev mid" data-k="b"><div class="d">2026-11-17 · 行为识别</div><h3>找饮水：IMU 相似度检索</h3>
+<p>拿确认过的饮水片段去未标数据里找相似的。负例模型概率排序最好，但还不够当自动标签，只用来排序给人看。</p>
+<span class="in">前 10 命中：负例模型 22.6% · 手工特征 17.2% · CNN 特征 6.6% · 随机 2.6%</span></div>
+
+<div class="ev mid" data-k="b"><div class="d">2026-11-17 · 行为识别</div><h3>负例挖掘模型（训练记录 #43）</h3>
+<p>多了进食 / 饮水 / 嗅闻类别，专门在未标数据里找负例候选；只补负例，不动已有的疑似抓挠。规则候选人工确认率约一半，模型候选还没人判。</p>
+<span class="in">规则候选确认率：饮水 51% · 进食 52%</span></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-17 · 行为识别</div><h3>量化复核：int8 其实几乎不掉点</h3>
+<p>之前“89% 一致”是评估算错（浮点没过动作门）。量化感知训练（QAT）代码加了，但默认关，没必要。</p>
+<span class="in">int8 与浮点一致 89% → 99% · 量化损失 0.4–1.4 个点</span></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-17 · 行为识别</div><h3>公开狗数据并入训练</h3>
+<p>Vehkaoja 2022、Marcato 2023 两套项圈数据转成我们的格式一起训，3 轴、6 轴都训了，登记成平台数据集。</p>
+<span class="in">+22.8 h · 抓挠稳定 1–2 个点</span></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-17 · 行为识别</div><h3>8 s 窗口端侧 CNN（3 轴 / 6 轴）</h3>
+<p>窗口上限 128 → 256 点；结构 [64,128,128]、卷积核 9。</p>
+<span class="in">片段命中 6 轴 91.8% / 3 轴 87.3% · 查准约 94–95% · 误报 4–5 次/h</span></div>
+
+<div class="ev no" data-k="b"><div class="d">2026-11-16 · 行为识别</div><h3>自监督预训练 v1 / v2</h3>
+<p>未标原始文件做 SimCLR 式对比学习，预训练板上 CNN 的卷积层再微调。整体窗口准确率涨了，抓挠没涨；加到 6000 个文件还是没涨 → 瓶颈不在“见过的数据不够多”。</p>
+<span class="in">窗口准确率 0.769 → 0.864 · 抓挠 F1 0.87 持平</span></div>
+
+<div class="ev no" data-k="b"><div class="d">2026-11-16 · 行为识别</div><h3>自动改标（边界对齐）</h3>
+<p>用模型把人工标注的起止对齐到信号边界。没有提升，不采用。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-16 · 行为识别</div><h3>CNN 结构对比 + 陀螺仪值不值</h3>
+<p>同样误报下比抓挠检测率。6 轴 [64,128,128] 最好；陀螺仪大约值 2 个点、少 1.5 次误报每小时。</p>
+<span class="in">原默认 [32,64,128] k5：误报 5 次/h 时 80% → 6 轴新结构 85–87%</span></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-16 · 行为识别</div><h3>端侧 CNN 接进平台</h3>
+<p>平台“提交训练”可选 CNN；int8 + 动作门，自检通过。</p>
+<span class="in">Flash 约 70 KB · RAM 6.6 KB · 抓挠片段查全 0.905 / 查准 0.984（只用加速度）</span></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-15 · 行为识别</div><h3>事件级评估 + 起止时间修正</h3>
+<p>按片段算命中和误报；片段起止统一往后挪半个窗口减半个步长，起点误差约 0.8 s。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-11-06 · 行为识别</div><h3>新版训练流程 train_v2</h3>
+<p>按真实时间切窗、细类训练合并输出、按“天 × 项圈”分组交叉验证、片段级 F1；支持 6 轴。</p></div>
+
+<div class="ev ok" data-k="s"><div class="d">2026-11-04 · 皮肤评估</div><h3>皮肤 ML 版整批预测</h3>
+<p>平台把每天的抓挠事件整理好一次送过来；模型读不出来时自动用合成数据重训；兽医照片评级可以重训模型 B，比规则准才启用。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-10-30 · 行为识别</div><h3>方向无关输入 + 旋转增强</h3>
+<p>项圈戴歪、转了也能认。之后的模型默认用这套输入。</p></div>
+
+<div class="ev mid" data-k="b"><div class="d">2026-10-09 / 10-29 · 行为识别</div><h3>规则候选：进食、饮水、吠叫、甩头、如厕</h3>
+<p>用 IMU 规则先挑疑似片段给人确认，攒负例和小类数据。确认率约一半，够用来“找”，不够用来“判”。</p></div>
+
+<div class="ev ok" data-k="p"><div class="d">2026-10-02 · 平台</div><h3>网页训练 1D-CNN，端侧体积实测</h3>
+<p>镜像里带交叉编译器，训练完直接量真实 Flash / RAM，不再估算。</p></div>
+
+<div class="ev ok" data-k="p"><div class="d">2026-09-24 · 平台</div><h3>训练记录一键导出端侧</h3></div>
+
+<div class="ev mid" data-k="p"><div class="d">2026-09-17 · 平台</div><h3>画面找片段：抽帧问多模态大模型</h3>
+<p>本地先筛“狗在动”的几秒，再抽帧问大模型是不是舔 / 啃 / 抓 / 蹭。能帮人找候选，成本和准确率不适合大规模。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-09-16 · 行为识别</div><h3>3 轴版本（没有陀螺仪）</h3>
+<p>给省电型号用。后来实测比 6 轴低约 4.5 个点。</p></div>
+
+<div class="ev no" data-k="b"><div class="d">2026-09-08 · 行为识别</div><h3>只靠频谱找抓挠候选</h3>
+<p>对这批设备没有区分度，默认关掉。</p></div>
+
+<div class="ev ok" data-k="s"><div class="d">2026-09-07 · 皮肤评估</div><h3>皮肤评估接口上平台</h3>
+<p>PM 规则（问卷分、C 值、S 总分）+ IMU 日统计 + 模型 A / B；C 值每一项都说明“为什么是这个分”。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-08-28 · 行为识别</div><h3>未佩戴、甩身体独立成类</h3>
+<p>以前排除在训练外，改成各自独立的类别参与训练；现在的动作门就靠“未佩戴”这一类。</p></div>
+
+<div class="ev mid" data-k="s"><div class="d">2026-08-14 · 皮肤评估</div><h3>评分层换成稳健 Z 分数 / CUSUM 的方案</h3>
+<p>发现 PM 的四项加权 + 红旗打分层没有统一目标、例外分支多。替代方案写好了，等真实数据再换。</p></div>
+
+<div class="ev mid" data-k="s"><div class="d">2026-08-11 · 皮肤评估</div><h3>分层贝叶斯模型第一版</h3>
+<p>合成数据上验证了冷启动和“向群体收缩”的行为是对的；真实数据只有 4 只不同品种的狗，群体层暂时用不上。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-08-10 / 08-11 · 行为识别</div><h3>“抓挠 0%”和降采样不一致</h3>
+<p>TF 卡数据单位没换算，导致完全检不出抓挠；训练和推理的降采样算法不一样。都修了，之后每次都核对训练 / 推理一致。</p></div>
+
+<div class="ev ok" data-k="s"><div class="d">2026-08-07 · 皮肤评估</div><h3>皮肤健康评估方案</h3>
+<p>对齐产品《算法定义文档 V0.4》：Scratch Burden（变化 30 + 聚集 20 + 持续 20 + 打断 30）、C0/C1/C2；补上文档留白的个人基线。</p></div>
+
+<div class="ev no" data-k="b"><div class="d">2026-07-30 · 行为识别</div><h3>默认随机划分（混所有狗）</h3>
+<p>数字好看但不可信，后来被按“天 × 项圈”分组交叉验证取代。</p></div>
+
+<div class="ev mid" data-k="b"><div class="d">2026-06-25 / 07-21 · 行为识别</div><h3>合成抓挠数据</h3>
+<p>真实抓挠少的时候用合成数据补；真实标注多起来后，新版流程不再依赖它。</p></div>
+
+<div class="ev mid" data-k="p"><div class="d">2026-06-09 / 06-10 · 平台</div><h3>纯视觉认行为：关键点、CLIP 零样本、大模型打标</h3>
+<p>直接从视频认行为不够准，后来转成“辅助标注”：找候选、检索相似画面。</p></div>
+
+<div class="ev ok" data-k="b"><div class="d">2026-06-08 · 行为识别</div><h3>起步：公开数据集上的基线</h3>
+<p>RF / XGB / LightGBM / CatBoost，复现 Whistle 的 CollarCNN 和 FilterNet（含逐点输出模式），还加了猫的数据集。</p></div>
+
+</div>
+
+<footer>详细数字见仓库 docs/claude_worklog.md 和 skin_health/docs/。</footer>
+</div>
+<script>
+document.querySelectorAll(".chips button").forEach(function (b) {
+  b.onclick = function () {
+    document.querySelectorAll(".chips button").forEach(function (x) { x.classList.toggle("on", x === b); });
+    var f = b.dataset.f;
+    document.querySelectorAll(".ev").forEach(function (e) { e.style.display = (f === "all" || e.dataset.k === f) ? "" : "none"; });
+  };
+});
+</script>
+<script src="toc.js" defer></script>
+</body>
+</html>
