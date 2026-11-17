@@ -1,5 +1,5 @@
 """给导入的 label_service 任务建平台的训练记录（model_versions），跟 POST /train 插的那行一样，
-再按「刷新」的逻辑从 label_service 拉状态和指标写回；listed=True，项目的版本下拉里直接能选。
+再按「刷新」的逻辑从 label_service 拉状态和指标写回。启用 / 停用不碰，由人在训练记录里决定。
 在 api 容器里跑：python mv_import.py items_done.json"""
 import asyncio
 import json
@@ -25,7 +25,7 @@ async def main(path):
             if not old:
                 db.add(row)
             _apply_status(row, await algo_client.poll_train(it["job_id"]))
-            row.listed = True
+            # 启用 / 停用由人在训练记录里决定，这里不碰（新建的记录默认停用，跟平台上点训练一样）
             await db.commit()
             await db.refresh(row)
             print("记录", row.id, "任务", row.algo_job_id, row.status, row.model_type, row.model_version, row.model_path)

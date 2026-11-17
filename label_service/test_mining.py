@@ -20,11 +20,21 @@ def test_negatives_become_candidates_and_activity():
 
 def test_skip_overlap_with_existing_candidates_and_cap():
     segments = {"嗅闻": [seg(i, i + 1, conf=i / 100) for i in range(0, 50)]}
-    existing = [{"start_ts": "2026-11-17 10:00:00.000", "end_ts": "2026-11-17 10:00:01.000"}]
+    # 疑似抓挠候选（不带 label）压住的不给
+    existing = [{"start_ts": "2026-11-17 10:00:49.000", "end_ts": "2026-11-17 10:00:50.000"}]
     _, cands = mine_negatives(segments, existing, ["活动", "嗅闻"], ["嗅闻"], max_per_label=5)
     assert len(cands) == 5
-    assert cands[0]["conf_mean"] == 0.49   # 置信度高的排前面
-    assert all(c["start_ts"] != existing[0]["start_ts"] for c in cands)
+    assert cands[0]["conf_mean"] == 0.48   # 置信度高的排前面；0.49 那段被疑似抓挠压住了
+
+
+def test_other_kind_rule_candidates_do_not_block_same_kind_does():
+    """规则候选（姿态像舔、振荡像甩头）跟它重叠照样给；同一类的已有候选重叠就不重复给"""
+    segments = {"饮水": [seg(10, 20, conf=0.99)], "进食": [seg(30, 40, conf=0.9)]}
+    existing = [{**seg(12, 15), "label": "舔身体", "reason": "grooming"},
+                {**seg(13, 14), "label": "甩头/抖身", "reason": "shaking"},
+                {**seg(31, 33), "label": "进食", "reason": "eating"}]
+    _, cands = mine_negatives(segments, existing, ["活动", "进食", "饮水"], ["进食", "饮水"])
+    assert [c["label"] for c in cands] == ["饮水"]
 
 
 def test_model_without_negative_classes_unchanged():
