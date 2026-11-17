@@ -373,3 +373,22 @@ def test_xgb_depth_cap_only_for_edge():
     with pytest.raises(SystemExit):
         tv.xgb_params({"max_depth": 8})
     assert tv.xgb_params({"max_depth": 8}, server=True)["max_depth"] == 8
+
+
+def test_qat_fake_quant_matches_int8_grid():
+    """QAT 的模拟量化跟导出的 int8 方案一致：权重逐通道 ≤127 格、激活落在 256 格上，前向形状对"""
+    import importlib.util as _u
+    import torch
+    _s = _u.spec_from_file_location("tv2q", os.path.join(ROOT, "src", "ml", "train_v2.py")); tv = _u.module_from_spec(_s); _s.loader.exec_module(tv)
+    w = torch.randn(4, 3, 5)
+    q = tv._fq_weight(w)
+    s = w.abs().flatten(1).max(1).values / 127
+    assert torch.allclose((q / s.view(-1, 1, 1)).round(), q / s.view(-1, 1, 1), atol=1e-4)
+    x = torch.linspace(-1, 3, 1000)
+    a = tv._fq_act(x, -1.0, 3.0)
+    assert len(torch.unique(a)) <= 256
+    sys.path.insert(0, os.path.join(ROOT, "src", "dl"))
+    from models.cnn import CNN
+    net = CNN(5, 32, 4, dict(filters=[8, 8, 8], kernel_size=5, dropout=0.1)).eval()
+    out = tv._qat_forward(net, torch.randn(6, 5, 32), {}, update=True)
+    assert out.shape == (6, 4)
