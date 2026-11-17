@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>狗项圈行为识别 · 项目总览</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗项圈行为识别</span>
+  <a href="index.html" class="on">项目总览</a>
+  <a href="landscape.html">业界进展与可选模型</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">项目效果总览 · 更新于 2026-11-17</div>
+  <h1>用项圈上的 IMU，认出狗在抓挠、舔、甩头、吃喝和休息</h1>
+  <p class="lead">项圈里有一颗 6 轴 IMU（加速度 + 陀螺仪）。我们把它的数据采下来、在标注平台上配视频打标签，训练出两套模型：一套量化成 int8 放进项圈芯片里实时跑，一套放在服务端做更准的复核。核心目标是<strong>把抓挠（皮肤问题的信号）找准，同时把误报压低</strong>，其他行为逐步补上。</p>
+</header>
+
+<h2 id="what">这个项目在做什么</h2>
+<div class="flow">
+  <div class="step"><b>① 采集</b><span>项圈 IMU 20 Hz，6 轴；同时录视频当“答案”</span></div>
+  <div class="step"><b>② 标注平台</b><span>视频 + 波形对齐标片段；模型先给疑似片段，人来确认</span></div>
+  <div class="step"><b>③ 训练</b><span>8 秒窗口；按“天 × 项圈”分组 5 折，防止同一只狗同一天泄漏</span></div>
+  <div class="step"><b>④ 后处理</b><span>动作门 + Viterbi 平滑，把逐窗结果连成事件</span></div>
+  <div class="step"><b>⑤ 端侧导出</b><span>int8 1D-CNN，导出 C 数组进固件</span></div>
+  <div class="step"><b>⑥ 服务端</b><span>XGB / CNN 推理服务，给平台打候选、给 App 复核</span></div>
+</div>
+<div class="note">评估口径：<b>片段级</b>——人工标的一段抓挠，模型只要在里面报出来就算“命中”；模型报了但人工没有，就算“误报”，按每小时次数统计。这比逐窗准确率更接近用户真实感受。</div>
+
+<h2 id="modules">用到哪些算法模块、各自进展</h2>
+<div class="cards">
+
+  <div class="card">
+    <h3>抓挠识别<span class="state ok">可用，在打磨</span></h3>
+    <div class="big">91.8% <small>片段命中（6 轴 端侧 CNN）</small></div>
+    <p>查准约 94–95%，误报约 4–5 次/小时。</p>
+    <ul>
+      <li>3 轴版本（只用加速度）：87.3%</li>
+      <li>服务端 XGB：92.0%，但误报约 8 次/小时</li>
+      <li>加了公开狗数据集一起训，稳定了 1–2 个点</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>静止 / 活动 / 未佩戴<span class="state ok">已稳定</span></h3>
+    <div class="big">0.98 <small>未佩戴 F1</small></div>
+    <p>“动作门”：先判断有没有在动，静止和没戴的窗口直接不送去分细类，既省电又少误报。</p>
+  </div>
+
+  <div class="card">
+    <h3>负例：吃、喝、嗅、舔、啃、蹭<span class="state mid">在补数据</span></h3>
+    <div class="big">≈51% <small>规则候选被人确认的比例</small></div>
+    <p>这些动作最容易被误认成抓挠。做法：用“负例挖掘模型”（训练记录 #43）在大量未标数据里找疑似片段，人一次只集中确认一类。</p>
+    <ul>
+      <li>饮水 48 / 进食 133 条候选已判，确认率都在 51–52%</li>
+      <li>IMU 相似度找喝水：模型概率前 10 命中 22.6%，比手工特征（17.2%）和随机（2.6%）好，但还不够当自动标签</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>甩头 / 抖身<span class="state bad">偏弱</span></h3>
+    <div class="big">0.16–0.24 <small>F1（端侧）</small></div>
+    <p>服务端 XGB 到 0.33。动作只有 1–2 秒，在 8 秒窗口里被稀释；下一步试短窗口 / 逐帧切分。</p>
+  </div>
+
+  <div class="card">
+    <h3>事件切分与平滑<span class="state ok">可用</span></h3>
+    <div class="big">≈0.8 s <small>事件起点误差</small></div>
+    <p>逐窗概率 → 动作门 → Viterbi（稳定版 v2），输出“几点几分抓了多久”。</p>
+  </div>
+
+  <div class="card">
+    <h3>端侧部署（int8）<span class="state mid">能跑，要再瘦身</span></h3>
+    <div class="big">236 KB <small>Flash；RAM ≈24 KB</small></div>
+    <p>int8 与浮点结果 99% 一致（量化损失 0.4–1.4 个点）。GR5515 能放下；GR5513 给模型的预算只有 128 KB，还要再压一半。</p>
+  </div>
+
+  <div class="card">
+    <h3>数据与标注平台<span class="state ok">持续增长</span></h3>
+    <div class="big">45.9 h <small>自有标注数据池 · 1450 个任务</small></div>
+    <p>另有公开狗 IMU 数据 22.8 h（Vehkaoja 2022、Marcato 2023），已登记成平台数据集。平台支持“现在重点补哪一类”、疑似片段待判计数、按类筛选、清理候选。</p>
+  </div>
+
+  <div class="card">
+    <h3>画面辅助（视频向量）<span class="state mid">实验中</span></h3>
+    <div class="big">SigLIP <small>画面向量检索</small></div>
+    <p>用视频画面找相似片段，帮人更快标注；“用画面找喝水”实验已排进待办。</p>
+  </div>
+
+</div>
+
+<h2 id="recent">最近一次更新</h2>
+<div class="tiles">
+  <div class="tile"><div class="k">负例挖掘模型</div><div class="v"><s>无</s><b>#43 上线</b></div><div class="n">只补负例候选，不动已有的疑似抓挠</div></div>
+  <div class="tile"><div class="k">量化评估</div><div class="v"><s>口径不一</s><b>99% 一致</b></div><div class="n">修了评估 bug：浮点和 int8 现在都先过动作门再比</div></div>
+  <div class="tile"><div class="k">公开数据</div><div class="v"><s>0 h</s><b>22.8 h</b></div><div class="n">两套狗项圈公开数据加入训练，3 轴 / 6 轴都训了</div></div>
+  <div class="tile"><div class="k">标注效率</div><div class="v"><b>一次一类</b></div><div class="n">平台侧栏显示“片段未通过 / 疑似待判”两个数</div></div>
+</div>
+
+<h2 id="next">接下来</h2>
+<ol class="road">
+  <li><b>用已确认的负例重训挖掘模型和主模型</b><br><span>目标：抓挠误报从 4–5 次/小时降到 2–3 次/小时，命中不掉。</span></li>
+  <li><b>甩头 / 抖身换短窗口或逐帧切分</b><br><span>2 秒窗口或 MS-TCN 式的逐帧模型，专门对付 1–2 秒的短动作。</span></li>
+  <li><b>自监督预训练</b><br><span>大量未标数据先做预训练，再用少量标签微调；业界在“标签少”的情况下普遍有提升。</span></li>
+  <li><b>GR5513 小模型</b><br><span>剪枝 / 蒸馏 / 更窄的网络，把 236 KB 压到 128 KB 以内。</span></li>
+  <li><b>用画面找喝水</b><br><span>视频向量先找出候选，再回到 IMU 上确认。</span></li>
+</ol>
+
+<section class="more">
+  <a href="landscape.html">业界进展与可选模型 →<span>别人用什么模型、做到多少，哪些值得我们试</span></a>
+  <a href="https://github.com/zhuyetuo/imu_train/blob/main/docs/claude_worklog.md">工作记录 →<span>每次实验的做法和数字</span></a>
+  <a href="https://github.com/zhuyetuo/imu_train/blob/main/docs/datasets.md">数据集说明 →<span>自有数据、公开数据怎么来的</span></a>
+</section>
+
+<footer>数字都来自交叉验证（按天 × 项圈分组），不是厂商宣传口径。页面源码在仓库 docs/ 目录。</footer>
+</div>
+<script src="toc.js" defer></script>
+</body>
+</html>

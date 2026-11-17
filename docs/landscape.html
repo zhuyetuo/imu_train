@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>业界进展与可选模型</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗项圈行为识别</span>
+  <a href="index.html">项目总览</a>
+  <a href="landscape.html" class="on">业界进展与可选模型</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">行业调研 · 更新于 2026-11-17</div>
+  <h1>IMU 行为识别：别人用什么模型，哪些值得我们试</h1>
+  <p class="lead">这一页回答一个问题：<strong>针对“项圈 IMU + 少量标签 + 小芯片”这个场景，有哪些比我们现在更好的模型可以用？</strong>先给结论，再给依据（时间线、模型演进、和别家对比）。</p>
+</header>
+
+<h2 id="answer">结论：按优先级该试什么</h2>
+<div class="scroll"><table>
+<tr><th>优先级</th><th>模型 / 方法</th><th>解决我们的什么问题</th><th>用在哪</th><th>成本</th></tr>
+<tr><td class="y">1</td><td><b>自监督预训练 + 微调</b><br><span class="muted">对比学习 / 掩码重建，参考 ssl-wearables、BEBE 的做法；用我们自己的大量未标数据预训练同一个 1D-CNN</span></td><td>标签少；新狗、新项圈泛化差</td><td>端侧和服务端都受益（结构不变，只换初始权重）</td><td>低：不改部署</td></tr>
+<tr><td class="y">2</td><td><b>逐帧时序切分</b><br><span class="muted">MS-TCN / ASFormer 一类，或在 CNN 后加带边界损失的 TCN 头</span></td><td>甩头、抖身这类 1–2 秒短动作被 8 秒窗口稀释；事件边界</td><td>先服务端，再看能不能缩到端侧</td><td>中</td></tr>
+<tr><td class="y">3</td><td><b>MiniRocket / InceptionTime</b></td><td>服务端复核的强基线，几乎不用调参</td><td>服务端，替换或补充 XGB</td><td>低</td></tr>
+<tr><td class="y">4</td><td><b>时间序列基础模型当特征提取器</b><br><span class="muted">Mantis（约 8M 参数，专做分类）、MOMENT</span></td><td>负例挖掘、相似片段检索（现在 IMU 相似度只有 17%）</td><td>只在服务端 / 平台用</td><td>低：冻结编码器 + 简单分类器</td></tr>
+<tr><td class="y">5</td><td><b>知识蒸馏 + 剪枝</b><br><span class="muted">大模型当老师，教一个更窄的 int8 CNN</span></td><td>GR5513 只有 128 KB 预算</td><td>端侧</td><td>中</td></tr>
+<tr><td class="y">6</td><td><b>传感器内置 ML（ST MLC 决策树）</b></td><td>只做“动/不动/没戴”，主芯片可以睡觉，更省电</td><td>端侧动作门</td><td>换传感器才行</td></tr>
+</table></div>
+<div class="note">不建议现在做的：直接上大 Transformer 放端侧（太大，量化后精度掉得比 CNN 多）；把通用大模型（LLM）当分类器（对 1–2 秒的抓挠没有优势）。</div>
+
+<h2 id="now">一眼看现在</h2>
+<div class="tiles">
+  <div class="tile"><div class="k">主流端侧结构</div><div class="v"><b>1D-CNN int8</b></div><div class="n">量化几乎不掉点，LSTM 量化后掉得明显</div></div>
+  <div class="tile"><div class="k">服务端 / 研究前沿</div><div class="v"><b>自监督 + 基础模型</b></div><div class="n">先用海量未标数据预训练，再少量标签微调</div></div>
+  <div class="tile"><div class="k">动物行为公开基准</div><div class="v"><b>BEBE</b></div><div class="n">9 个物种数据集；深度模型普遍胜过手工特征</div></div>
+  <div class="tile"><div class="k">宠物产品</div><div class="v"><b>抓挠 / 舔</b></div><div class="n">已是商业功能，做法是项圈 IMU + 深度学习</div></div>
+</div>
+
+<h2 id="timeline">里程碑时间线</h2>
+<div class="scroll"><table>
+<tr><th>时间</th><th>方向</th><th>工作 / 产品</th><th>意义</th></tr>
+<tr class="yr"><td colspan="4">2016–2020</td></tr>
+<tr><td class="y">2016</td><td>人体 HAR</td><td>DeepConvLSTM</td><td>卷积 + LSTM 端到端，取代手工特征成为基线</td></tr>
+<tr><td class="y">2019</td><td>时序切分</td><td>MS-TCN</td><td>空洞卷积多阶段逐帧分类，“一段动作从哪到哪”</td></tr>
+<tr><td class="y">2019–20</td><td>时序分类</td><td>InceptionTime、ROCKET</td><td>通用时序分类强基线；ROCKET 训练极快</td></tr>
+<tr><td class="y">2019</td><td>传感器内置 ML</td><td>ST LSM6DSOX MLC</td><td>决策树直接跑在 IMU 里，最多 8 棵树</td></tr>
+<tr class="yr"><td colspan="4">2021–2023</td></tr>
+<tr><td class="y">2021</td><td>宠物</td><td>Whistle / Mars 的项圈深度学习研究 <span class="tag vendor">厂商</span></td><td>单个项圈加速度计识别抓挠、舔、吃喝等</td></tr>
+<tr><td class="y">2021</td><td>时序切分</td><td>ASFormer</td><td>Transformer 做逐帧切分</td></tr>
+<tr><td class="y">2022</td><td>公开数据</td><td>Vehkaoja 等狗行为 IMU 数据集</td><td>项圈 + 胸背带，多只狗、视频标注；我们已用</td></tr>
+<tr><td class="y">2023</td><td>时序骨干</td><td>PatchTST、TimesNet</td><td>把时序切成“块”给 Transformer；主要用于预测</td></tr>
+<tr class="yr"><td colspan="4">2024–2026</td></tr>
+<tr><td class="y">2024</td><td>自监督</td><td>ssl-wearables（牛津，UK Biobank 腕表数据）</td><td>大规模自监督预训练的加速度模型，公开权重</td></tr>
+<tr><td class="y">2024</td><td>动物基准</td><td>BEBE</td><td>9 个动物数据集统一评测；试了把人体腕表预训练模型迁到动物上</td></tr>
+<tr><td class="y">2024</td><td>基础模型</td><td>MOMENT</td><td>通用时序基础模型，可冻结当特征提取器</td></tr>
+<tr><td class="y">2024–25</td><td>可穿戴基础模型</td><td>Apple 加速度模型（从 PPG 模型蒸馏）</td><td>用另一种传感器的大模型教加速度模型</td></tr>
+<tr><td class="y">2025</td><td>可穿戴基础模型</td><td>Google LSM / LSM-2</td><td>约 4000 万小时、16.5 万人的多传感器数据；规模越大越好</td></tr>
+<tr><td class="y">2025–26</td><td>分类基础模型</td><td>Mantis / MantisV2</td><td>约 8M 参数，专门做时序分类，含 HAR 基准</td></tr>
+<tr><td class="y">2026</td><td>IMU 动作定位</td><td>WS-IMUBench 等</td><td>在连续 IMU 流里同时给类别和起止时间</td></tr>
+</table></div>
+
+<h2 id="roads">技术路线怎么演进的</h2>
+<div class="flow">
+  <div class="step"><b>阈值 / 规则</b><span>计步、跌倒；简单但难扩展</span></div>
+  <div class="step"><b>手工特征 + RF/XGB</b><span>统计、频域特征；我们服务端的 XGB 就在这层</span></div>
+  <div class="step"><b>CNN / LSTM</b><span>端到端；我们端侧的 1D-CNN 在这层</span></div>
+  <div class="step"><b>TCN / Transformer</b><span>更长上下文、逐帧切分</span></div>
+  <div class="step"><b>自监督 / 基础模型</b><span>先吃大量未标数据，再少量标签微调</span></div>
+  <div class="step"><b>TinyML / 传感器内置</b><span>反方向：把模型缩到 µA 级功耗</span></div>
+</div>
+<div class="note">两条线同时在走：服务端越来越“大而通用”，端侧越来越“小而省电”。我们的位置是：端侧用小 CNN，服务端可以借大模型的力（预训练、蒸馏、找候选）。</div>
+
+<h2 id="backbones">底层模型的演进</h2>
+<div class="scroll"><table>
+<tr><th>年份</th><th>模型</th><th>核心思想</th><th>对我们</th></tr>
+<tr><td class="y">2016</td><td>DeepConvLSTM</td><td>卷积提局部特征，LSTM 串时间</td><td>LSTM 量化差，端侧不选</td></tr>
+<tr><td class="y">2017–19</td><td>1D ResNet / FCN</td><td>残差卷积，稳、好训</td><td>现在端侧结构的近亲</td></tr>
+<tr><td class="y">2019–20</td><td>InceptionTime</td><td>多尺度卷积核并联</td><td>服务端可试；也能当蒸馏老师</td></tr>
+<tr><td class="y">2020–21</td><td>ROCKET / MiniRocket</td><td>大量随机卷积核 + 线性分类器</td><td>服务端快速基线</td></tr>
+<tr><td class="y">2019</td><td>MS-TCN</td><td>多阶段空洞卷积，逐帧输出</td><td>短动作、事件边界</td></tr>
+<tr><td class="y">2020–21</td><td>SimCLR / 掩码重建（用于 HAR）</td><td>不用标签，靠数据增强或遮挡学表示</td><td>优先级第 1 的做法</td></tr>
+<tr><td class="y">2023</td><td>PatchTST、TimesNet</td><td>分块 Transformer；周期分解</td><td>主要做预测，分类收益不明显</td></tr>
+<tr><td class="y">2024</td><td>MOMENT</td><td>大规模通用时序预训练</td><td>服务端特征提取</td></tr>
+<tr><td class="y">2025</td><td>LSM / LSM-2</td><td>可穿戴多传感器基础模型；能处理缺数据</td><td>思路可借，权重不公开</td></tr>
+<tr><td class="y">2025–26</td><td>Mantis</td><td>对比学习预训练、专做分类、小</td><td>服务端负例挖掘 / 相似检索</td></tr>
+</table></div>
+
+<h2 id="gap">为什么差几个点，怎么补</h2>
+<div class="scroll"><table>
+<tr><th>现象</th><th>原因</th><th>对应办法</th></tr>
+<tr><td>抓挠误报 4–5 次/小时</td><td>吃、喝、舔、啃的动作和抓挠很像，负例太少</td><td>负例挖掘 + 一次一类确认（在做）；再重训</td></tr>
+<tr><td>甩头 / 抖身 F1 只有 0.2 左右</td><td>动作 1–2 秒，8 秒窗口里信号被稀释</td><td>短窗口或逐帧切分（MS-TCN 一类）</td></tr>
+<tr><td>换狗、换项圈掉点</td><td>标签只覆盖少数狗</td><td>自监督预训练；加公开数据（已加 22.8 h）</td></tr>
+<tr><td>3 轴比 6 轴低约 4.5 个点</td><td>少了陀螺仪的转动信息</td><td>省电型号用 3 轴，精度型号用 6 轴；蒸馏可缩小差距</td></tr>
+<tr><td>GR5513 放不下</td><td>236 KB &gt; 128 KB</td><td>蒸馏到窄网络、剪枝、共享卷积核</td></tr>
+</table></div>
+
+<h2 id="compare">我们和他们比</h2>
+<div class="scroll"><table>
+<tr><th>方向</th><th>我们</th><th>别家公开最好</th><th>能不能直接比</th></tr>
+<tr><td>狗抓挠</td><td>片段命中 91.8%，查准约 94–95%</td><td>Whistle 研究：抓挠灵敏度约 0.87 <span class="tag vendor">厂商</span></td><td>不能直接比：他们按窗口算，数据和口径都不同</td></tr>
+<tr><td>狗行为（宠物医疗项圈）</td><td>—</td><td>Vetrax：灵敏度 76.9%、特异度 99.73% <span class="tag vendor">厂商</span></td><td>只能看量级</td></tr>
+<tr><td>端侧大小</td><td>236 KB Flash、约 24 KB RAM</td><td>论文里的 TinyML HAR 常见几十到几百 KB</td><td>量级相当</td></tr>
+<tr><td>量化损失</td><td>0.4–1.4 个点</td><td>1D-CNN int8 一般几乎不掉，LSTM 掉得多</td><td>一致</td></tr>
+</table></div>
+<div class="note">标 <span class="tag vendor">厂商</span> 的数字来自厂商或厂商合作研究，口径未必公开，只作参考。</div>
+
+<h2 id="track">跟踪方式</h2>
+<ol class="road">
+  <li><b>每次大实验后更新首页数字</b><br><span>只写交叉验证结果，口径固定为片段级。</span></li>
+  <li><b>新模型先在服务端试</b><br><span>同样的 5 折、同样的评估脚本；赢了再考虑缩到端侧。</span></li>
+  <li><b>关注的来源</b><br><span>BEBE 排行、Movement Ecology、IMWUT / UbiComp、arXiv 上的可穿戴基础模型。</span></li>
+</ol>
+
+<h2 id="refs">参考</h2>
+<ul class="muted">
+  <li><a href="https://movementecologyjournal.biomedcentral.com/articles/10.1186/s40462-024-00511-8">BEBE：动物行为 IMU 基准（Movement Ecology 2024）</a></li>
+  <li><a href="https://proceedings.iclr.cc/paper_files/paper/2025/file/94b25992757a549470c8f8dfe73d8df6-Paper-Conference.pdf">Scaling Wearable Foundation Models（LSM，ICLR 2025）</a></li>
+  <li><a href="https://arxiv.org/pdf/2412.11276">Wearable Accelerometer Foundation Models via Knowledge Distillation</a></li>
+  <li><a href="https://github.com/vfeofanov/mantis">Mantis：轻量时序分类基础模型</a></li>
+  <li><a href="https://arxiv.org/pdf/2604.02711">基础模型时代的传感器 HAR 综述（2026）</a></li>
+  <li><a href="https://arxiv.org/html/2603.04860v1">1D-CNN 与 LSTM 在 MCU 上的 int8 对比（2026）</a></li>
+  <li><a href="https://www.alphaxiv.org/abs/2602.01850.md">WS-IMUBench：IMU 动作定位</a></li>
+</ul>
+
+<footer>这一页会随着实验和新论文更新。</footer>
+</div>
+<script src="toc.js" defer></script>
+</body>
+</html>
