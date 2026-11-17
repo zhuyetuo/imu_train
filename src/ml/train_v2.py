@@ -509,6 +509,8 @@ def labeled_span_windows(tl: dict, segs_of_file: list[dict], W: int, S: int, hz:
         return None
     lo, hi = min(s["start_ms"] for s in ss) / 1000, max(s["end_ms"] for s in ss) / 1000
     x, bad = tl["x"], tl["bad"]
+    if len(x) < W:
+        return None  # 整个文件比一个窗口还短（公开数据集里有几秒长的录制）：切不出完整窗口
     a0, a1 = max(0, int(lo * hz) - W // 2), min(len(x) - W, int(hi * hz))
     st = [s for s in range(a0, max(a0, a1) + 1, S) if not bad[s:s + W].any()]
     if not st:
