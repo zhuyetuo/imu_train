@@ -21,7 +21,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-17</div>
+  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-18</div>
   <h1>想法清单</h1>
   <p class="lead">先把手上的做完，再回来这里挑。每条写清楚：为什么值得做、现在到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
   <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
@@ -31,9 +31,9 @@
 <div class="scroll"><table>
 <tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
 <tr><td><b>用已确认的负例重训</b></td><td><span class="state ok">进行中</span></td><td>误报主要来自吃、喝、舔、啃。标注员按“现在重点补”一次确认一类；判完一批就重训主模型和负例挖掘模型。目标误报 4–5 → 2–3 次/小时</td><td>等标注；训练 1–2 小时</td></tr>
-<tr><td><b>FilterNet 式逐点输出</b></td><td><span class="state mid">待做</span></td><td>Whistle 的做法：整段信号进去、每 0.3 秒出一个判断，不是一窗一个标签。专治甩头 / 抖身这类 1–2 秒的短动作和事件边界。仓库 6 月就有 FilterNet 代码，要接到 train_v2 的分组评估上再比</td><td>1–2 天；端侧要另算体积</td></tr>
-<tr><td><b>更长上下文（膨胀卷积 / TCN）</b></td><td><span class="state mid">待做</span></td><td>看 8–16 秒，区分“持续地抓”和“一下一下地舔、啃”</td><td>半天到 1 天</td></tr>
-<tr><td><b>GR5513 小模型（≤128 KB）</b></td><td><span class="state mid">待做</span></td><td>现在 236 KB。深度可分离卷积、剪枝、大模型蒸馏到窄网络</td><td>1–2 天</td></tr>
+<tr><td><b>GR5513 小模型（≤128 KB）</b></td><td><span class="state ok">进行中</span></td><td>11-18：通道减半 [32,64,64] 只有 6.4 万参数，抓挠命中 90.3%（只低 1.5 个点）。下一步导出 int8、量真实 Flash / RAM、上板跑</td><td>半天</td></tr>
+<tr><td><b>负例单独类别：同样误报下比命中</b></td><td><span class="state mid">待做</span></td><td>11-18：误报 5.7 → 3.7 次/h，但命中 91.8% → 82.7%。现在的阈值是按旧模型定的，要把两边拉到同样误报再比，才知道换不换</td><td>小（已有预测，不用重训）</td></tr>
+<tr><td><b>精准版起止移植到板上</b></td><td><span class="state mid">待做</span></td><td>平台上已经有了（11-18）。板上 tm_post 要加：平移 + 3–9 Hz 能量对齐；带通滤波要在板上流式算</td><td>1 天</td></tr>
 <tr><td><b>级联省电</b></td><td><span class="state mid">待做</span></td><td>极便宜的“有没有在动 / 有没有节律”门先过，可能是抓挠才跑 CNN</td><td>中</td></tr>
 <tr><td><b>Mantis / MOMENT 特征找负例</b></td><td><span class="state mid">待做</span></td><td>现在 IMU 相似度检索前 10 只命中 17–23%。预训练时序模型冻结当特征提取器，只在服务端用</td><td>半天</td></tr>
 <tr><td><b>MiniRocket 对照组</b></td><td><span class="state mid">待做</span></td><td>随机卷积核 + 线性分类，几乎不用调参，看我们的 CNN 有没有被便宜方法追上</td><td>小</td></tr>
@@ -41,6 +41,7 @@
 <tr><td><b>聚类用来查标注</b></td><td><span class="state mid">待做</span></td><td>标了抓挠却落在活动簇里的，多半标错；也能给主动学习挑数据</td><td>小</td></tr>
 <tr><td><b>甩头 / 抖身补数据</b></td><td><span class="state bad">缺数据</span></td><td>只有约 170 段，换什么模型都难；规则候选在攒</td><td>标注</td></tr>
 <tr><td><b>用画面找喝水</b></td><td><span class="state bad">暂停</span></td><td>SigLIP 画面向量先找候选，再回到 IMU 确认。先记着</td><td>半天</td></tr>
+<tr><td><b>FilterNet 逐点输出 / 大小窗口并行 / 16 s TCN</b></td><td><span class="state bad">试过，没赢</span></td><td>11-18 都跑了 5 折，没有一个赢过现在的 8 s CNN（见<a href="history.html">来时路</a>）。除非数据大变，不再排</td><td>—</td></tr>
 <tr><td><b>自监督预训练加大规模</b></td><td><span class="state bad">暂停</span></td><td>1500 → 6000 个文件抓挠都没涨，瓶颈不在数据量。除非换更大的编码器 + 蒸馏</td><td>GPU 几小时起</td></tr>
 <tr><td><b>量化感知训练（QAT）</b></td><td><span class="state bad">暂停</span></td><td>代码有了，默认关；量化损失只有 0.4–1.4 个点，压到更小模型时再开</td><td>小</td></tr>
 <tr><td><b>传感器内置决策树（ST MLC）</b></td><td><span class="state bad">暂停</span></td><td>动作门放进 IMU 里跑，主芯片可以睡；要换传感器</td><td>硬件</td></tr>

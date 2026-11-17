@@ -21,7 +21,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">第一步 · 行为识别 · 更新于 2026-11-17</div>
+  <div class="eyebrow">第一步 · 行为识别 · 更新于 2026-11-18</div>
   <h1>从项圈 IMU 里认出抓挠、舔、甩头、吃喝和休息</h1>
   <p class="lead">项圈里有一颗 6 轴 IMU（加速度 + 陀螺仪）。这一步的输出是一串<strong>行为事件</strong>（几点几分、抓了多久、多大把握），交给第二步皮肤评估去算“这只狗今天抓得正不正常”。核心是<strong>把抓挠找准，同时把误报压低</strong>：误报会直接把皮肤评分抬高。</p>
 </header>
@@ -70,19 +70,23 @@
   <div class="card">
     <h3>甩头 / 抖身<span class="state bad">偏弱</span></h3>
     <div class="big">0.16–0.24 <small>F1（端侧）</small></div>
-    <p>服务端 XGB 到 0.33。动作只有 1–2 秒，在 8 秒窗口里被稀释；下一步试短窗口 / FilterNet 式逐点输出。</p>
+    <p>服务端 XGB 到 0.33。动作只有 1–2 秒，在 8 秒窗口里被稀释。11-18 试了 FilterNet 逐点输出、大小窗口并行，都没变好；精准版把起止对齐率从 9.8% 提到 53.4%。真正缺的是数据（只有约 170 段）。</p>
   </div>
 
   <div class="card">
-    <h3>事件切分与平滑<span class="state ok">可用</span></h3>
-    <div class="big">≈0.8 s <small>事件起点误差</small></div>
-    <p>逐窗概率 → 动作门 → Viterbi（稳定版 v2），输出“几点几分抓了多久”。</p>
+    <h3>事件切分与起止<span class="state ok">可用</span></h3>
+    <div class="big">≈0.6 s <small>起止误差（精准版）</small></div>
+    <p>逐窗概率 → 动作门 → Viterbi（稳定版 v2）→ 精准版：平移掉 v2 起点偏早、终点偏晚的系统偏差，再按 3–9 Hz 抓挠节律能量对齐。</p>
+    <ul>
+      <li>抓挠终点误差 1.75 → 0.58 s，起止对齐 46.6% → 53.5%</li>
+      <li>甩头起止对齐 9.8% → 53.4%</li>
+    </ul>
   </div>
 
   <div class="card">
     <h3>端侧部署（int8）<span class="state mid">能跑，要再瘦身</span></h3>
     <div class="big">236 KB <small>Flash；RAM ≈24 KB</small></div>
-    <p>int8 与浮点结果 99% 一致（量化损失 0.4–1.4 个点）。GR5515 能放下；GR5513 给模型的预算只有 128 KB，还要再压一半。</p>
+    <p>int8 与浮点结果 99% 一致（量化损失 0.4–1.4 个点）。GR5515 能放下；GR5513 预算 128 KB：通道减半的小模型 6.4 万参数、抓挠命中 90.3%，正在导出上板。</p>
   </div>
 
   <div class="card">
@@ -102,8 +106,8 @@
 <h2 id="next">接下来</h2>
 <ol class="road">
   <li><b>用已确认的负例重训挖掘模型和主模型</b><br><span>目标：抓挠误报从 4–5 次/小时降到 2–3 次/小时，命中不掉。</span></li>
-  <li><b>甩头 / 抖身换短窗口或逐点输出</b><br><span>参考 Whistle 用的 FilterNet：每 0.3 秒左右出一个判断，专门对付 1–2 秒的短动作。</span></li>
-  <li><b>GR5513 小模型</b><br><span>深度可分离卷积 / 蒸馏，把 236 KB 压到 128 KB 以内。</span></li>
+  <li><b>GR5513 小模型上板</b><br><span>通道减半版（6.4 万参数、命中 90.3%）导出 int8，量真实体积。</span></li>
+  <li><b>精准版起止移植到板上</b><br><span>平台上已上线，板上 tm_post 还要加。</span></li>
   <li><b>用画面找喝水</b><br><span>视频向量先找出候选，再回到 IMU 上确认。</span></li>
 </ol>
 

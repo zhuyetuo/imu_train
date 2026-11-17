@@ -1,0 +1,13 @@
+# 编号|说明|参数（按优先级排；队列从上往下跑，一次一个）
+q01|基线：现在的 6 轴 8 s CNN（同脚本重跑，好对比）|--model cnn --epochs 30
+q02|FilterNet 逐点输出（多尺度 + 双向 LSTM）|--model filternet --epochs 30
+q03|双窗口 CNN：8 s + 中间 2 s 并行|--model dual --epochs 30
+q04|FilterNet + 负例拆成单独类别（进食/饮水/嗅闻/喘气/甩身体）|--model filternet --epochs 30 --fine 进食,饮水,嗅闻,喘气,甩身体
+q05|CNN + 负例拆成单独类别|--model cnn --epochs 30 --fine 进食,饮水,嗅闻,喘气,甩身体
+q06|双窗口 + 负例拆成单独类别|--model dual --epochs 30 --fine 进食,饮水,嗅闻,喘气,甩身体
+q07|16 s 窗口膨胀卷积（TCN，看更长上下文）|--model tcn --window 320 --epochs 30
+q08|GR5513 小模型：CNN 通道减半 [32,64,64]|--model small --epochs 30
+q09|FilterNet 训更久（60 轮）|--model filternet --epochs 60
+q10|3 轴 FilterNet（没有陀螺仪的型号）|--model filternet --epochs 30 --spec spec3.json
+q11|3 轴双窗口|--model dual --epochs 30 --spec spec3.json
+q12|3 轴基线 CNN（同脚本重跑）|--model cnn --epochs 30 --spec spec3.json

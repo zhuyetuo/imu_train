@@ -21,7 +21,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">项目效果总览 · 更新于 2026-11-17</div>
+  <div class="eyebrow">项目效果总览 · 更新于 2026-11-18</div>
   <h1>狗狗戴上项圈，就能知道它的皮肤和毛发怎么样</h1>
   <p class="lead">皮肤问题（过敏、皮炎、真菌感染等）最早的信号是<strong>抓挠变多</strong>。项目分两步：第一步从项圈 IMU 里认出抓挠、舔、啃、蹭等行为；第二步把每天的行为事件和主人填的问卷合起来，评估皮肤状态，给出“正常 / 留意 / 建议看兽医”三档。</p>
 </header>
@@ -58,8 +58,8 @@
 <tr><td class="y">①</td><td>静止 / 活动 / 未佩戴</td><td>动作门</td><td><span class="state ok">稳定</span> 未佩戴 F1 0.98</td></tr>
 <tr><td class="y">①</td><td>负例（吃喝嗅舔啃蹭）</td><td>规则候选 + 负例挖掘模型 + 人工确认</td><td><span class="state mid">补数据中</span> 候选确认率约 51%</td></tr>
 <tr><td class="y">①</td><td>甩头 / 抖身</td><td>同一个 CNN</td><td><span class="state bad">偏弱</span> F1 0.16–0.24</td></tr>
-<tr><td class="y">①</td><td>事件切分</td><td>动作门 + Viterbi</td><td><span class="state ok">可用</span> 起点误差约 0.8 s</td></tr>
-<tr><td class="y">①</td><td>端侧部署</td><td>int8 C 代码</td><td><span class="state mid">要瘦身</span> 236 KB，GR5513 预算 128 KB</td></tr>
+<tr><td class="y">①</td><td>事件切分与起止</td><td>动作门 + Viterbi + 精准版起止</td><td><span class="state ok">可用</span> 起止误差约 0.6 s</td></tr>
+<tr><td class="y">①</td><td>端侧部署</td><td>int8 C 代码</td><td><span class="state mid">要瘦身</span> 236 KB；小模型 6.4 万参数、命中 90.3%，能进 GR5513 的 128 KB</td></tr>
 <tr><td class="y">②</td><td>PM 规则：C 值 / S 总分</td><td>Scratch Burden（变化、聚集、持续、中断）+ 问卷加权</td><td><span class="state ok">已上线</span> 平台可整批算</td></tr>
 <tr><td class="y">②</td><td>个人基线</td><td>14 天中位数，满 21 天启用；之前用文献阈值兜底</td><td><span class="state mid">已实现，待真实数据验证</span></td></tr>
 <tr><td class="y">②</td><td>模型 A / 模型 B</td><td>梯度提升树：A 纯 IMU 44 特征预测 C 档；B 加问卷共 54 特征预测 S 档</td><td><span class="state mid">只在合成数据上训过</span> 等兽医照片评级</td></tr>
@@ -69,18 +69,17 @@
 
 <h2 id="recent">最近一次更新</h2>
 <div class="tiles">
-  <div class="tile"><div class="k">抓挠片段命中</div><div class="v"><s>87.3%</s><b>91.8%</b></div><div class="n">3 轴 → 6 轴 8 s 窗口 CNN，加公开数据</div></div>
-  <div class="tile"><div class="k">int8 与浮点一致</div><div class="v"><s>89%</s><b>99%</b></div><div class="n">原来的 89% 是评估算错，不是量化掉点</div></div>
-  <div class="tile"><div class="k">公开数据</div><div class="v"><s>0 h</s><b>22.8 h</b></div><div class="n">两套狗项圈公开数据加入训练</div></div>
-  <div class="tile"><div class="k">负例挖掘</div><div class="v"><b>#43 上线</b></div><div class="n">只补负例候选，不动已有的疑似抓挠</div></div>
+  <div class="tile"><div class="k">抓挠终点误差</div><div class="v"><s>1.75 s</s><b>0.58 s</b></div><div class="n">后处理「精准版 · 起止对齐」上线（11-18）</div></div>
+  <div class="tile"><div class="k">甩头起止对齐</div><div class="v"><s>9.8%</s><b>53.4%</b></div><div class="n">同一个模型，只换后处理</div></div>
+  <div class="tile"><div class="k">GR5513 小模型</div><div class="v"><s>24 万</s><b>6.4 万参数</b></div><div class="n">抓挠命中 90.3%，只低 1.5 个点</div></div>
+  <div class="tile"><div class="k">抓挠片段命中</div><div class="v"><s>87.3%</s><b>91.8%</b></div><div class="n">6 轴 8 s CNN；FilterNet、双窗口、16 s TCN 都没赢过它</div></div>
 </div>
 
 <h2 id="next">接下来</h2>
 <ol class="road">
   <li><b>压抓挠误报</b><br><span>用已确认的负例重训，目标 4–5 → 2–3 次/小时，命中不掉。</span></li>
   <li><b>攒兽医照片评级，重训模型 B</b><br><span>交叉验证比 PM 规则准才启用；没有真实标签前，模型 A/B 只作对照。</span></li>
-  <li><b>甩头 / 抖身换逐点输出</b><br><span>FilterNet 式多对多结构，对付 1–2 秒的短动作。</span></li>
-  <li><b>GR5513 小模型</b><br><span>236 KB 压到 128 KB 以内。</span></li>
+  <li><b>GR5513 小模型上板</b><br><span>6.4 万参数版导出 int8、量真实体积；精准版起止也移植到板上。</span></li>
 </ol>
 
 <section class="more">

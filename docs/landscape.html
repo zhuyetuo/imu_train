@@ -29,8 +29,9 @@
 <h2 id="answer">结论：按优先级该试什么</h2>
 <div class="scroll"><table>
 <tr><th>优先级</th><th>模型 / 方法</th><th>解决我们的什么问题</th><th>用在哪</th><th>成本</th></tr>
-<tr><td class="y">1</td><td><b>FilterNet 式逐点输出</b><br><span class="muted">Whistle（Mars Petcare）项圈用的结构：多尺度卷积 + 双向 LSTM，整段进、每 0.3 秒出一个判断；或 MS-TCN 一类逐帧切分</span></td><td>甩头、抖身这类 1–2 秒短动作被 8 秒窗口稀释；事件边界</td><td>先服务端，再看能不能缩到端侧</td><td>中</td></tr>
-<tr><td class="y">2</td><td><b>更长上下文 + 蒸馏</b><br><span class="muted">膨胀卷积 / TCN 看 8–16 秒；大模型当老师教小 CNN</span></td><td>区分持续抓挠和一下一下的舔啃；误报</td><td>端侧结构不变或略变</td><td>中</td></tr>
+<tr><td class="y">✗</td><td><b>FilterNet 式逐点输出</b>（11-18 试过，没赢）<br><span class="muted">Whistle（Mars Petcare）项圈用的结构：多尺度卷积 + 双向 LSTM。我们 5 折：抓挠命中 81.8%（基线 91.8%），甩头更差</span></td><td>甩头、抖身这类短动作；事件边界</td><td>—</td><td>—</td></tr>
+<tr><td class="y">✗</td><td><b>大小窗口并行 / 16 s TCN</b>（11-18 试过，没赢）<br><span class="muted">双窗口跟基线打平；16 s TCN 命中高但误报多、起止不准</span></td><td>区分持续抓挠和一下一下的舔啃</td><td>—</td><td>—</td></tr>
+<tr><td class="y">✓</td><td><b>先量偏差、再按节律频段对齐起止</b>（11-18 上线）<br><span class="muted">不是新模型，是后处理：抓挠起止误差 0.98 / 1.75 s → 0.60 / 0.58 s</span></td><td>片段起止拖长</td><td>平台已上线，板上待移植</td><td>低</td></tr>
 <tr><td class="y">3</td><td><b>MiniRocket / InceptionTime</b></td><td>服务端复核的强基线，几乎不用调参</td><td>服务端，替换或补充 XGB</td><td>低</td></tr>
 <tr><td class="y">4</td><td><b>时间序列基础模型当特征提取器</b><br><span class="muted">Mantis（约 8M 参数，专做分类）、MOMENT</span></td><td>负例挖掘、相似片段检索（现在 IMU 相似度只有 17%）</td><td>只在服务端 / 平台用</td><td>低：冻结编码器 + 简单分类器</td></tr>
 <tr><td class="y">5</td><td><b>深度可分离卷积 + 剪枝</b><br><span class="muted">更窄的 int8 CNN</span></td><td>GR5513 只有 128 KB 预算</td><td>端侧</td><td>中</td></tr>
