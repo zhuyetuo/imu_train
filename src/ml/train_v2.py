@@ -527,7 +527,7 @@ def _qat_finetune(net, Xt, yt, lossf, dev, epochs: int, rng, shift: int):
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, max(1, epochs * nb))
     for _ in range(epochs):
         net.train()
-        perm = torch.randperm(len(yt))
+        perm = torch.randperm(len(yt), device=Xt.device)
         for b in range(nb):
             ix = perm[b * bs:(b + 1) * bs]
             xb = Xt[ix].to(dev)
@@ -541,8 +541,44 @@ def _qat_finetune(net, Xt, yt, lossf, dev, epochs: int, rng, shift: int):
     return ranges
 
 
-def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int, seed: int = 0):
-    """X: [N, T, C] 原始窗口（inv 通道），y: 归并后的类别。返回 (网络（cpu、eval）, ch_mean, ch_std)"""
+def _channel_stats(X: np.ndarray, idx: np.ndarray, chunk: int = 50000):
+    """按块算每个通道的均值 / 标准差（float64 累加），不复制整个 X"""
+    C = X.shape[2]
+    s1, s2, n = np.zeros(C), np.zeros(C), 0
+    for i in range(0, len(idx), chunk):
+        b = X[idx[i:i + chunk]].reshape(-1, C).astype(np.float64)
+        s1 += b.sum(0)
+        s2 += (b * b).sum(0)
+        n += len(b)
+    mu = s1 / max(n, 1)
+    sd = np.sqrt(np.maximum(s2 / max(n, 1) - mu * mu, 0))
+    sd[sd < 1e-6] = 1.0
+    return mu, sd
+
+
+def _to_device_normalized(X: np.ndarray, idx: np.ndarray, mu, sd, dev, chunk: int = 50000):
+    """标准化 + 转成 [N, C, T]，分块直接写进显存。显存放不下（留 4 GB 余量）就放内存"""
+    import torch
+
+    N, T, C = len(idx), X.shape[1], X.shape[2]
+    need = N * T * C * 4
+    where = dev
+    if dev == "cuda":
+        free, _total = torch.cuda.mem_get_info()
+        if need > free - 4 * 1024 ** 3:
+            where = "cpu"
+            print(f"  ⚠ 显存不够放训练数据（要 {need / 1024 ** 3:.1f} GB，空 {free / 1024 ** 3:.1f} GB），放内存", flush=True)
+    Xt = torch.empty((N, C, T), dtype=torch.float32, device=where)
+    mu32, sd32 = mu.astype(np.float32), sd.astype(np.float32)
+    for i in range(0, N, chunk):
+        b = (X[idx[i:i + chunk]] - mu32) / sd32
+        Xt[i:i + len(b)] = torch.from_numpy(np.ascontiguousarray(b.transpose(0, 2, 1))).to(where)
+    return Xt
+
+
+def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int, seed: int = 0, idx=None):
+    """X: [N, T, C] 原始窗口（inv 通道），y: 归并后的类别（对应 X[idx]）。idx 是训练用的那部分窗口（交叉验证的训练折），
+    省掉先切一份副本。训练数据整份放显存（放不下才放内存）。返回 (网络（cpu、eval）, ch_mean, ch_std)"""
     import torch
     import torch.nn as nn
 
@@ -552,13 +588,12 @@ def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    idx = np.arange(len(X)) if idx is None else np.asarray(idx)
     C = X.shape[2]
-    mu = X.reshape(-1, C).mean(0)
-    sd = X.reshape(-1, C).std(0)
-    sd[sd < 1e-6] = 1.0
+    mu, sd = _channel_stats(X, idx)
     net = CNN(C, X.shape[1], n_classes, cfg).to(dev)
-    Xt = torch.tensor((X - mu) / sd, dtype=torch.float32).permute(0, 2, 1).contiguous()
-    yt = torch.tensor(y, dtype=torch.long)
+    Xt = _to_device_normalized(X, idx, mu, sd, dev)
+    yt = torch.tensor(y, dtype=torch.long, device=Xt.device)
     cnt = np.bincount(y, minlength=n_classes).astype(float)
     w = np.sqrt(len(y) / (n_classes * np.maximum(cnt, 1)))
     lossf = nn.CrossEntropyLoss(weight=torch.tensor(w, dtype=torch.float32, device=dev), label_smoothing=0.05)
@@ -569,7 +604,7 @@ def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int
     shift = max(1, X.shape[1] // 10)
     for _ in range(epochs):
         net.train()
-        perm = torch.randperm(len(y))
+        perm = torch.randperm(len(y), device=Xt.device)
         for b in range(nb):
             ix = perm[b * bs:(b + 1) * bs]
             xb = Xt[ix].to(dev)
@@ -583,6 +618,9 @@ def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int
             sch.step()
     if int(cfg.get("qat_epochs") or 0) > 0:
         _qat_finetune(net, Xt, yt, lossf, dev, int(cfg["qat_epochs"]), rng, shift)
+    del Xt, yt
+    if dev == "cuda":
+        torch.cuda.empty_cache()
     return net.cpu().eval(), mu.astype(np.float64), sd.astype(np.float64)
 
 
@@ -590,10 +628,15 @@ def cnn_proba(net, mu, sd, X: np.ndarray) -> np.ndarray:
     import torch
 
     out = []
-    with torch.no_grad():
-        for i in range(0, len(X), 4096):
-            xb = torch.tensor((X[i:i + 4096] - mu) / sd, dtype=torch.float32).permute(0, 2, 1)
-            out.append(torch.softmax(net(xb), 1).numpy())
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    net.to(dev)
+    try:
+        with torch.no_grad():
+            for i in range(0, len(X), 8192):
+                xb = torch.tensor((X[i:i + 8192] - mu) / sd, dtype=torch.float32).permute(0, 2, 1).to(dev)
+                out.append(torch.softmax(net(xb), 1).cpu().numpy())
+    finally:
+        net.cpu()
     return np.concatenate(out) if out else np.zeros((0, net.fc.out_features))
 
 
@@ -866,7 +909,9 @@ def main(a):
     if kind == "cnn":
         # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟
         Xtr_m, F_tr = _map_inv_chunked(Xtr_raw), None
+        del Xtr_raw
         Xev_m, F_ev = _map_inv_chunked(Xev_raw), None
+        del Xev_raw
     else:
         Xtr_m, F_tr = featurize(Xtr_raw, hz)
         Xev_m, F_ev = featurize(Xev_raw, hz)
@@ -924,7 +969,8 @@ def main(a):
                     p_ = xgb_proba(m, mc, F_, len(classes)) * scale[None, :]
                     return p_ / p_.sum(1, keepdims=True)
             elif kind == "cnn":
-                net, mu, sd = fit_cnn(Xtr_m[tr], back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k)
+                net, mu, sd = fit_cnn(Xtr_m, back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k,
+                                      idx=np.flatnonzero(tr))
                 def _pred(Xm_, F_, net=net, mu=mu, sd=sd):
                     p_ = cnn_proba(net, mu, sd, Xm_) * scale[None, :]
                     return apply_motion_gate(p_ / p_.sum(1, keepdims=True), motion_of(Xm_), gate)
