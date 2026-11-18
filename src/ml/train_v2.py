@@ -165,11 +165,52 @@ def _parse_dt(s):
     return None
 
 
+TL_CACHE_VER = "v2-zero1"   # load_timeline 改了（比如全 0 行当缺失）就换，旧缓存自动作废
+
+
+def _timeline_cached(csv_path, hz, declared, axes, upsample):
+    """TRAIN_V2_TL_CACHE=<目录> 时：每个 CSV 读一次、重采样一次存成 .npz（键 = 路径 + 修改时间 + 大小 + 参数 + 版本），
+    以后几秒载入。同一批数据反复训（对比实验、正式训练）时省掉每次几分钟的读文件。没设就跟原来一样现读"""
+    cache = os.environ.get("TRAIN_V2_TL_CACHE")
+    if not cache:
+        return load_timeline(csv_path, hz, declared, axes, upsample)
+    import hashlib
+    from datetime import datetime as _dt
+    st = os.stat(csv_path)
+    key = hashlib.md5(f"{csv_path}|{st.st_mtime_ns}|{st.st_size}|{hz}|{declared}|{axes}|{upsample}|{TL_CACHE_VER}".encode()).hexdigest()
+    path = os.path.join(cache, key[:2], key + ".npz")
+    if os.path.exists(path):
+        try:
+            z = np.load(path, allow_pickle=False)
+            if int(z["none"]):
+                return None
+            return {"x": z["x"], "bad": z["bad"], "t0": _dt.fromisoformat(str(z["t0"])), "src": float(z["src"])}
+        except Exception:  # noqa: BLE001 坏了就重读
+            pass
+    tl = load_timeline(csv_path, hz, declared, axes, upsample)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + f".{os.getpid()}.tmp.npz"
+    if tl is None:
+        np.savez(tmp, none=1)
+    else:
+        np.savez(tmp, none=0, x=tl["x"], bad=tl["bad"], t0=tl["t0"].isoformat(), src=tl["src"])
+    os.replace(tmp, path)
+    return tl
+
+
 def _build_one(args):
+    """读不了的（格式不对，比如采集程序版本不同、没有 timestamp 列）跳过并记原因：一个文件出错不该拖垮整批"""
+    try:
+        return _build_one_inner(args)
+    except Exception as e:  # noqa: BLE001
+        return args[0], None, f"读不了 {os.path.basename(args[0])}：{type(e).__name__}: {str(e)[:120]}"
+
+
+def _build_one_inner(args):
     csv_path, segs, hz, axes, upsample = args
     if not os.path.isfile(csv_path):
         return csv_path, None, f"CSV 不存在：{csv_path}"
-    tl = load_timeline(csv_path, hz, segs[0].get("source_hz"), axes, upsample)
+    tl = _timeline_cached(csv_path, hz, segs[0].get("source_hz"), axes, upsample)
     if tl is None:
         return csv_path, None, None
     n = len(tl["x"])
@@ -609,6 +650,7 @@ def labeled_span_windows(tl: dict, segs_of_file: list[dict], W: int, S: int, hz:
     if len(x) < W:
         return None  # 整个文件比一个窗口还短（公开数据集里有几秒长的录制）：切不出完整窗口
     a0, a1 = max(0, int(lo * hz) - W // 2), min(len(x) - W, int(hi * hz))
+    a0 = min(a0, len(x) - W)        # 标注起点贴着文件尾：别切出不够一个窗口的半截
     st = [s for s in range(a0, max(a0, a1) + 1, S) if not bad[s:s + W].any()]
     if not st:
         return None
@@ -808,12 +850,19 @@ def main(a):
     # 3. 窗口 + 特征：训练用的（短片段左右挪）和算指标用的（不挪）
     Xtr_raw, seg_tr = make_windows(tls, segs, W, S, short_shifts=2)
     Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
-    Xtr_m, F_tr = featurize(Xtr_raw, hz)
-    Xev_m, F_ev = featurize(Xev_raw, hz)
+    if kind == "cnn":
+        # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟
+        from gravity_align import map_channels
+        Xtr_m, F_tr = map_channels(Xtr_raw, "inv", True), None
+        Xev_m, F_ev = map_channels(Xev_raw, "inv", True), None
+    else:
+        Xtr_m, F_tr = featurize(Xtr_raw, hz)
+        Xev_m, F_ev = featurize(Xev_raw, hz)
     masked = []
     if drop_level:
         fmask, masked = gravity_level_mask(Xev_m.shape[2])
-        F_tr, F_ev = blank_features(F_tr, fmask), blank_features(F_ev, fmask)
+        if F_tr is not None:
+            F_tr, F_ev = blank_features(F_tr, fmask), blank_features(F_ev, fmask)
         print(f"▶ 不用重力绝对大小（跟项圈校准有关）：屏蔽 {len(masked)} 维 {masked}", flush=True)
     name_idx = {n: i for i, n in enumerate(names)}
     back_arr = np.asarray(back)
@@ -848,10 +897,14 @@ def main(a):
     holdout = None
     if folds >= 2:
         cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=0)
-        for k, (_, te) in enumerate(cv.split(F_ev, y_ev, g_ev)):
+        # CNN 不算手工特征（F_ev 是 None）：分折只看标签和分组，X 用个占位
+        for k, (_, te) in enumerate(cv.split(F_ev if F_ev is not None else np.zeros((len(y_ev), 1)), y_ev, g_ev)):
             test_g = set(g_ev[te])
             tr = ~np.isin(g_tr, list(test_g))
             def _feats(Xraw):
+                if kind == "cnn":
+                    from gravity_align import map_channels
+                    return map_channels(Xraw, "inv", True), None
                 Xm_, F_ = featurize(Xraw, hz)
                 return Xm_, (blank_features(F_, fmask) if drop_level else F_)
             if kind == "xgb":
@@ -868,7 +921,7 @@ def main(a):
                 m = merge_forest(RandomForestClassifier(**rf_kw).fit(F_tr[tr], yf_tr[tr]), names, classes, back, scale)
                 def _pred(Xm_, F_, m=m):
                     return m.predict_proba(F_)
-            proba[te] = _pred(Xev_m[te], F_ev[te])
+            proba[te] = _pred(Xev_m[te], F_ev[te] if F_ev is not None else None)
             # 片段级（后处理之后）：这一折留出的文件，在标注范围内连续推理
             for p_csv, tl in tls.items():
                 ss = by_csv.get(p_csv) or []
