@@ -165,6 +165,7 @@ def _parse_dt(s):
     return None
 
 
+TL_MARGIN_S = 60.0          # 时间线只留标注范围前后这么多秒（要比任何窗口都长）
 TL_CACHE_VER = "v2-zero1"   # load_timeline 改了（比如全 0 行当缺失）就换，旧缓存自动作废
 
 
@@ -227,7 +228,21 @@ def _build_one_inner(args):
         a, b = max(int(np.ceil(a_ms / 1000 * hz)), 0), min(int(np.floor(b_ms / 1000 * hz)), n)
         if b > a:
             lab[a:b] = s["idx"]
+    # 只留标注范围（前后各留 TL_MARGIN_S 秒）：整天的录制只标了一部分时，省大量内存。原始下标 = 裁后下标 + off
+    nz = np.flatnonzero(lab >= 0)
+    off = 0
+    if len(nz):
+        lo_i, hi_i = int(nz[0]), int(nz[-1]) + 1
+        ms = [(s["start_ms"], s["end_ms"]) for s in segs if s.get("start_ms") is not None and s.get("end_ms") is not None]
+        if ms:
+            lo_i = min(lo_i, int(min(a for a, _ in ms) / 1000 * hz))
+            hi_i = max(hi_i, int(np.ceil(max(b for _, b in ms) / 1000 * hz)))
+        m = int(TL_MARGIN_S * hz)
+        off, end = max(0, lo_i - m), min(n, hi_i + m)
+        if off > 0 or end < n:
+            tl["x"], tl["bad"], lab = tl["x"][off:end].copy(), tl["bad"][off:end].copy(), lab[off:end].copy()
     tl["seg"] = lab
+    tl["off"] = off
     return csv_path, tl, None
 
 
@@ -244,6 +259,50 @@ def _map_inv_chunked(X, chunk: int = 20000):
     for i in range(chunk, len(X), chunk):
         out[i:i + chunk] = map_channels(X[i:i + chunk], "inv", True)
     return out
+
+
+def make_windows_cnn(tls: dict, W: int, S: int, short_shifts: int, chunk: int = 20000):
+    """CNN 用：切窗口的同时做 inv 通道变换，写进一个预先分配的 float32 数组。
+    前 n_ev 个 = make_windows(short_shifts=0) 的窗口（同样顺序，当验证用，直接切片不复制），
+    后面是短片段左右挪出来的增强窗口。返回 (Xm, seg_of, n_ev)"""
+    from gravity_align import map_channels
+    keys = list(tls)
+    ev, ex = [], []
+    for ki, csv_path in enumerate(keys):
+        tl = tls[csv_path]
+        x, sid, bad = tl["x"], tl["seg"], tl["bad"]
+        n = len(x)
+        for s in np.unique(sid[sid >= 0]):
+            idx = np.flatnonzero(sid == s)
+            a, b = idx[0], idx[-1] + 1
+            L = b - a
+            extra = []
+            if L >= W:
+                base = list(range(a, b - W + 1, S))
+            else:
+                mid = (a + b) // 2 - W // 2
+                base = [mid]
+                room = (W - L) // 2
+                for k in range(1, short_shifts + 1):
+                    off = int(round(room * k / (short_shifts + 1)))
+                    extra += [mid - off, mid + off]
+            for dst, starts in ((ev, base), (ex, extra)):
+                for st in starts:
+                    if st < 0 or st + W > n or bad[st:st + W].any():
+                        continue
+                    dst.append((ki, st, int(s)))
+    allw = ev + ex
+    seg_of = np.asarray([w[2] for w in allw])
+    if not allw:
+        return np.zeros((0, W, 0), np.float32), seg_of, 0
+    out = None
+    for i in range(0, len(allw), chunk):
+        blk = np.stack([tls[keys[k]]["x"][st:st + W] for k, st, _ in allw[i:i + chunk]]).astype(np.float32)
+        m = map_channels(blk, "inv", True)
+        if out is None:
+            out = np.empty((len(allw),) + m.shape[1:], np.float32)
+        out[i:i + len(m)] = m
+    return out, seg_of, len(ev)
 
 
 def make_windows(tls: dict, segs: list[dict], W: int, S: int, short_shifts: int):
@@ -703,14 +762,16 @@ def labeled_span_windows(tl: dict, segs_of_file: list[dict], W: int, S: int, hz:
         return None
     lo, hi = min(s["start_ms"] for s in ss) / 1000, max(s["end_ms"] for s in ss) / 1000
     x, bad = tl["x"], tl["bad"]
+    off = int(tl.get("off", 0))     # 时间线裁过：下标都按原始文件算，取数时减 off
+    N = off + len(x)
     if len(x) < W:
         return None  # 整个文件比一个窗口还短（公开数据集里有几秒长的录制）：切不出完整窗口
-    a0, a1 = max(0, int(lo * hz) - W // 2), min(len(x) - W, int(hi * hz))
-    a0 = min(a0, len(x) - W)        # 标注起点贴着文件尾：别切出不够一个窗口的半截
-    st = [s for s in range(a0, max(a0, a1) + 1, S) if not bad[s:s + W].any()]
+    a0, a1 = max(off, int(lo * hz) - W // 2), min(N - W, int(hi * hz))
+    a0 = min(a0, N - W)        # 标注起点贴着文件尾：别切出不够一个窗口的半截
+    st = [s for s in range(a0, max(a0, a1) + 1, S) if not bad[s - off:s - off + W].any()]
     if not st:
         return None
-    return np.stack([x[s:s + W] for s in st]).astype(np.float32), np.asarray(st), (lo, hi)
+    return np.stack([x[s - off:s - off + W] for s in st]).astype(np.float32), np.asarray(st), (lo, hi)
 
 
 def _iou(a, b):
@@ -904,15 +965,16 @@ def main(a):
         print(f"  ⚠ {m}")
 
     # 3. 窗口 + 特征：训练用的（短片段左右挪）和算指标用的（不挪）
-    Xtr_raw, seg_tr = make_windows(tls, segs, W, S, short_shifts=2)
-    Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
     if kind == "cnn":
-        # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟
-        Xtr_m, F_tr = _map_inv_chunked(Xtr_raw), None
-        del Xtr_raw
-        Xev_m, F_ev = _map_inv_chunked(Xev_raw), None
-        del Xev_raw
+        # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟。
+        # 边切边变换，验证窗口 = 训练数组前 n_ev 个（切片，不复制）：几百万窗口时省一半以上内存
+        Xtr_m, seg_tr, n_ev = make_windows_cnn(tls, W, S, short_shifts=2)
+        Xev_m, seg_ev = Xtr_m[:n_ev], seg_tr[:n_ev]
+        F_tr = F_ev = None
+        print(f"▶ 窗口数组 {Xtr_m.nbytes / 1024 ** 3:.1f} GB（验证窗口共用前 {n_ev} 个）", flush=True)
     else:
+        Xtr_raw, seg_tr = make_windows(tls, segs, W, S, short_shifts=2)
+        Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
         Xtr_m, F_tr = featurize(Xtr_raw, hz)
         Xev_m, F_ev = featurize(Xev_raw, hz)
     masked = []
