@@ -70,6 +70,14 @@ def load_timeline(csv_path: str, hz: float, declared: float | None = None, axes:
         cols += list(g)
     d = pd.read_csv(csv_path, usecols=["timestamp", *cols], encoding="utf-8-sig")
     d = d.dropna()
+    # 采集阶段蓝牙不稳：断了的那几帧采集端写「六轴全 0」占位（录制不中断、还能重连）。真实佩戴时重力总落在
+    # 某个轴上，加速度三轴不可能同时精确为 0——这些行就是没有数据。以前当真信号插进窗口，带着一串 0 的窗口
+    # 被标成那段时间人标的类别（活动 / 抓挠……），等于掺噪声（2026-11-18 抽 60 个训练文件：1.5% 的行是全 0，
+    # 连续段中位 0.6 s、最长 11 分钟）。去掉之后跟 dropna 一样：留下的时间缺口 > 0.3 s 的被下面标成掉包，窗口不用。
+    # 产品是板上实时跑的，不存在这种占位，训练里也不该有
+    zero = (d[["acc_x", "acc_y", "acc_z"]] == 0).all(axis=1)
+    if zero.any():
+        d = d[~zero]
     if len(d) < 10:
         return None
     dt = pd.to_datetime(d.timestamp)
