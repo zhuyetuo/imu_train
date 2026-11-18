@@ -1,0 +1,38 @@
+{
+ "model": "cnn",
+ "epochs": 30,
+ "folds_run": 0,
+ "n_params": 239557,
+ "heldout": {
+  "files": 745,
+  "metrics": {
+   "抓挠": {
+    "n_gt": 329,
+    "recall_hit": 0.69,
+    "recall_iou50": 0.2401,
+    "precision": 0.5933,
+    "fp_per_h_other": 0.25,
+    "other_hours": 342.8,
+    "onset_abs_err_s": 1.4,
+    "offset_abs_err_s": 1.46,
+    "count_diff_mean_abs": 2.76
+   },
+   "甩头/抖身": {
+    "n_gt": 86,
+    "recall_hit": 0.5233,
+    "recall_iou50": 0.1628,
+    "precision": 0.0136,
+    "fp_per_h_other": 9.06,
+    "other_hours": 343.1,
+    "onset_abs_err_s": 1.27,
+    "offset_abs_err_s": 1.4,
+    "count_diff_mean_abs": 8.06
+   }
+  }
+ },
+ "window": 160,
+ "fine": [],
+ "all": null,
+ "own": null,
+ "seconds": 1221
+}
