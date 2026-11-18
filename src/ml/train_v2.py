@@ -233,6 +233,19 @@ def _build_one_inner(args):
 
 # ── 窗口 / 特征 ─────────────────────────────────────────────────────────────
 
+def _map_inv_chunked(X, chunk: int = 20000):
+    """map_channels(X, "inv") 的省内存版：结果一样，分块写进预先分配的 float32 数组，峰值不再是结果的 3 倍"""
+    from gravity_align import map_channels
+    if X.ndim != 3 or len(X) <= chunk:
+        return map_channels(X, "inv", True)
+    first = map_channels(X[:chunk], "inv", True)
+    out = np.empty((len(X),) + first.shape[1:], np.float32)
+    out[:chunk] = first
+    for i in range(chunk, len(X), chunk):
+        out[i:i + chunk] = map_channels(X[i:i + chunk], "inv", True)
+    return out
+
+
 def make_windows(tls: dict, segs: list[dict], W: int, S: int, short_shifts: int):
     X, seg_of = [], []
     for csv_path, tl in tls.items():
@@ -852,9 +865,8 @@ def main(a):
     Xev_raw, seg_ev = make_windows(tls, segs, W, S, short_shifts=0)
     if kind == "cnn":
         # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟
-        from gravity_align import map_channels
-        Xtr_m, F_tr = map_channels(Xtr_raw, "inv", True), None
-        Xev_m, F_ev = map_channels(Xev_raw, "inv", True), None
+        Xtr_m, F_tr = _map_inv_chunked(Xtr_raw), None
+        Xev_m, F_ev = _map_inv_chunked(Xev_raw), None
     else:
         Xtr_m, F_tr = featurize(Xtr_raw, hz)
         Xev_m, F_ev = featurize(Xev_raw, hz)
@@ -903,8 +915,7 @@ def main(a):
             tr = ~np.isin(g_tr, list(test_g))
             def _feats(Xraw):
                 if kind == "cnn":
-                    from gravity_align import map_channels
-                    return map_channels(Xraw, "inv", True), None
+                    return _map_inv_chunked(Xraw), None
                 Xm_, F_ = featurize(Xraw, hz)
                 return Xm_, (blank_features(F_, fmask) if drop_level else F_)
             if kind == "xgb":
