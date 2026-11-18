@@ -305,6 +305,38 @@ def make_windows_cnn(tls: dict, W: int, S: int, short_shifts: int, chunk: int = 
     return out, seg_of, len(ev)
 
 
+WIN_CACHE_VER = "w1"   # make_windows_cnn / map_channels 改了就换
+
+
+def make_windows_cnn_cached(tls: dict, W: int, S: int, short_shifts: int, hz: float, axes: int):
+    """make_windows_cnn 加硬盘缓存（TRAIN_V2_WIN_CACHE=<目录> 才开）。返回的数组是只读内存映射"""
+    cache = os.environ.get("TRAIN_V2_WIN_CACHE")
+    if not cache:
+        return make_windows_cnn(tls, W, S, short_shifts)
+    import hashlib
+    h = hashlib.md5(f"{WIN_CACHE_VER}|{TL_CACHE_VER}|{TL_MARGIN_S}|{W}|{S}|{short_shifts}|{hz}|{axes}".encode())
+    for pth, tl in tls.items():
+        st = os.stat(pth)
+        h.update(f"{pth}|{st.st_mtime_ns}|{st.st_size}|{tl.get('off', 0)}|{len(tl['x'])}".encode())
+        h.update(np.ascontiguousarray(tl["seg"]).tobytes())
+    d = os.path.join(cache, h.hexdigest())
+    fx, fs, fn = (os.path.join(d, n) for n in ("X.npy", "seg.npy", "n_ev.txt"))
+    if not os.path.exists(fn):
+        Xm, seg_of, n_ev = make_windows_cnn(tls, W, S, short_shifts)
+        os.makedirs(d, exist_ok=True)
+        np.save(fx + ".tmp.npy", Xm)
+        np.save(fs + ".tmp.npy", seg_of)
+        del Xm
+        os.replace(fx + ".tmp.npy", fx)
+        os.replace(fs + ".tmp.npy", fs)
+        with open(fn, "w") as f:
+            f.write(str(n_ev))
+        print(f"▶ 窗口存进硬盘缓存 {d}", flush=True)
+    else:
+        print(f"▶ 窗口从硬盘缓存载入（内存映射）{d}", flush=True)
+    return np.load(fx, mmap_mode="r"), np.load(fs), int(open(fn).read())
+
+
 def make_windows(tls: dict, segs: list[dict], W: int, S: int, short_shifts: int):
     X, seg_of = [], []
     for csv_path, tl in tls.items():
@@ -968,7 +1000,7 @@ def main(a):
     if kind == "cnn":
         # CNN 直接吃方向无关变换后的原始窗口，193 维手工特征（给 XGB / RF 的）用不上——百万级窗口时这一步要好几分钟。
         # 边切边变换，验证窗口 = 训练数组前 n_ev 个（切片，不复制）：几百万窗口时省一半以上内存
-        Xtr_m, seg_tr, n_ev = make_windows_cnn(tls, W, S, short_shifts=2)
+        Xtr_m, seg_tr, n_ev = make_windows_cnn_cached(tls, W, S, 2, hz, axes)
         Xev_m, seg_ev = Xtr_m[:n_ev], seg_tr[:n_ev]
         F_tr = F_ev = None
         print(f"▶ 窗口数组 {Xtr_m.nbytes / 1024 ** 3:.1f} GB（验证窗口共用前 {n_ev} 个）", flush=True)
