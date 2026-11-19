@@ -58,9 +58,38 @@
 
 <h2 id="scene">用在哪</h2>
 <div class="scene">
-  <div class="card dim"><div class="ico">🏠</div><h3>在家</h3><p>用网关定位</p></div>
-  <div class="card dim"><div class="ico">📱</div><h3>主人在旁边</h3><p>用手机定位</p></div>
-  <div class="card me"><div class="ico">🐕</div><h3>独自外出</h3><p>只能靠卫星 → <b>这一页</b></p></div>
+  <div class="card dim"><div class="ico">🏠</div><h3>在家</h3><p>蓝牙连着网关 → 用网关定位</p></div>
+  <div class="card dim"><div class="ico">📱</div><h3>主人在旁边</h3><p>蓝牙连着手机 → 用手机定位</p></div>
+  <div class="card me"><div class="ico">🐕</div><h3>独自外出</h3><p>蓝牙断了 → 靠卫星，<b>这一页</b></p></div>
+</div>
+
+<h2 id="ble">什么时候启动：看蓝牙</h2>
+<div class="fig">
+<svg viewBox="0 0 1000 170" role="img" aria-label="蓝牙状态决定智能打点的启停">
+  <g font-size="14">
+    <rect x="20" y="40" width="300" height="46" rx="8" fill="var(--panel2)" stroke="var(--line)"/>
+    <text x="170" y="69" text-anchor="middle" fill="var(--muted)">蓝牙连着 · 卫星关</text>
+    <rect x="320" y="40" width="90" height="46" fill="rgba(242,184,75,.15)" stroke="var(--mid)" stroke-dasharray="4 3"/>
+    <text x="365" y="69" text-anchor="middle" fill="var(--mid)">等 30 秒</text>
+    <rect x="410" y="40" width="420" height="46" fill="rgba(34,199,214,.12)" stroke="var(--accent)"/>
+    <text x="620" y="69" text-anchor="middle" fill="var(--accent)" font-weight="700">智能打点工作中</text>
+    <rect x="830" y="40" width="150" height="46" rx="8" fill="var(--panel2)" stroke="var(--line)"/>
+    <text x="905" y="69" text-anchor="middle" fill="var(--muted)">蓝牙连着 · 卫星关</text>
+  </g>
+  <g font-size="13" text-anchor="middle">
+    <line x1="320" x2="320" y1="30" y2="100" stroke="var(--bad)" stroke-width="2"/>
+    <text x="320" y="20" fill="var(--bad)" font-weight="700">蓝牙断开</text>
+    <circle cx="410" cy="63" r="7" fill="#e879f9"/>
+    <text x="410" y="118" fill="#e879f9" font-weight="700">● 离开点</text>
+    <text x="410" y="136" fill="var(--muted)" font-size="12">确认真断了，先打一个</text>
+    <line x1="830" x2="830" y1="30" y2="100" stroke="var(--ok)" stroke-width="2"/>
+    <text x="830" y="20" fill="var(--ok)" font-weight="700">重新连上 → 立刻停</text>
+    <text x="365" y="118" fill="var(--muted)" font-size="12" text-anchor="end" dx="-30">门口信号时有时无</text>
+    <text x="365" y="136" fill="var(--muted)" font-size="12" text-anchor="end" dx="-30">不会来回开关</text>
+    <text x="620" y="118" fill="var(--muted)" font-size="12">出发 · 移动中 · 到达 · 保底</text>
+  </g>
+</svg>
+<p class="cap">网关、手机都是蓝牙。项圈收到「蓝牙断开」通知后等 30 秒防抖，再开始；收到「连上」通知立刻停，位置交给网关 / 手机。</p>
 </div>
 
 <h2 id="why">定时打点有多浪费</h2>
@@ -106,6 +135,23 @@
 <p class="cap">图上是省电档的数。打完点回传实际挪了多远，一直在原地转就自动把间隔放大（最多 4 倍）。</p>
 </div>
 
+<h2 id="track">轨迹长什么样（示意）</h2>
+<div class="fig">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+    <span class="muted" style="font-size:13px">档位：</span>
+    <span id="tkBtns" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+    <span id="tkInfo" class="muted" style="font-size:13px;margin-left:auto"></span>
+  </div>
+  <svg id="tkMap" viewBox="0 0 1000 440" role="img" aria-label="狗出门去公园再回家的轨迹，以及各档打的点"></svg>
+  <div class="legend">
+    <span class="bar" style="--c:rgba(143,160,189,.5)">狗实际走的路</span>
+    <span class="bar" style="--c:var(--accent)">App 上看到的轨迹（把点连起来）</span>
+    <span style="--c:#e879f9">离开</span><span style="--c:var(--f-dep)">出发</span><span style="--c:var(--f-mov)">移动中</span>
+    <span style="--c:var(--f-arr)">到达</span><span style="--c:var(--f-hb)">保底</span>
+  </div>
+  <p class="cap">切到「每 5 分钟」看看：点数可能差不多，但一大半堆在树下睡觉的地方，路上反而稀。示意场景：在家待着 → 自己出门（出门 20 多米蓝牙断开）→ 走 500 米到小公园 → 撒欢跑 15 分钟 → 树下睡 40 分钟 → 走回家（到门口蓝牙连上）。点用的是同一套规则算出来的；路线是画的，不是真实 GPS。</p>
+</div>
+
 <h2 id="day">真实的一天</h2>
 <div class="fig"><svg id="dayfig" viewBox="0 0 1000 330" role="img" aria-label="一只狗一天的走动和打点时刻"></svg>
   <div class="legend">
@@ -127,11 +173,12 @@
 <div class="fig"><svg id="barAcc" viewBox="0 0 1000 300" role="img" aria-label="各种行为被判成在走的比例"></svg>
 <p class="cap">公开数据集（颈部项圈）逐秒验证。喝水、抖身偏高，但都很短，「走出 20 m 才打」能挡掉。板上 C 版跟 Python 版逐秒一致 98.9%。</p></div>
 
-<h2 id="board">板上三行接入</h2>
+<h2 id="board">板上几行接入</h2>
 <pre><code>gt_init(&amp;st, GT_PRESET_SAVE);        // 默认省电，App 切档调 gt_set_preset
+gt_set_link(&amp;st, ble_connected());   // 蓝牙连上 / 断开的通知里调
 gt_feed(&amp;st, ax, ay, az);            // 每个加速度样本（20 Hz，mg）
 if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
-    gnss_fix_once();                 // （网关、手机都连不上时）</code></pre>
+    gnss_fix_once();</code></pre>
 <p class="cap">纯整数、无 malloc。代码：<a href="https://github.com/zhuyetuo/imu_train/tree/main/experiments/claude_2026_11/gnss">experiments/claude_2026_11/gnss/</a></p>
 
 <h2 id="todo">还要定的</h2>
@@ -181,6 +228,106 @@ if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
   }
   bars("barFix", "每天打几个点", [["省电", 14.5, "var(--accent)", 1], ["标准", 29.5, "var(--accent2)"], ["精细", 83.5, "var(--accent2)"], ["每 5 分钟", 288, "var(--bad)"]], 288, " 个");
   bars("barGap", "两点间最长漏追", [["省电", 96, "var(--accent)", 1], ["标准", 51, "var(--accent2)"], ["精细", 17, "var(--accent2)"], ["每 5 分钟", 377, "var(--bad)"]], 377, " m");
+
+
+  // ── 轨迹示意：出门 → 公园撒欢 → 睡 → 回家，用跟板上同一套规则算打点 ──
+  (function track() {
+    const svg = document.getElementById("tkMap");
+    const M2P = 1.45, OX = 70, OY = 330;                 // 米 → 像素
+    const P = (x, y) => [OX + x * M2P, OY - y * M2P];
+    const path = [[0, 0], [25, 0], [240, 0], [250, 15], [255, 120], [300, 150], [420, 170]];
+    const len = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const along = (pts, d) => { for (let i = 1; i < pts.length; i++) { const l = len(pts[i - 1], pts[i]); if (d <= l) { const t = d / l; return [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t]; } d -= l; } return pts[pts.length - 1]; };
+    const total = path.slice(1).reduce((s, p, i) => s + len(path[i], p), 0);
+    // 公园里撒欢：在 40 米范围里来回跑（确定的伪随机）
+    let seed = 5; const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const park = [420, 170], play = [];
+    let cur = park.slice();
+    for (let i = 0; i < 40; i++) { const nx = park[0] - 20 + rnd() * 60, ny = park[1] - 25 + rnd() * 45; play.push([nx, ny]); }
+    const playPts = [park, ...play, [455, 185]];
+    const playLen = playPts.slice(1).reduce((s, p, i) => s + len(playPts[i], p), 0);
+    // 时间线（秒）：每秒的位置、步数
+    const W = 1.3, RUN = 2.6, T = [];
+    const push = (pos, steps) => T.push({ pos, steps });
+    for (let t = 0; t < 300; t++) push([0, 0], 0);                                      // 家里
+    for (let d = 0; d < total; d += W) push(along(path, d), 2.2);                       // 去公园
+    for (let d = 0; d < playLen; d += RUN) push(along(playPts, d), 3.0);               // 撒欢
+    for (let t = 0; t < 2400; t++) push([455, 185], 0);                                // 树下睡
+    const back = [[455, 185], ...path.slice().reverse()];
+    const backLen = back.slice(1).reduce((s, p, i) => s + len(back[i], p), 0);
+    for (let d = 0; d < backLen; d += W) push(along(back, d), 2.2);                     // 回家
+    for (let t = 0; t < 120; t++) push([0, 0], 0);
+    const BLE_R = 22;
+    const PRE = {
+      "省电": { dep: 20, dist: 100, max: 300, arr: 20, hb: 14400 },
+      "标准": { dep: 10, dist: 50, max: 120, arr: 10, hb: 7200 },
+      "精细": { dep: 0, dist: 15, max: 30, arr: 5, hb: 3600 },
+    };
+    function simulate(name) {
+      const out = [], p = PRE[name];
+      let link = true, armed = false, unlink = 0, moving = false, pend = false, departed = false;
+      let still = 1e9, stop = 0, since = 0, dist = 0, depDist = 0, scale = 1, lastPos = null, hasFix = false;
+      const fix = (i, r) => {
+        const pos = T[i].pos;
+        if (lastPos && r === "m") { const moved = len(lastPos, pos); const want = p.dist * scale; if (moved * 3 < want) scale = Math.min(4, scale * 2); else if (moved * 3 >= want * 2) scale = 1; }
+        out.push([pos, r, i]); lastPos = pos; since = 0; hasFix = true; dist = 0;
+      };
+      for (let i = 0; i < T.length; i++) {
+        const { pos, steps } = T[i], sus = steps > 0;
+        const inRange = len(pos, [0, 0]) <= BLE_R;
+        if (inRange && !link) { link = true; armed = false; moving = pend = departed = false; dist = depDist = 0; scale = 1; }
+        if (!inRange && link) { link = false; unlink = 0; }
+        if (name === "每5分钟") { if (!link) { unlink++; if (unlink >= 30 && (unlink - 30) % 300 === 0) out.push([pos, "f", i]); } continue; }
+        if (link) continue;
+        if (!armed) { if (++unlink < 30) continue; armed = true; moving = sus; departed = true; fix(i, "l"); continue; }
+        if (hasFix) since++;
+        if (sus) {
+          dist += steps * 0.6;
+          if (!moving) { moving = true; stop = 0; departed = false; pend = still >= 60; depDist = 0; }
+          still = 0;
+          if (pend) { depDist += steps * 0.6; if (depDist >= p.dep) { pend = false; departed = true; scale = 1; fix(i, "d"); } }
+          else if (dist >= p.dist * scale || (hasFix && since >= p.max)) fix(i, "m");
+          continue;
+        }
+        still++;
+        if (moving && ++stop >= 60) { moving = false; pend = false; if (departed && dist >= p.arr) fix(i, "a"); }
+        if (!moving && hasFix && since >= p.hb) fix(i, "h");
+      }
+      return out;
+    }
+    const NS2 = "http://www.w3.org/2000/svg";
+    const mk = (t, a, txt) => { const e = document.createElementNS(NS2, t); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; svg.appendChild(e); return e; };
+    function draw(name) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      // 底图：路、公园、家、蓝牙范围
+      const road = [[-10, 0], [240, 0], [250, 15], [255, 120], [300, 150], [470, 175]];
+      mk("polyline", { points: road.map((q) => P(...q).join(",")).join(" "), fill: "none", stroke: "var(--panel2)", "stroke-width": 26, "stroke-linecap": "round", "stroke-linejoin": "round" });
+      const [px, py] = P(400, 205);
+      mk("rect", { x: px, y: py, width: 90 * M2P, height: 75 * M2P, rx: 18, fill: "rgba(60,207,142,.10)", stroke: "rgba(60,207,142,.4)" });
+      mk("text", { x: px + 45 * M2P, y: py - 8, "text-anchor": "middle", fill: "var(--ok)", "font-size": 14 }, "小公园");
+      const [tx, ty] = P(455, 185); mk("text", { x: tx, y: ty - 6, "text-anchor": "middle", "font-size": 22 }, "🌳");
+      const [hx, hy] = P(0, 0);
+      mk("circle", { cx: hx, cy: hy, r: BLE_R * M2P, fill: "rgba(124,156,255,.08)", stroke: "var(--accent2)", "stroke-dasharray": "4 4" });
+      mk("text", { x: hx, y: hy + 8, "text-anchor": "middle", "font-size": 26 }, "🏠");
+      mk("text", { x: hx, y: hy + BLE_R * M2P + 18, "text-anchor": "middle", fill: "var(--accent2)", "font-size": 12 }, "网关蓝牙范围");
+      // 实际路线
+      mk("polyline", { points: T.filter((_, i) => i % 3 === 0).map((t) => P(...t.pos).join(",")).join(" "), fill: "none", stroke: "rgba(143,160,189,.45)", "stroke-width": 1.5 });
+      // 打的点 + 连线
+      const pts = simulate(name);
+      if (pts.length > 1) mk("polyline", { points: pts.map(([q]) => P(...q).join(",")).join(" "), fill: "none", stroke: "var(--accent)", "stroke-width": 2.5, "stroke-linejoin": "round" });
+      const C2 = { l: "#e879f9", d: "var(--f-dep)", m: "var(--f-mov)", a: "var(--f-arr)", h: "var(--f-hb)", f: "var(--bad)" };
+      pts.forEach(([q, r], k) => { const [x, y] = P(...q); mk("circle", { cx: x + (k % 3 - 1) * 1.5, cy: y, r: r === "f" ? 4 : 6, fill: C2[r], stroke: "var(--bg)", "stroke-width": 1.5 }); });
+      const out = T.findIndex((t) => len(t.pos, [0, 0]) > BLE_R), home = T.length - 1 - [...T].reverse().findIndex((t) => len(t.pos, [0, 0]) > BLE_R);
+      const mins = Math.round((home - out) / 60);
+      document.getElementById("tkInfo").textContent = `离家 ${mins} 分钟 · 打了 ${pts.length} 个点`;
+      [...document.querySelectorAll("#tkBtns button")].forEach((b) => b.style.cssText = b.textContent === name ? on : off);
+    }
+    const on = "background:var(--accent);color:#04202a;border:1px solid var(--accent);border-radius:6px;padding:2px 12px;cursor:pointer;font:inherit;font-weight:700";
+    const off = "background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:2px 12px;cursor:pointer;font:inherit";
+    const box = document.getElementById("tkBtns");
+    ["省电", "标准", "精细", "每5分钟"].forEach((n) => { const b = document.createElement("button"); b.type = "button"; b.textContent = n; b.onclick = () => draw(n); box.appendChild(b); });
+    draw("省电");
+  })();
 
   // ── 准确率 ──
   const A = [["小跑", 96.2, "go"], ["走", 91.2, "go"], ["奔跑", 85.2, "go"], ["嗅闻（边走边嗅）", 82.8, "mv"], ["趴", 2.5, "st"], ["坐", 1.7, "st"], ["站", 5.2, "st"], ["进食", 13.8, "cf"], ["饮水", 69.8, "cf"], ["抖身", 62.3, "cf"]];

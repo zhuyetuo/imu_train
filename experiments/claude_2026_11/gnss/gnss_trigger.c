@@ -42,6 +42,23 @@ void gt_init(gt_state_t *s, gt_preset_id_t preset) {
     s->base = 1000 << 8;      /* 1 g */
     s->still_s = 0xFFFFFFFFu / 2;
     s->dist_scale = 1;
+    s->armed = 1;             /* 没报过蓝牙状态：按「没连着」工作（老用法兼容） */
+}
+
+static void reset_track(gt_state_t *s) {
+    s->moving = s->pending_depart = s->departed = 0;
+    s->stop_s = 0; s->dist_cm = s->depart_cm = 0;
+    s->still_s = 0; s->since_fix_s = 0;
+    s->dist_scale = 1;
+}
+
+void gt_set_link(gt_state_t *s, uint8_t connected) {
+    if (connected) {
+        s->link = 1; s->armed = 0; s->unlink_s = 0;   /* 连上：立刻停，位置交给网关 / 手机 */
+        reset_track(s);
+    } else if (s->link) {
+        s->link = 0; s->unlink_s = 0;                 /* 断开：先等满防抖时间 */
+    }
 }
 
 /* 每个样本：|a| 去掉 ~1 s 的慢基线，两点平均，找局部最大值记一步 */
@@ -92,9 +109,22 @@ gt_reason_t gt_tick(gt_state_t *s) {
     uint8_t cnt = 0;
     for (int i = 0; i < SUS_WIN; i++) cnt += s->loco_ring[i];
     uint8_t sus = cnt >= SUS_MIN;
+
+    /* 2) 蓝牙开关：连着就不工作（计步照常跑，状态保持热的）；断开满 30 秒打「离开点」再开始 */
+    if (s->link) return GT_NONE;
+    if (!s->armed) {
+        if (++s->unlink_s < GT_LINK_DEBOUNCE_S) return GT_NONE;
+        s->armed = 1;
+        reset_track(s);
+        s->has_fix = 1;
+        s->moving = sus;                 /* 已经在走：接着按「移动中」打点，不再等出发 */
+        s->departed = 1;                 /* 离开就算出发过：之后停下来照样打「到达」点 */
+        s->last_reason = GT_LEAVE;
+        return GT_LEAVE;
+    }
     if (s->has_fix) s->since_fix_s++;
 
-    /* 2) 打点状态机 */
+    /* 3) 打点状态机 */
     if (sus) {
         s->dist_cm += step_cm;
         if (!s->moving) {
@@ -108,11 +138,14 @@ gt_reason_t gt_tick(gt_state_t *s) {
             if (s->depart_cm >= (uint32_t)s->p.depart_min_m * 100u) {
                 s->pending_depart = 0; s->departed = 1;
                 s->dist_cm = 0; s->since_fix_s = 0; s->has_fix = 1;
+                s->dist_scale = 1;           /* 新的一趟：上一处转悠放大的间隔清掉 */
+                s->last_reason = GT_DEPART;
                 return GT_DEPART;
             }
         } else if (s->dist_cm >= (uint32_t)s->p.move_dist_m * s->dist_scale * 100u ||
                    (s->has_fix && s->since_fix_s >= s->p.move_max_s)) {
             s->dist_cm = 0; s->since_fix_s = 0; s->has_fix = 1;
+            s->last_reason = GT_MOVING;
             return GT_MOVING;
         }
         return GT_NONE;
@@ -122,11 +155,13 @@ gt_reason_t gt_tick(gt_state_t *s) {
         s->moving = 0; s->pending_depart = 0;
         if (s->departed && s->dist_cm >= (uint32_t)s->p.arrive_min_m * 100u) {
             s->dist_cm = 0; s->since_fix_s = 0; s->has_fix = 1;
+            s->last_reason = GT_ARRIVE;
             return GT_ARRIVE;
         }
     }
     if (!s->moving && (!s->has_fix || s->since_fix_s >= s->p.heartbeat_s)) {
         s->since_fix_s = 0; s->has_fix = 1;
+        s->last_reason = GT_HEARTBEAT;
         return GT_HEARTBEAT;
     }
     return GT_NONE;
@@ -136,6 +171,7 @@ gt_reason_t gt_tick(gt_state_t *s) {
  * 「移动中」的点实际只挪了不到 move_dist 的三分之一 → 多半是在一小块地方来回转，把间隔放大一倍（最多 4 倍）；
  * 实际挪得够远就恢复。不调这个函数也能用，只是徘徊时会多打点。 */
 void gt_on_fix(gt_state_t *s, uint16_t moved_m) {
+    if (s->last_reason != GT_MOVING) return;   /* 出发 / 到达 / 保底 / 离开点不拿来判断转悠 */
     uint32_t want = (uint32_t)s->p.move_dist_m * s->dist_scale;
     if (moved_m * 3u < want) { if (s->dist_scale < 4) s->dist_scale <<= 1; }
     else if (moved_m * 3u >= want * 2u) s->dist_scale = 1;
