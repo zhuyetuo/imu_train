@@ -43,6 +43,8 @@ void gt_init(gt_state_t *s, gt_preset_id_t preset) {
     s->still_s = 0xFFFFFFFFu / 2;
     s->dist_scale = 1;
     s->armed = 1;             /* 没报过蓝牙状态：按「没连着」工作（老用法兼容） */
+    s->leave_age_s = 0xFFFFFFF0u;
+    s->yard_scale = 1;
 }
 
 static void reset_track(gt_state_t *s) {
@@ -54,10 +56,12 @@ static void reset_track(gt_state_t *s) {
 
 void gt_set_link(gt_state_t *s, uint8_t connected) {
     if (connected) {
+        if (!s->link) s->link_s = 0;
         s->link = 1; s->armed = 0; s->unlink_s = 0;   /* 连上：立刻停，位置交给网关 / 手机 */
         reset_track(s);
     } else if (s->link) {
         s->link = 0; s->unlink_s = 0;                 /* 断开：先等满防抖时间 */
+        s->unlink_walk_cm = 0;
     }
 }
 
@@ -109,20 +113,45 @@ gt_reason_t gt_tick(gt_state_t *s) {
     uint8_t cnt = 0;
     for (int i = 0; i < SUS_WIN; i++) cnt += s->loco_ring[i];
     uint8_t sus = cnt >= SUS_MIN;
+    if (s->leave_age_s < 0xFFFFFFF0u) s->leave_age_s++;
+    if (sus) s->leave_path_cm += step_cm;      /* 蓝牙连着也算：院子里进进出出走了多少 */
 
     /* 2) 蓝牙开关：连着就不工作（计步照常跑，状态保持热的）；断开满 30 秒打「离开点」再开始 */
-    if (s->link) return GT_NONE;
+    if (s->link) {
+        if (s->link_s < 0xFFFFFFF0u) s->link_s++;
+        if (s->link_s >= GT_YARD_EXIT_S) { s->yard = 0; s->yard_scale = 1; }   /* 回屋待够了，退出院子 */
+        return GT_NONE;
+    }
     if (!s->armed) {
-        if (++s->unlink_s < GT_LINK_DEBOUNCE_S) return GT_NONE;
+        if (s->unlink_s < 0xFFFF) s->unlink_s++;
+        if (sus) s->unlink_walk_cm += step_cm;
+        if (s->yard) {
+            /* 院子里：断一会儿又连上很正常，不打离开点；一直断着还走了不少路，才打一个看看出没出院子 */
+            if (s->unlink_s < GT_YARD_OUT_S ||
+                s->unlink_walk_cm < (uint32_t)GT_YARD_STEP_M * s->yard_scale * 100u) return GT_NONE;
+            s->armed = 1; reset_track(s);
+            s->has_fix = 1; s->moving = sus; s->departed = 1;
+            s->last_reason = GT_LEAVE;
+            return GT_LEAVE;
+        }
+        if (s->unlink_s < GT_LINK_DEBOUNCE_S) return GT_NONE;
         s->armed = 1;
         reset_track(s);
         s->has_fix = 1;
         s->moving = sus;                 /* 已经在走：接着按「移动中」打点，不再等出发 */
         s->departed = 1;                 /* 离开就算出发过：之后停下来照样打「到达」点 */
+        /* 离开点冷却：刚打过离开点、之后也没走多远——多半是院子里蓝牙忽断忽连，悄悄接着工作，不再打 */
+        if (s->left_once && s->leave_age_s < GT_LEAVE_COOLDOWN_S &&
+            s->leave_path_cm < (uint32_t)GT_LEAVE_MIN_M * 100u) {
+            s->last_reason = GT_NONE;
+            return GT_NONE;
+        }
+        s->left_once = 1; s->leave_age_s = 0; s->leave_path_cm = 0;
         s->last_reason = GT_LEAVE;
         return GT_LEAVE;
     }
     if (s->has_fix) s->since_fix_s++;
+
 
     /* 3) 打点状态机 */
     if (sus) {
@@ -175,4 +204,17 @@ void gt_on_fix(gt_state_t *s, uint16_t moved_m) {
     uint32_t want = (uint32_t)s->p.move_dist_m * s->dist_scale;
     if (moved_m * 3u < want) { if (s->dist_scale < 4) s->dist_scale <<= 1; }
     else if (moved_m * 3u >= want * 2u) s->dist_scale = 1;
+}
+
+/* 打完点，再告诉它离家多远：50 m 以内进「院子」状态（院子里只按走过的距离打点），出了围栏恢复正常 */
+void gt_on_fix_home(gt_state_t *s, uint16_t moved_m, uint16_t home_m) {
+    gt_on_fix(s, moved_m);
+    if (home_m <= GT_YARD_R_M) {
+        /* 还在院子里：回到「等」的状态，下次要连续断开更久、走更远才打（翻倍，最多 8 倍） */
+        if (s->yard && s->yard_scale < 8) s->yard_scale <<= 1;
+        s->yard = 1;
+        if (!s->link) { s->armed = 0; s->unlink_s = 0; s->unlink_walk_cm = 0; }
+    } else {
+        s->yard = 0; s->yard_scale = 1;           /* 出了院子：照常打点 */
+    }
 }

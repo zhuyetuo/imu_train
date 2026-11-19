@@ -6,6 +6,12 @@
  *   蓝牙连着（网关 / 手机在）：智能打点停着，卫星关着，位置交给网关 / 手机；
  *   蓝牙断开满 30 秒（防门口信号时有时无）：打一个「离开点」，智能打点开始工作；
  *   重新连上：立刻停。
+ * 院子（蓝牙边缘，忽断忽连）：院子里是「断一会儿又连上」，真出门是「一直断着、还在走」——
+ *   院子围栏：App 下发家的坐标，打完点用 gt_on_fix_home 告诉它离家多远，50 m 以内算「在院子」；
+ *   在院子里蓝牙断开不打离开点；要「连续断开满 90 秒、且这段时间估算走了 ≥50 m」才打一个点看看出没出院子，
+ *   那个点还在院子里就把要求的距离翻倍（50 → 100 → 200 → 400 m），出了围栏恢复正常；
+ *   回屋里蓝牙连续连上 10 分钟，退出院子状态。
+ *   离开点冷却（不知道家在哪时的兜底）：打过离开点 10 分钟内又断开、期间也没走够 50 m，就不再打离开点。
  * 工作时 GNSS 平时关着；加速度计看到「持续在走 / 跑」才打点——出发、移动中按估算距离、到达，
  * 静止很久再补一个保底点。原地休息、来回走几步都不打。
  *
@@ -14,7 +20,7 @@
  *   gt_set_link(&st, ble_connected());     // 开机先报一次蓝牙状态；之后每次连上 / 断开的通知都调
  *   每个加速度样本：  gt_feed(&st, ax, ay, az);     // 单位 mg（int16），蓝牙连着也照常喂（计步状态保持热的）
  *   每秒一次：        r = gt_tick(&st);             // r != GT_NONE 就去打一个点
- *   打完点（可选）：  gt_on_fix(&st, moved_m);       // 跟上一个点的实际距离，用来压「原地徘徊」
+ *   打完点（可选）：  gt_on_fix_home(&st, moved_m, home_m);  // 跟上一个点差多远、离家多远（不知道家在哪就用 gt_on_fix）
  *
  * 参数来源：Vehkaoja 2022 公开数据（颈部项圈）验证计步 / 移动检测，狗场 36 个狗·天真实数据模拟打点。
  * 每步多少米（step_cm）还没用真实 GNSS 标定，先按 60 cm。
@@ -61,9 +67,23 @@ typedef struct {
     uint8_t link;            /* 1 = 蓝牙连着（网关 / 手机在），智能打点停着 */
     uint8_t armed;           /* 1 = 智能打点在工作 */
     uint16_t unlink_s;       /* 断开了多少秒（满 GT_LINK_DEBOUNCE_S 才开始工作） */
+    /* 院子（蓝牙边缘忽断忽连） */
+    uint8_t left_once;       /* 打过离开点没有 */
+    uint32_t leave_age_s;    /* 离上一个离开点多少秒 */
+    uint32_t leave_path_cm;  /* 上一个离开点之后估算走了多远（蓝牙连着时也算） */
+    uint8_t yard;            /* 1 = 最近一个点在家附近（院子里） */
+    uint8_t yard_scale;      /* 院子里打点要求的距离倍数（1~8，点还在院子里就翻倍） */
+    uint32_t unlink_walk_cm; /* 这一次连续断开以来估算走了多远 */
+    uint32_t link_s;         /* 这一次连续连着多少秒 */
 } gt_state_t;
 
-#define GT_LINK_DEBOUNCE_S 30
+#define GT_LINK_DEBOUNCE_S 30     /* 蓝牙断开满这么久才算真断 */
+#define GT_LEAVE_COOLDOWN_S 600   /* 离开点冷却：10 分钟 */
+#define GT_LEAVE_MIN_M 50         /* 冷却期内走够这么远才再打离开点 */
+#define GT_YARD_R_M 50            /* 离家这么近算院子 */
+#define GT_YARD_STEP_M 50         /* 院子里：连续断开时估算走够这么远（× 倍数）才打一个点 */
+#define GT_YARD_OUT_S 90          /* 院子里：连续断开满这么久才可能是出院子 */
+#define GT_YARD_EXIT_S 600        /* 蓝牙连续连上这么久：回屋了，退出院子状态 */
 
 void gt_init(gt_state_t *s, gt_preset_id_t preset);
 void gt_set_preset(gt_state_t *s, gt_preset_id_t preset);
@@ -73,5 +93,7 @@ gt_reason_t gt_tick(gt_state_t *s);
 void gt_on_fix(gt_state_t *s, uint16_t moved_m);
 /* 蓝牙连上 / 断开的通知：connected=1 连上（停），0 断开（30 秒后开始工作）。不调的话默认按「没连着」一直工作 */
 void gt_set_link(gt_state_t *s, uint8_t connected);
+/* 打完点：moved_m 跟上一个点差多远，home_m 离家多远（App 下发家的坐标后才有）。50 m 内进院子状态，出了就恢复 */
+void gt_on_fix_home(gt_state_t *s, uint16_t moved_m, uint16_t home_m);
 
 #endif

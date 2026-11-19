@@ -152,6 +152,30 @@
   <p class="cap">切到「每 5 分钟」看看：点数可能差不多，但一大半堆在树下睡觉的地方，路上反而稀。示意场景：在家待着 → 自己出门（出门 20 多米蓝牙断开）→ 走 500 米到小公园 → 撒欢跑 15 分钟 → 树下睡 40 分钟 → 走回家（到门口蓝牙连上）。点用的是同一套规则算出来的；路线是画的，不是真实 GPS。</p>
 </div>
 
+<h2 id="yard">院子：蓝牙忽断忽连怎么办</h2>
+<p class="muted">屋外的院子正好在蓝牙边缘，狗溜达一圈，蓝牙就断一下、连一下。只靠「断开 30 秒就打离开点」，院子里会一遍遍打点；把等待拉长到 3 分钟，真出门时第一个点又晚了。</p>
+<div class="fig">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+    <span id="ydBtns" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+    <button id="ydPlay" type="button" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:2px 12px;cursor:pointer;font:inherit">暂停</button>
+    <span id="ydClock" class="muted" style="font-size:13px;margin-left:auto"></span>
+  </div>
+  <svg id="ydMap" viewBox="0 0 1000 420" role="img" aria-label="院子里蓝牙忽断忽连时，三种办法各打了哪些点"></svg>
+  <svg id="ydStrip" viewBox="0 0 1000 120" role="img" aria-label="蓝牙状态和打点时间线"></svg>
+  <p class="cap">动画：狗在院子里溜达 30 分钟（中间在角落趴了几分钟），再从院门出去走远。圆点 = 打的点（粉：离开点，青：移动中，黄：到达）。上面切换三种办法；下面时间线红色 = 蓝牙断着。</p>
+</div>
+<div class="two">
+  <div class="fig"><svg id="ydBar1" viewBox="0 0 480 160" role="img" aria-label="院子 30 分钟打了几个点"></svg></div>
+  <div class="fig"><svg id="ydBar2" viewBox="0 0 480 160" role="img" aria-label="真出门后第一个点晚了多远"></svg></div>
+</div>
+<div class="steps">
+  <div><b>① 30 秒防抖</b><span>一两秒的闪断直接忽略</span></div><div class="arr">→</div>
+  <div><b>② 院子围栏</b><span>点落在家 50 m 内 = 在院子</span></div><div class="arr">→</div>
+  <div><b>③ 院子里看「一直断着还在走」</b><span>连续断开 90 秒 + 走了 50 m 才打一个；还在院子就翻倍</span></div><div class="arr">→</div>
+  <div><b>④ 回屋 10 分钟</b><span>退出院子，下次出门照常 30 秒</span></div>
+</div>
+<p class="cap">家的坐标由 App 下发给项圈（用户在 App 里设一次家）。不知道家在哪时，用「离开点冷却」兜底：打过离开点 10 分钟内又断开、期间没走够 50 m，就不再打。</p>
+
 <h2 id="day">真实的一天</h2>
 <div class="fig"><svg id="dayfig" viewBox="0 0 1000 330" role="img" aria-label="一只狗一天的走动和打点时刻"></svg>
   <div class="legend">
@@ -327,6 +351,132 @@ if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
     const box = document.getElementById("tkBtns");
     ["省电", "标准", "精细", "每5分钟"].forEach((n) => { const b = document.createElement("button"); b.type = "button"; b.textContent = n; b.onclick = () => draw(n); box.appendChild(b); });
     draw("省电");
+  })();
+
+
+  // ── 院子：蓝牙忽断忽连，三种办法对比（动画） ──
+  (function yard() {
+    const svg = document.getElementById("ydMap"), strip = document.getElementById("ydStrip");
+    const S = 4.2, OX = 90, OY = 215, P = (x, y) => [OX + x * S, OY - y * S];
+    const len = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+    let seed = 3; const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    // 院子：x 6~48 m，y -22~22 m；院门在 (48, 0)；蓝牙从屋子算 26 m 左右，边上 22~30 m 会忽断忽连
+    const T = [];
+    const walkTo = (from, to, v) => { const d = len(from, to); const n = Math.max(1, Math.round(d / v)); for (let i = 1; i <= n; i++) T.push({ pos: [from[0] + (to[0] - from[0]) * i / n, from[1] + (to[1] - from[1]) * i / n], walk: true }); return to; };
+    const rest = (at, sec) => { for (let i = 0; i < sec; i++) T.push({ pos: at, walk: false }); return at; };
+    let at = [4, 0]; rest(at, 60);
+    const spots = [[18, 12], [30, -14], [40, 10], [24, -4], [44, -16], [36, 16], [20, -12], [42, 2]];
+    for (let r = 0; r < 4; r++) for (const sp of spots.slice(r % 2 * 4, r % 2 * 4 + 4)) {
+      at = walkTo(at, [sp[0] + (rnd() - 0.5) * 6, sp[1] + (rnd() - 0.5) * 6], 1.1);
+      at = rest(at, 30 + Math.round(rnd() * 50));
+    }
+    at = walkTo(at, [45, -18], 1.0); at = rest(at, 300);                 // 角落趴 5 分钟（在蓝牙外）
+    for (const sp of spots.slice(0, 3)) { at = walkTo(at, sp, 1.1); at = rest(at, 40); }
+    while (T.length < 1800) { at = walkTo(at, [10 + rnd() * 34, (rnd() - 0.5) * 40], 1.0); at = rest(at, 40); }
+    T.length = 1800;
+    at = T[T.length - 1].pos;
+    const leaveAt = T.length;
+    at = walkTo(at, [48, 0], 1.3); at = walkTo(at, [290, 0], 1.3);         // 出院门走远
+    const END = T.length;
+    // 蓝牙：离屋 22 m 内一定连着、30 m 外一定断；中间按 5~15 秒一段随机忽断忽连
+    let flap = true, flapLeft = 0;
+    T.forEach((t) => {
+      const d = len(t.pos, [0, 0]);
+      if (d <= 22) t.ble = true; else if (d >= 30) t.ble = false;
+      else { if (flapLeft-- <= 0) { flap = rnd() < 0.5; flapLeft = 5 + Math.round(rnd() * 10); } t.ble = flap; }
+    });
+    const STEP = 0.6 * 2.2;  // 走路时每秒估算 1.3 m
+    function sim(kind) {
+      const out = [];
+      const deb = kind === "long" ? 180 : 30;
+      let link = true, armed = false, unl = 0, unlWalk = 0, linkS = 0, yard = false, ysc = 1;
+      let dist = 0, since = 0, moving = false, stop = 0, departed = false;
+      const fix = (i, r) => { out.push([i, r]); since = 0; dist = 0;
+        if (kind === "new") { const home = len(T[i].pos, [0, 0]);
+          if (home <= 50) { if (yard && ysc < 8) ysc *= 2; yard = true; if (!T[i].ble) { armed = false; unl = 0; unlWalk = 0; } }
+          else { yard = false; ysc = 1; } } };
+      for (let i = 0; i < END; i++) {
+        const t = T[i];
+        if (t.ble) { if (!link) { linkS = 0; } link = true; armed = false; unl = 0; unlWalk = 0; moving = false; linkS++; if (linkS >= 600) { yard = false; ysc = 1; } continue; }
+        if (link) { link = false; unl = 0; unlWalk = 0; }
+        if (!armed) {
+          unl++; if (t.walk) unlWalk += STEP;
+          if (kind === "new" && yard) { if (unl >= 90 && unlWalk >= 50 * ysc) { armed = true; moving = t.walk; departed = true; fix(i, "l"); } continue; }
+          if (unl >= deb) { armed = true; moving = t.walk; departed = true; fix(i, "l"); }
+          continue;
+        }
+        since++;
+        if (t.walk) { dist += STEP; moving = true; stop = 0; if (dist >= 100 || since >= 300) fix(i, "m"); }
+        else if (moving && ++stop >= 60) { moving = false; if (departed && dist >= 20) fix(i, "a"); }
+      }
+      return out;
+    }
+    const KINDS = { base: "只防抖 30 秒", long: "拉长到 3 分钟", new: "新方案" };
+    const RES = {}; for (const k in KINDS) RES[k] = sim(k);
+    const stat = (k) => { const f = RES[k]; const yardN = f.filter(([i]) => i < leaveAt).length;
+      const first = f.find(([i]) => i >= leaveAt); const gateI = T.findIndex((t, i) => i >= leaveAt && t.pos[0] >= 48);
+      const late = first ? Math.max(0, Math.round(len(T[first[0]].pos, [48, 0]))) : null; return { yardN, late }; };
+    const NS3 = "http://www.w3.org/2000/svg";
+    const mk = (root, t, a, txt) => { const e = document.createElementNS(NS3, t); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; root.appendChild(e); return e; };
+    // 静态底图
+    const base = () => {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      const [x0, y0] = P(6, 22), [x1, y1] = P(48, -22);
+      mk(svg, "rect", { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: 10, fill: "rgba(60,207,142,.07)", stroke: "rgba(60,207,142,.45)", "stroke-dasharray": "6 4" });
+      mk(svg, "text", { x: (x0 + x1) / 2, y: y0 - 8, "text-anchor": "middle", fill: "var(--ok)", "font-size": 14 }, "院子（有围栏）");
+      const [gx, gy] = P(48, 0); mk(svg, "text", { x: gx + 8, y: gy - 10, fill: "var(--muted)", "font-size": 12 }, "院门");
+      mk(svg, "line", { x1: gx, x2: P(300, 0)[0], y1: gy, y2: gy, stroke: "var(--panel2)", "stroke-width": 22, "stroke-linecap": "round" });
+      const [hx, hy] = P(0, 0);
+      mk(svg, "circle", { cx: hx, cy: hy, r: 22 * S, fill: "rgba(124,156,255,.10)", stroke: "var(--accent2)" });
+      mk(svg, "circle", { cx: hx, cy: hy, r: 30 * S, fill: "none", stroke: "var(--accent2)", "stroke-dasharray": "3 5" });
+      mk(svg, "text", { x: hx, y: hy - 30 * S - 8, "text-anchor": "middle", fill: "var(--accent2)", "font-size": 12 }, "蓝牙边缘：忽断忽连");
+      mk(svg, "text", { x: hx, y: hy + 9, "text-anchor": "middle", "font-size": 28 }, "🏠");
+      mk(svg, "circle", { cx: hx, cy: hy, r: 50 * S, fill: "none", stroke: "var(--mid)", "stroke-dasharray": "2 6", "stroke-opacity": .6 });
+      mk(svg, "text", { x: P(36, -46)[0], y: P(36, -46)[1], fill: "var(--mid)", "font-size": 12 }, "院子围栏 50 m（App 设的家）");
+    };
+    let kind = "base", playing = !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches), k = playing ? 0 : END - 1, last = null;
+    const C3 = { l: "#e879f9", m: "var(--f-mov)", a: "var(--f-arr)" };
+    function frame() {
+      base();
+      // 走过的路
+      mk(svg, "polyline", { points: T.slice(0, k + 1).filter((_, i) => i % 3 === 0).map((t) => P(...t.pos).join(",")).join(" "), fill: "none", stroke: "rgba(143,160,189,.4)", "stroke-width": 1.4 });
+      for (const [i, r] of RES[kind]) if (i <= k) { const [x, y] = P(...T[i].pos); mk(svg, "circle", { cx: x, cy: y, r: 7, fill: C3[r], "fill-opacity": .9, stroke: "var(--bg)", "stroke-width": 1.5 }); }
+      const t = T[k]; const [dx, dy] = P(...t.pos);
+      mk(svg, "text", { x: dx, y: dy + 8, "text-anchor": "middle", "font-size": 22 }, "🐕");
+      mk(svg, "rect", { x: dx - 34, y: dy - 40, width: 68, height: 20, rx: 10, fill: t.ble ? "var(--accent2)" : "var(--bad)" });
+      mk(svg, "text", { x: dx, y: dy - 26, "text-anchor": "middle", fill: "#fff", "font-size": 12, "font-weight": 700 }, t.ble ? "蓝牙连着" : "蓝牙断了");
+      const n = RES[kind].filter(([i]) => i <= k).length;
+      document.getElementById("ydClock").textContent = `第 ${Math.floor(k / 60)} 分钟 · ${k < leaveAt ? "在院子里" : "出门了"} · 已打 ${n} 个点`;
+      // 时间线：蓝牙状态 + 三种办法的打点
+      while (strip.firstChild) strip.removeChild(strip.firstChild);
+      const L = 110, R2 = 990, X = (i) => L + (i / END) * (R2 - L);
+      mk(strip, "text", { x: L - 8, y: 18, "text-anchor": "end", fill: "var(--muted)", "font-size": 12 }, "蓝牙");
+      let st = 0; for (let i = 1; i <= END; i++) if (i === END || T[i].ble !== T[st].ble) { mk(strip, "rect", { x: X(st), y: 8, width: Math.max(.5, X(i) - X(st)), height: 14, fill: T[st].ble ? "var(--accent2)" : "var(--bad)", "fill-opacity": T[st].ble ? .5 : .8 }); st = i; }
+      Object.keys(KINDS).forEach((kk, r) => {
+        const y = 44 + r * 26;
+        mk(strip, "text", { x: L - 8, y: y + 4, "text-anchor": "end", fill: kk === kind ? "var(--text)" : "var(--muted)", "font-size": 12, "font-weight": kk === kind ? 700 : 400 }, KINDS[kk]);
+        mk(strip, "line", { x1: L, x2: R2, y1: y, y2: y, stroke: "var(--line)" });
+        for (const [i, rr] of RES[kk]) mk(strip, "circle", { cx: X(i), cy: y, r: 4, fill: C3[rr] });
+      });
+      mk(strip, "line", { x1: X(leaveAt), x2: X(leaveAt), y1: 4, y2: 116, stroke: "var(--mid)", "stroke-dasharray": "3 3" });
+      mk(strip, "text", { x: X(leaveAt) + 4, y: 116, fill: "var(--mid)", "font-size": 11 }, "出院门");
+      mk(strip, "line", { x1: X(k), x2: X(k), y1: 4, y2: 116, stroke: "var(--text)", "stroke-opacity": .5 });
+    }
+    function step(ts) { if (!playing) return; if (last != null) k = Math.min(END - 1, k + Math.round((ts - last) / 1000 * 60)); last = ts; frame(); if (k >= END - 1) { playing = false; document.getElementById("ydPlay").textContent = "重播"; return; } requestAnimationFrame(step); }
+    const btn = document.getElementById("ydPlay");
+    btn.textContent = playing ? "暂停" : "播放";
+    btn.onclick = () => { if (k >= END - 1) k = 0; playing = !playing; btn.textContent = playing ? "暂停" : "播放"; last = null; if (playing) requestAnimationFrame(step); };
+    const on2 = "background:var(--accent);color:#04202a;border:1px solid var(--accent);border-radius:6px;padding:2px 12px;cursor:pointer;font:inherit;font-weight:700";
+    const off2 = "background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:2px 12px;cursor:pointer;font:inherit";
+    const box = document.getElementById("ydBtns");
+    Object.entries(KINDS).forEach(([kk, name]) => { const b = document.createElement("button"); b.type = "button"; b.textContent = name; b.onclick = () => { kind = kk; [...box.children].forEach((x) => x.style.cssText = x === b ? on2 : off2); frame(); }; box.appendChild(b); });
+    [...box.children].forEach((x, i) => x.style.cssText = i === 0 ? on2 : off2);
+    frame(); if (playing) requestAnimationFrame(step);
+    // 对比条
+    const st3 = Object.fromEntries(Object.keys(KINDS).map((kk) => [kk, stat(kk)]));
+    const colB = { base: "var(--bad)", long: "var(--mid)", new: "var(--accent)" };
+    bars("ydBar1", "院子里 30 分钟打了几个点", Object.keys(KINDS).map((kk) => [KINDS[kk], st3[kk].yardN, colB[kk], kk === "new"]), Math.max(...Object.values(st3).map((v) => v.yardN), 1), " 个");
+    bars("ydBar2", "真出门后，第一个点离院门多远", Object.keys(KINDS).map((kk) => [KINDS[kk], st3[kk].late ?? 0, colB[kk], kk === "new"]), Math.max(...Object.values(st3).map((v) => v.late ?? 0), 1), " m");
   })();
 
   // ── 准确率 ──
