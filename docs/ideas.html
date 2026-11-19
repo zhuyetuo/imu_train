@@ -22,11 +22,35 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-18</div>
+  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-19</div>
   <h1>想法清单</h1>
   <p class="lead">先把手上的做完，再回来这里挑。每条写清楚：为什么值得做、现在到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
   <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
 </header>
+
+<h2 id="gnss">IMU 智能打点：只用 3 轴加速度计决定什么时候开卫星定位 <span class="state ok">有方案、有数</span></h2>
+<p class="muted">定位分三种情况：在家连得上网关就用网关定位；户外主人手机在旁边就用手机；<b>狗独自外出、两样都连不上，只能靠卫星定位</b>。死板地定时打点很费电，狗在休息或在一小块地方转悠时还会打出一堆重复点。所以平时卫星定位关着，由加速度计判断「真的在走 / 跑、走出去了」才打一个点。</p>
+<div class="flow">
+  <div class="step"><b>计步</b><span>|a| 去掉 1 秒慢基线，峰值 &gt; 60 mg、两步至少隔 0.25 s 记一步</span></div>
+  <div class="step"><b>在走 / 跑</b><span>最近 4 秒 5–18 步、节奏均匀（间隔变异 ≤45%）</span></div>
+  <div class="step"><b>持续移动</b><span>15 秒里至少 10 秒在走 / 跑；抖一下、喝两口水不算</span></div>
+  <div class="step"><b>打点</b><span>出发（静止 1 分钟后动起来、走出一段）· 移动中（每走 N 米或每 T 秒）· 到达（停下 1 分钟）· 保底（很久不动）</span></div>
+  <div class="step"><b>压徘徊</b><span>打完点拿实际位移回传：总在原地就把间隔放大，最多 4 倍</span></div>
+</div>
+<div class="scroll"><table>
+<tr><th>打点密度（用户可调）</th><th>出发 / 每隔 / 最长 / 到达 / 保底</th><th>每天打点（中位）</th><th>GNSS 耗电估算</th><th>最长漏追距离</th></tr>
+<tr><td><b>省电（默认）</b> 只看大概去了哪</td><td>走出 20 m / 100 m / 5 分钟 / 20 m / 4 小时</td><td><b>14.5</b> 个</td><td><b>2.2 mAh/天</b></td><td>≈96 m</td></tr>
+<tr><td><b>标准</b></td><td>10 m / 50 m / 2 分钟 / 10 m / 2 小时</td><td>29.5 个</td><td>3.3 mAh/天</td><td>≈51 m</td></tr>
+<tr><td><b>精细</b> 看小公园里怎么跑</td><td>0 / 15 m / 30 秒 / 5 m / 1 小时</td><td>83.5 个</td><td>7.4 mAh/天</td><td>≈17 m</td></tr>
+<tr><td class="muted">对照：每 5 分钟打一个</td><td>—</td><td>288 个</td><td>50 mAh/天</td><td>最长 377 m</td></tr>
+<tr><td class="muted">对照：每 10 分钟打一个</td><td>—</td><td>144 个</td><td>25 mAh/天</td><td>最长 665 m</td></tr>
+</table></div>
+<div class="note">
+<b>怎么验证的：</b>① 计步 / 移动检测在 Vehkaoja 2022 公开数据（颈部项圈，带走 / 小跑 / 奔跑标注）上：加上持续规则后走 91%、小跑 96% 能认出来，趴 / 坐 / 站 / 喘气被当成在走只有 2–5%；喝水、抖身偏高（约 6 成），但都是短时间，靠「走出 N 米才打」挡住。② 打点在狗场 36 个狗·天真实全天数据（10-27 ~ 11-01，6 只狗）上模拟，只用加速度 3 轴。③ 板上 C 参考实现（纯整数、无 malloc）跟 Python 版逐秒一致 98.9%。<br>
+<b>还没定的：</b>每步多少米（先按 60 cm）要拿真实 GNSS 轨迹标定；耗电按「离上次定位越久启动越慢：离上次 热启动 5 s / 温 15–25 s / 冷 35 slt;5 分钟热启动 5 s、热启动 5 s / 温 15–25 s / 冷 35 slt;4 小时温启动 25 s、更久 35 s、25 mA」估的，换成实际模组手册的数；狗场的狗一天只走 10 分钟左右，户外遛狗的数据还要补。
+<b>在家里看轨迹</b>靠的是网关定位（只到房间级），卫星信号进不了屋，「精细」档主要用在户外小公园。
+</div>
+<p class="muted">代码：<code>experiments/claude_2026_11/gnss/</code>（Python 模拟 + 板上 C 参考实现 <code>gnss_trigger.c/.h</code>，三档 <code>GT_PRESET_SAVE / STANDARD / FINE</code>，默认省电）。</p>
 
 <h2 id="new7">11-18 新提的 7 个方向（一个个来）</h2>
 <div class="scroll"><table>
