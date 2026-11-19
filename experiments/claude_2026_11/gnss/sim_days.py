@@ -28,6 +28,9 @@ FIX_MA = 25.0
 def fix_seconds(gap_s):
     return 5 if gap_s < 300 else (25 if gap_s < 4 * 3600 else 35)
 
+_LAST = {}  # 最近一次 dog_day 的逐秒移动和打点（画图用）
+
+
 def per_second(path):
     """一小时文件 → (起始秒, 每秒是否在走, 每秒步数, 每秒是否戴着)"""
     try:
@@ -100,6 +103,7 @@ def dog_day(args):
                         fixes.append((s, "到达")); last_fix = s; dist_since = 0.0
             if not moving and (last_fix is None or s - last_fix >= P["heartbeat_s"]):
                 fixes.append((s, "保底")); last_fix = s
+    _LAST.update(fixes=fixes, sus=sus)
     def energy(times):
         e, prev = 0.0, None
         for t in times:

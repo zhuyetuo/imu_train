@@ -12,6 +12,7 @@
   <a href="index.html">总览</a>
   <a href="behavior.html">① 行为识别</a>
   <a href="skin.html">② 皮肤评估</a>
+  <a href="gnss.html">智能打点</a>
   <a href="history.html">来时路</a>
   <a href="landscape.html">业界进展</a>
   <a href="market.html">市场与竞品</a>
@@ -29,6 +30,7 @@
 </header>
 
 <h2 id="gnss">IMU 智能打点：只用 3 轴加速度计决定什么时候开卫星定位 <span class="state ok">有方案、有数</span></h2>
+<p><a href="gnss.html">→ 专页：状态机图、真实一天的打点对比、板上怎么接</a></p>
 <p class="muted">定位分三种情况：在家连得上网关就用网关定位；户外主人手机在旁边就用手机；<b>狗独自外出、两样都连不上，只能靠卫星定位</b>。死板地定时打点很费电，狗在休息或在一小块地方转悠时还会打出一堆重复点。所以平时卫星定位关着，由加速度计判断「真的在走 / 跑、走出去了」才打一个点。</p>
 <div class="flow">
   <div class="step"><b>计步</b><span>|a| 去掉 1 秒慢基线，峰值 &gt; 60 mg、两步至少隔 0.25 s 记一步</span></div>
