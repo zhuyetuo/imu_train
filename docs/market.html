@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>市场与竞品</title>
+<link rel="stylesheet" href="site.css">
+<style>
+  /* 这一页专用：行为配色（跟波形图里的色块一一对应） */
+  :root{ --b-rest:#5b6b86; --b-walk:#7c9cff; --b-scr:#ff6b6b; --b-lick:#f2b84b; --b-shake:#3ccf8e; }
+  .stats{display:flex;flex-wrap:wrap;gap:12px;margin:18px 0 6px}
+  .stats div{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px}
+  .stats b{font-size:28px;color:var(--accent);font-variant-numeric:tabular-nums}
+  .stats i{font-style:normal;color:var(--accent);font-size:14px;margin-left:2px}
+  .stats span{display:block;color:var(--muted);font-size:13px}
+  .wave{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px 10px}
+  .wave svg{width:100%;height:auto;display:block}
+  .wave .ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:13px;color:var(--muted)}
+  .wave button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:2px 10px;cursor:pointer;font:inherit}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin:8px 0 0}
+  .legend span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px;background:var(--c)}
+  .zooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:12px}
+  .zoom{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .zoom h3{display:flex;align-items:center;gap:8px;font-size:15px}
+  .zoom h3::before{content:"";width:10px;height:10px;border-radius:2px;background:var(--c)}
+  .zoom p{margin:4px 0 0;color:var(--muted);font-size:13px}
+  .zoom svg{width:100%;height:auto;display:block;margin-top:4px}
+  .gens{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
+  .gens .card{flex:1 1 230px}
+  .gens .card.now{border-color:var(--accent)}
+  .gens .arrow{align-self:center;color:var(--muted)}
+  .tl{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:0 28px}
+  .tl ol{list-style:none;margin:0;padding:0}
+  .tl li{display:grid;grid-template-columns:78px 1fr;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+  .tl .yr{color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums}
+  .tl li.i .yr{color:var(--mid)}
+  .tl li span{color:var(--muted);font-size:13.5px;display:block}
+  .tag.inf{border-style:dashed}
+  tr.ours td{background:rgba(34,199,214,.08)}
+  .ds{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+  .ds .card h3 a{color:var(--text)}
+  .use{float:right;font-size:12px;padding:0 8px;border-radius:99px}
+  .use.h{background:rgba(60,207,142,.15);color:var(--ok)} .use.m{background:rgba(124,156,255,.15);color:var(--accent2)}
+  .use.l{background:var(--panel2);color:var(--muted)} .use.x{background:rgba(255,107,107,.15);color:var(--bad)}
+  .refs{display:flex;flex-wrap:wrap;gap:8px}
+  .refs a{font-size:13px;padding:2px 9px;border:1px solid var(--line);border-radius:5px}
+  @media (max-width:520px){ .tl{grid-template-columns:1fr} .tl li{grid-template-columns:64px 1fr} h1{font-size:24px} }
+</style>
+</head>
+<body>
+<nav class="top">
+  <span class="brand">狗狗皮肤评估</span>
+  <a href="index.html">总览</a>
+  <a href="behavior.html">① 行为识别</a>
+  <a href="skin.html">② 皮肤评估</a>
+  <a href="history.html">来时路</a>
+  <a href="landscape.html">业界进展</a>
+  <a href="market.html" class="on">市场与竞品</a>
+  <a href="ideas.html">想法清单</a>
+  <span class="sp"></span>
+  <a href="https://github.com/zhuyetuo/imu_train">代码仓库</a>
+</nav>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">行业调研 · 宠物可穿戴 · 数字截至 2026-11</div>
+  <h1>宠物项圈二十年：从「它在哪」到「它怎么了」</h1>
+  <p class="lead">这一页看市场：产品怎么一代代演进、别家做到哪一步、有哪些公开数据能用。模型和算法层面的对比在 <a href="landscape.html">业界进展</a>，我们自己的流程在 <a href="behavior.html">① 行为识别</a>。</p>
+  <div class="stats">
+    <div><b>20</b><i>年</i><span>从定位走到行为</span></div>
+    <div><b>3</b><i>代</i><span>定位 → 活动量 → 行为与生理</span></div>
+    <div><b>9</b><i>家</i><span>竞品拆解</span></div>
+    <div><b>88</b><i>%</i><span>我们抓挠片段命中 · 端侧 6 轴</span></div>
+  </div>
+</header>
+
+<h2 id="signal">一颗加速度计，怎么认出抓挠</h2>
+<p class="muted">项圈每秒采 20 次加速度。不同行为在波形上的「节律、幅度、持续多久」不一样，模型每次看 8 秒、每 1 秒往前挪一格，逐格给出判断，再连成一段段事件。下面是示意（合成数据，不是真实录音）。</p>
+<div class="wave">
+  <svg id="overview" viewBox="0 0 1000 250" role="img" aria-label="40 秒加速度示意波形：静止、走动、抓挠、舔、甩头，8 秒窗口从左往右滑动并给出判断"></svg>
+  <div class="legend">
+    <span style="--c:var(--b-rest)">静止 / 睡觉</span>
+    <span style="--c:var(--b-walk)">走动</span>
+    <span style="--c:var(--b-scr)">抓挠</span>
+    <span style="--c:var(--b-lick)">舔 / 啃</span>
+    <span style="--c:var(--b-shake)">甩头 / 抖身</span>
+  </div>
+  <div class="ctl"><button id="play" type="button">暂停</button><span>虚线框 = 模型这一次看的 8 秒；框上方是它的判断。</span></div>
+</div>
+<div class="zooms" id="zooms"></div>
+
+<h2 id="trend">三代产品</h2>
+<div class="gens">
+  <div class="card"><h3>第一代 · 定位</h3><p>Tractive · 早期 Whistle · Fi</p><p>GPS + 蜂窝，丢了找得回。</p></div>
+  <span class="arrow">→</span>
+  <div class="card"><h3>第二代 · 活动量</h3><p>FitBark · Whistle FIT</p><p>计步 / 睡眠 / 卡路里，学人的手环。</p></div>
+  <span class="arrow">→</span>
+  <div class="card now"><h3>第三代 · 行为与生理 <span class="state ok">现在</span></h3><p>Tractive 2025 · Invoxia · 国内新品</p><p>一颗加速度计读出抓挠、心率和异常，开始接兽医。</p></div>
+</div>
+
+<h2 id="history">行业二十年</h2>
+<p class="muted"><span style="color:var(--accent)">■</span> 学术　<span style="color:var(--mid)">■</span> 产业。我们自己项目的历程在 <a href="history.html">来时路</a>。</p>
+<div class="tl">
+<ol>
+  <li><div class="yr">2006</div><div><b>瘙痒监测起点</b><span>活动计第一次把「狗挠了多少」变成客观计数</span></div></li>
+  <li><div class="yr">2007</div><div><b>加速度计进兽医</b><span>活动量成为关节炎、药效评估的终点指标</span></div></li>
+  <li class="i"><div class="yr">2012</div><div><b>三条路线分开</b><span>PetPace 重体征、Whistle 重活动、Tractive 重定位</span></div></li>
+  <li><div class="yr">2013</div><div><b>犬行为识别开始</b><span>惯性数据 + 手工特征 + SVM，分出走跑坐躺</span></div></li>
+  <li class="i"><div class="yr">2013–14</div><div><b>FitBark 众筹</b><span>「狗的 Fitbit」，只做活动量和睡眠</span></div></li>
+  <li class="i"><div class="yr">2016</div><div><b>Mars 收购 Whistle</b><span>数据开始接通兽医体系</span></div></li>
+  <li class="i"><div class="yr">2017–18</div><div><b>Animo 上市</b><span>第一批标出抓挠、吠叫、甩动的消费级产品</span></div></li>
+  <li><div class="yr">2018</div><div><b>第一个公开基线</b><span>Vetrax 抓挠灵敏度 76.9%、特异度 99.7%</span></div></li>
+</ol>
+<ol>
+  <li class="i"><div class="yr">2019</div><div><b>Pet Insight 启动</b><span>数万只狗长期佩戴，行为关联就诊记录</span></div></li>
+  <li><div class="yr">2021</div><div><b>Whistle 深度学习</b><span>5000+ 段视频、1100 万狗·天真实世界验证</span></div></li>
+  <li><div class="yr">2021–22</div><div><b>公开六轴数据集</b><span>45 只狗 7 种行为：项圈 75%、胸背 91%</span></div></li>
+  <li class="i"><div class="yr">2022–24</div><div><b>Minitailz</b><span>项圈上测静息心率和呼吸</span></div></li>
+  <li><div class="yr">2023–24</div><div><b>BEBE 基准</b><span>自监督预训练胜出，标注少时收益最大</span></div></li>
+  <li class="i"><div class="yr">2025</div><div><b>定位厂转向健康</b><span>Tractive、Fi 先后加上心率和行为识别</span></div></li>
+  <li class="i"><div class="yr">2025.07</div><div><b>Whistle 宣布停服</b><span>8 月停服，用户并入 Tractive，先行者出局</span></div></li>
+  <li class="i"><div class="yr">2026</div><div><b>国内转向行为</b><span>情绪识别、健康日记成为新卖点</span></div></li>
+</ol>
+</div>
+
+<h2 id="rivals">竞品拆解</h2>
+<p class="muted">精度多为厂商自报，口径各不相同，只看方向。<span class="tag">公开</span> 是厂商或论文写明的；<span class="tag inf">推断</span> 是根据硬件和功能推的，没有官方证实。</p>
+<div class="scroll"><table>
+<tr><th>产品</th><th>识别 / 指标</th><th>技术做法</th><th>公开精度</th><th>商业模式 / 状态</th></tr>
+<tr><td><b>Whistle</b><br><span class="muted">三轴 · Mars Petcare</span></td><td>吃 / 喝 / 舔 / 挠 / 蹭 / 睡眠</td><td><span class="tag">深度学习 · 单项圈</span><span class="tag inf">云端推理为主</span></td><td>挠 ~0.87 灵敏<br>吃 0.988 / 喝 0.949</td><td><span class="state bad">已停服</span> 2025-08，并入 Tractive</td></tr>
+<tr><td><b>Fi Series 3+</b><br><span class="muted">加速度 + GPS</span></td><td>吠叫 / 舔 / 挠 / 吃 / 喝</td><td><span class="tag">AI 行为识别</span><span class="tag inf">端侧特征 + 云端分类</span></td><td>行为变化 80%（自报）</td><td>订阅约 $14/月</td></tr>
+<tr><td><b>Tractive DOG 6</b><br><span class="muted">加速度 + GPS</span></td><td>活动 / 睡眠 / 心率 / 呼吸</td><td><span class="tag">2025 加心率呼吸</span><span class="tag inf">静止时测心冲击</span></td><td>没见到公开验证</td><td>订阅；收编 Whistle</td></tr>
+<tr><td><b>Invoxia Minitailz</b><br><span class="muted">运动传感器（也有雷达的说法）</span></td><td>静息心率 / 呼吸 / 心律异常</td><td><span class="tag">运动传感器 + 深度学习</span></td><td>心率 99% / 呼吸 97%（报道）</td><td>$99 + $8.3/月</td></tr>
+<tr><td><b>PetPace 2.0</b><br><span class="muted">加速度 + 温度 + 心率</span></td><td>HRV / 呼吸 / 体温 / 疼痛评分</td><td><span class="tag">对标 Holter 验证</span></td><td>数字分散、量少</td><td>面向兽医，B2B2C</td></tr>
+<tr><td><b>Maven</b><br><span class="muted">夹在原项圈上的传感器</span></td><td>心率 / 呼吸 / 瘙痒 / 饮水</td><td><span class="tag">兽医远程监护</span><span class="tag inf">云端模型</span></td><td>没见到公开验证</td><td>$13.99/月，兽医渠道</td></tr>
+<tr><td><b>Sure Petcare Animo</b><br><span class="muted">三轴，无 GPS</span></td><td>抓挠 / 吠叫 / 甩动 / 睡眠</td><td><span class="tag inf">特征 + 浅层模型</span></td><td>无；吠叫漏检多</td><td>一次买断</td></tr>
+<tr><td><b>Halo Collar 4</b><br><span class="muted">GPS + 加速度</span></td><td>虚拟围栏 / 训练 / 活动</td><td><span class="tag">围栏 + 训练是核心</span><span class="tag inf">健康数据很浅</span></td><td>—</td><td>高价硬件 + 订阅</td></tr>
+<tr><td><b>国内新品</b><br><span class="muted">PAAAWOW · 娲宝等</span></td><td>行为 / 情绪 / 训练引导</td><td><span class="tag">大模型做解读</span><span class="tag inf">识别层未公开</span></td><td>没见到公开数字</td><td>硬件 + App，先出海众筹</td></tr>
+<tr class="ours"><td><b>我们</b><br><span class="muted">GR5515 / GR5513 · 3 或 6 轴</span></td><td>抓挠 / 甩头抖身 / 未佩戴 / 静止 + 皮肤评估</td><td><span class="tag">int8 CNN 端侧</span><span class="tag">动作门 + Viterbi</span><span class="tag">按片段评估</span></td><td>片段命中 88.3%<br>查准 90.2% · 0.59 误报/h</td><td>端侧推理 · 大模型 237 KB / 小模型 64 KB</td></tr>
+</table></div>
+<div class="note">我们的数字是 2026-11-18 的正式模型（6 轴，按天 × 项圈分组 5 折），负例时长 692 小时。之前首页写的 91.8% / 4–5 次每小时是在 58 小时负例上算的，负例多了 12 倍以后误报降到 0.59 次/小时、命中低了约 3 个点，两组数不能直接比。跟 Whistle / Vetrax 的逐项对比见 <a href="landscape.html#compare">业界进展 · 我们和他们比</a>。</div>
+
+<h2 id="datasets">公开数据集</h2>
+<p class="muted">公开数据里<b>没有带抓挠标注的狗 IMU</b>：能补的是抖身正样本、吃喝嗅这类难负样本，外加一套人类预训练权重。正样本只能自己采，这也是门槛。</p>
+<div class="ds">
+  <div class="card"><h3><a href="https://data.mendeley.com/datasets/mpph6bmn7g/1" target="_blank" rel="noopener">Marcato 2023</a><span class="use h">已并入训练</span></h3><p>42 只幼犬 · 颈 / 背 / 胸三处 · 抖身 41 段 · CC BY 4.0 · 123 MB</p><p>颈部那一路当项圈用，补抖身和姿态。</p></div>
+  <div class="card"><h3><a href="https://data.mendeley.com/datasets/vxhx934tbn/3" target="_blank" rel="noopener">Vehkaoja 2022</a><span class="use h">已并入训练</span></h3><p>45 只犬 · 项圈 + 胸背 · 嗅 917 / 吃 1463 / 喝 90 段 · CC BY 4.0 · 850 MB</p><p>嗅、吃、喝当难负样本，甩动补正样本。</p></div>
+  <div class="card"><h3><a href="https://github.com/earthspecies/BEBE" target="_blank" rel="noopener">BEBE 基准</a><span class="use m">可参考</span></h3><p>9 个物种 1654 小时 · 开放</p><p>自监督预训练和对照评测的基准。</p></div>
+  <div class="card"><h3><a href="https://github.com/OxWearables/ssl-wearables" target="_blank" rel="noopener">ssl-wearables</a><span class="use m">可参考</span></h3><p>70 万人·天预训练模型（UK Biobank）· 模型开源</p><p>人手腕的预训练权重，可以初始化我们的 CNN。</p></div>
+  <div class="card"><h3><a href="https://zenodo.org/records/4836665" target="_blank" rel="noopener">Whistle 2021 演示</a><span class="use l">参考</span></h3><p>7 段视频 + 同步曲线 + 模型输出 · CC BY 4.0 · 45 MB</p><p>看他们怎么界定行为，对齐标注规范。</p></div>
+  <div class="card"><h3><a href="https://zenodo.org/records/11904922" target="_blank" rel="noopener">Karimjee 2024</a><span class="use l">参考</span></h3><p>22 只犬 · 只公开汇总指标 · CC0</p><p>没有原始数据，借它的活动量指标。</p></div>
+  <div class="card"><h3><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5883579" target="_blank" rel="noopener">Vetrax / SensiML</a><span class="use x">不公开</span></h3><p>361 只狗 / 5000+ 段 · 需申请</p><p>拿不到，只能看论文里的数字。</p></div>
+</div>
+
+<h2 id="position">我们的位置</h2>
+<div class="cards">
+  <div class="card"><h3>端侧推理</h3><p>别家多数把原始数据传上云再判。我们在项圈上跑 int8 CNN：断网能用、省流量、原始数据不出设备。</p></div>
+  <div class="card"><h3>从行为走到皮肤</h3><p>业界基本只做到「抓挠趋势 + 提醒」。我们把行为、问卷、照片合起来给三档皮肤评估，这一步没有现成基准，只能靠兽医评级验证。</p></div>
+  <div class="card"><h3>瓶颈在数据</h3><p>45 只狗的公开数据里项圈比胸背低 16 个点，Whistle 几千只狗却说位置无影响——差的是数据量。我们现在最大的提升空间也在标注：「活动」里漏标的抓挠正在专项补查。</p></div>
+</div>
+
+<h2 id="refs">参考资料</h2>
+<div class="refs">
+  <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC8228965" target="_blank" rel="noopener">Chambers 2021, Animals</a>
+  <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC5883579" target="_blank" rel="noopener">Griffies 2018, BMC Vet Res</a>
+  <a href="https://data.mendeley.com/datasets/vxhx934tbn/3" target="_blank" rel="noopener">Vehkaoja 2022, Data in Brief</a>
+  <a href="https://doi.org/10.1371/journal.pone.0286311" target="_blank" rel="noopener">Marcato 2023, PLOS ONE</a>
+  <a href="https://arxiv.org/abs/2305.10740" target="_blank" rel="noopener">BEBE 基准 2024</a>
+  <a href="https://9to5google.com/2025/06/02/fi-launches-series-3-plus-collar/" target="_blank" rel="noopener">Fi Series 3 Plus 发布</a>
+  <a href="https://en.wikipedia.org/wiki/Tractive" target="_blank" rel="noopener">Tractive（Wiki）</a>
+  <a href="https://www.engadget.com/wearables/whistle-pet-trackers-are-shutting-down-next-month-212828325.html" target="_blank" rel="noopener">Whistle 停服（Engadget）</a>
+  <a href="https://www.macrumors.com/2024/01/08/ces-2024-invoxia-minitailz/" target="_blank" rel="noopener">Invoxia Minitailz（CES 2024）</a>
+  <a href="https://www.invoxia.com/blog/petcare/assessing-the-accuracy-of-the-invoxia-smart-dog-collar-on-a-large-scale-dataset/" target="_blank" rel="noopener">Invoxia 准确率说明</a>
+  <a href="https://www.dvm360.com/view/vet-grade-ai-powered-dog-collar" target="_blank" rel="noopener">PetPace（dvm360）</a>
+  <a href="https://maven.pet/dog-health-tracker/" target="_blank" rel="noopener">Maven</a>
+  <a href="https://www.preprints.org/manuscript/202306.0301" target="_blank" rel="noopener">Animo 预印本</a>
+  <a href="https://zenodo.org/records/11904922" target="_blank" rel="noopener">Karimjee 2024（Zenodo）</a>
+  <a href="https://zenodo.org/records/4836665" target="_blank" rel="noopener">Whistle 2021 演示（Zenodo）</a>
+  <a href="https://m.tech.china.com/articles/20260310/202603101822019.html" target="_blank" rel="noopener">国内市场（中华网 2026-03）</a>
+  <a href="https://news.pedaily.cn/20260821/136880.shtml" target="_blank" rel="noopener">国内项圈融资（投资界 2026-08）</a>
+</div>
+<p class="muted" style="font-size:13px;margin-top:12px">竞品功能以当期公开资料为准，可能已有更新。</p>
+
+</div>
+<script>
+(() => {
+  // ── 合成波形：确定性随机数，每次打开都一样 ──
+  let seed = 11;
+  const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280 - 0.5; };
+  const HZ = 20, T = 40;
+  // 每段：起止秒、行为、颜色变量、中文名
+  const SEGS = [
+    [0, 7, "rest", "静止"], [7, 14, "walk", "走动"], [14, 22, "scr", "抓挠"],
+    [22, 29, "lick", "舔"], [29, 30.5, "shake", "甩头"], [30.5, 40, "rest", "静止"],
+  ];
+  const COLOR = { rest: "var(--b-rest)", walk: "var(--b-walk)", scr: "var(--b-scr)", lick: "var(--b-lick)", shake: "var(--b-shake)" };
+  const segAt = (t) => SEGS.find((s) => t >= s[0] && t < s[1]) || SEGS[SEGS.length - 1];
+  // 加速度幅值偏离 1 g 的部分（单位 g）
+  function sig(t) {
+    const k = segAt(t)[2];
+    if (k === "rest") return rnd() * 0.012;
+    if (k === "walk") return 0.12 * Math.sin(2 * Math.PI * 1.9 * t) + 0.05 * Math.sin(2 * Math.PI * 3.8 * t) + rnd() * 0.04;
+    if (k === "scr") { const env = Math.min(1, (t - 14) / 0.6, (22 - t) / 0.6); return env * 0.42 * Math.sin(2 * Math.PI * 6.3 * t) + rnd() * 0.06; }
+    if (k === "lick") return 0.09 * Math.sin(2 * Math.PI * 2.4 * t + Math.sin(t * 1.3)) + rnd() * 0.06;
+    const u = t - 29; return 0.75 * Math.exp(-u * 2.2) * Math.sin(2 * Math.PI * 4.5 * u) + rnd() * 0.04;
+  }
+  const xs = [], ys = [];
+  for (let i = 0; i <= T * HZ; i++) { xs.push(i / HZ); ys.push(sig(i / HZ)); }
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+
+  // ── 总览图 ──
+  const svg = document.getElementById("overview");
+  const L = 46, R = 990, TOP = 46, H = 160, MID = TOP + H / 2, YS = 140; // 每 1 g 多少像素
+  const X = (t) => L + (t / T) * (R - L);
+  for (const [a, b, k, name] of SEGS) {
+    el("rect", { x: X(a), y: TOP, width: X(b) - X(a), height: H, fill: COLOR[k], "fill-opacity": 0.14 }, svg);
+    el("rect", { x: X(a), y: TOP + H + 4, width: X(b) - X(a) - 2, height: 6, rx: 2, fill: COLOR[k] }, svg);
+    if (b - a >= 3) el("text", { x: (X(a) + X(b)) / 2, y: TOP + H + 24, "text-anchor": "middle", fill: "var(--text)", "font-size": 13 }, svg, name);
+    else el("text", { x: (X(a) + X(b)) / 2, y: TOP + H + 24, "text-anchor": "middle", fill: "var(--text)", "font-size": 12 }, svg, name);
+  }
+  el("line", { x1: L, x2: R, y1: MID, y2: MID, stroke: "var(--line)" }, svg);
+  for (const g of [-0.5, 0.5]) {
+    el("line", { x1: L, x2: R, y1: MID - g * YS, y2: MID - g * YS, stroke: "var(--line)", "stroke-dasharray": "2 4" }, svg);
+    el("text", { x: L - 6, y: MID - g * YS + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }, svg, (g > 0 ? "+" : "") + g + "g");
+  }
+  el("text", { x: L - 6, y: MID + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }, svg, "0");
+  for (let t = 0; t <= T; t += 5) el("text", { x: X(t), y: TOP + H + 42, "text-anchor": "middle", fill: "var(--muted)", "font-size": 11 }, svg, t + " s");
+  const clampY = (v) => Math.max(TOP + 2, Math.min(TOP + H - 2, MID - v * YS));
+  // 波形按行为分段着色：一眼看出哪段是什么
+  for (const [a, b, k] of SEGS) {
+    const idx = xs.map((t, i) => i).filter((i) => xs[i] >= a && xs[i] <= b);
+    el("path", { d: idx.map((i, j) => `${j ? "L" : "M"}${X(xs[i]).toFixed(1)} ${clampY(ys[i]).toFixed(1)}`).join(""),
+                 fill: "none", stroke: COLOR[k], "stroke-width": 1.4, "stroke-linejoin": "round" }, svg);
+  }
+  el("text", { x: L, y: 16, fill: "var(--muted)", "font-size": 12 }, svg, "加速度幅值偏离 1 g 的部分 · 20 Hz · 合成示意");
+
+  // 8 秒滑动窗口 + 判断
+  const win = el("rect", { y: TOP - 4, height: H + 8, width: X(8) - X(0), fill: "none", stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "6 4", rx: 4 }, svg);
+  const tagBg = el("rect", { y: 22, height: 20, rx: 4, fill: "var(--panel2)", stroke: "var(--accent)" }, svg);
+  const tagTx = el("text", { y: 36, "font-size": 13, "font-weight": 700, fill: "var(--accent)" }, svg, "");
+  // 窗口判断 = 窗口里占比最多的行为；甩头只有 1.5 s，碰到就报（短动作靠后处理单独抓）
+  function judge(t0) {
+    const cover = {};
+    for (const [a, b, k, name] of SEGS) {
+      const o = Math.max(0, Math.min(b, t0 + 8) - Math.max(a, t0));
+      if (o > 0) cover[name] = (cover[name] || 0) + o;
+    }
+    if ((cover["甩头"] || 0) >= 0.8) return ["甩头", 0.6 + 0.3 * Math.min(1, cover["甩头"] / 1.5)];
+    delete cover["甩头"];
+    const [name, o] = Object.entries(cover).sort((p, q) => q[1] - p[1])[0];
+    return [name, 0.5 + 0.48 * (o / 8)];
+  }
+  const nameColor = { 静止: "var(--b-rest)", 走动: "var(--b-walk)", 抓挠: "var(--b-scr)", 舔: "var(--b-lick)", 甩头: "var(--b-shake)" };
+  function place(t0) {
+    win.setAttribute("x", X(t0));
+    const [name, p] = judge(t0);
+    tagTx.textContent = `判断：${name} ${(p * 100).toFixed(0)}%`;
+    tagTx.setAttribute("fill", nameColor[name]);
+    tagBg.setAttribute("stroke", nameColor[name]);
+    const w = tagTx.getComputedTextLength ? tagTx.getComputedTextLength() + 16 : 120;
+    const cx = Math.min(R - w, Math.max(L, (X(t0) + X(t0 + 8)) / 2 - w / 2));
+    tagBg.setAttribute("x", cx); tagBg.setAttribute("width", w); tagTx.setAttribute("x", cx + 8);
+  }
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let t0 = 14, playing = !reduce, last = null;
+  const btn = document.getElementById("play");
+  btn.textContent = playing ? "暂停" : "播放";
+  btn.onclick = () => { playing = !playing; btn.textContent = playing ? "暂停" : "播放"; last = null; if (playing) requestAnimationFrame(step); };
+  function step(ts) {
+    if (!playing) return;
+    if (last != null) t0 += ((ts - last) / 1000) * 2.4; // 每秒挪 2.4 s 信号
+    last = ts;
+    if (t0 > T - 8) t0 = 0;
+    place(t0);
+    requestAnimationFrame(step);
+  }
+  place(t0);
+  if (playing) requestAnimationFrame(step);
+
+  // ── 四个放大小图：各 2 秒，点表示采样点 ──
+  const ZOOMS = [
+    ["scr", "抓挠", 16.0, "节律最规整：每秒 5–8 下、幅度大，能连续好几秒。最好认，但舔 / 啃的快动作会冒充它。"],
+    ["lick", "舔 / 啃", 24.0, "幅度只有抓挠的三分之一左右，节律慢（2–3 下/秒）而且不齐。误报主要从这里来。"],
+    ["shake", "甩头 / 抖身", 29.0, "不到 2 秒的一次大尖峰，然后很快衰减。8 秒窗口里信号被稀释，容易漏。"],
+    ["walk", "走动", 9.0, "每秒约 2 步的起伏，幅度中等、很规律；跟抓挠比频率低一半以上。"],
+  ];
+  const box = document.getElementById("zooms");
+  for (const [k, name, a, text] of ZOOMS) {
+    const d = document.createElement("div");
+    d.className = "zoom"; d.style.setProperty("--c", COLOR[k]);
+    d.innerHTML = `<h3>${name}</h3>`;
+    const s = el("svg", { viewBox: "0 0 240 96", role: "img", "aria-label": `${name} 2 秒放大波形` }, d);
+    const zx = (t) => 6 + ((t - a) / 2) * 228, zm = 48, zs = 52;
+    el("line", { x1: 6, x2: 234, y1: zm, y2: zm, stroke: "var(--line)" }, s);
+    const pts = [];
+    for (let i = 0; i < xs.length; i++) if (xs[i] >= a && xs[i] <= a + 2) pts.push([zx(xs[i]), Math.max(4, Math.min(92, zm - ys[i] * zs))]);
+    el("path", { d: pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(""), fill: "none", stroke: COLOR[k], "stroke-width": 2 }, s);
+    for (const p of pts) el("circle", { cx: p[0], cy: p[1], r: 2, fill: COLOR[k] }, s);
+    el("text", { x: 234, y: 92, "text-anchor": "end", fill: "var(--muted)", "font-size": 10 }, s, "2 s · 40 个点");
+    const p = document.createElement("p"); p.textContent = text; d.appendChild(p);
+    box.appendChild(d);
+  }
+})();
+</script>
+</body>
+</html>
