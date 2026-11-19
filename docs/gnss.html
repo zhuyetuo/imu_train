@@ -8,21 +8,30 @@
 <style>
   :root{ --f-dep:#3ccf8e; --f-mov:#22c7d6; --f-arr:#f2b84b; --f-hb:#8fa0bd; --mv:#7c9cff; }
   .scene{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-  .scene .card.me{border-color:var(--accent)}
-  .scene .card b.k{display:block;font-size:13px;color:var(--muted);font-weight:400}
+  .scene .card{text-align:center}
+  .scene .card .ico{font-size:30px;line-height:1.2}
+  .scene .card.me{border-color:var(--accent);background:rgba(34,199,214,.07)}
+  .scene .card.dim{opacity:.6}
   .stats{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}
-  .stats div{flex:1 1 180px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px}
-  .stats b{font-size:26px;color:var(--accent);font-variant-numeric:tabular-nums}
-  .stats i{font-style:normal;color:var(--accent);font-size:14px;margin-left:2px}
+  .stats div{flex:1 1 200px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .stats b{font-size:30px;color:var(--accent);font-variant-numeric:tabular-nums}
+  .stats b.bad{color:var(--bad)}
+  .stats i{font-style:normal;color:var(--muted);font-size:14px;margin-left:4px}
   .stats span{display:block;color:var(--muted);font-size:13px}
   .fig{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px 10px;margin:12px 0}
   .fig svg{width:100%;height:auto;display:block}
+  .cap{color:var(--muted);font-size:13px;margin:6px 2px 0}
   .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:8px}
-  .legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:0;background:var(--c)}
+  .legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:var(--c)}
   .legend span.bar::before{border-radius:2px;width:14px}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .steps{display:flex;gap:8px;align-items:stretch;flex-wrap:wrap;margin:10px 0 4px}
+  .steps div{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;text-align:center}
+  .steps b{display:block;color:var(--accent);font-size:15px}
+  .steps span{color:var(--muted);font-size:13px}
+  .steps .arr{flex:0 0 auto;align-self:center;background:none;border:none;color:var(--muted);padding:0}
   pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow:auto;font-size:13px;line-height:1.55;color:var(--text)}
-  td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
-  td.good{color:var(--ok)} td.bad{color:var(--bad)} td.mid{color:var(--mid)}
+  ol.road li span{display:block}
 </style>
 </head>
 <body>
@@ -42,133 +51,95 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">专项 · IMU 智能控制开启定位 · 更新于 2026-11-19</div>
-  <h1>狗独自在外面时，什么时候该开卫星定位</h1>
-  <p class="lead">卫星定位（GNSS）是项圈上最耗电的部件之一。定时打点又费电、又打出一堆重复点。这一页的做法：<strong>平时卫星定位关着，只用一颗 3 轴加速度计判断狗是不是真的走出去了，需要时才开一次。</strong></p>
+  <div class="eyebrow">专项 · IMU 智能控制开启定位 · 2026-11-19</div>
+  <h1>狗在走，才开卫星定位</h1>
+  <p class="lead">卫星定位最耗电。平时关着，<strong>只用 3 轴加速度计</strong>看狗是不是走出去了，需要时才打一个点。</p>
 </header>
 
-<h2 id="scene">三种定位场景，这一页管第三种</h2>
+<h2 id="scene">用在哪</h2>
 <div class="scene">
-  <div class="card"><b class="k">在家</b><h3>网关定位</h3><p>连得上家里的网关就用网关，不开卫星。屋里卫星信号也进不来。</p></div>
-  <div class="card"><b class="k">户外，主人在旁边</b><h3>手机定位</h3><p>连得上主人手机，就借手机的位置。</p></div>
-  <div class="card me"><b class="k">狗独自外出 · 网关和手机都连不上</b><h3>只能靠卫星 <span class="state ok">这一页</span></h3><p>由加速度计决定什么时候开卫星打一个点。</p></div>
+  <div class="card dim"><div class="ico">🏠</div><h3>在家</h3><p>用网关定位</p></div>
+  <div class="card dim"><div class="ico">📱</div><h3>主人在旁边</h3><p>用手机定位</p></div>
+  <div class="card me"><div class="ico">🐕</div><h3>独自外出</h3><p>只能靠卫星 → <b>这一页</b></p></div>
 </div>
 
-<h2 id="why">为什么不能定时打点</h2>
+<h2 id="why">定时打点有多浪费</h2>
 <div class="stats">
-  <div><b>288</b><i>个/天</i><span>每 5 分钟打一个点</span></div>
-  <div><b>50</b><i>mAh/天</i><span>每 5 分钟一个点的 GNSS 耗电（估算）</span></div>
-  <div><b>13</b><i>分钟/天</i><span>狗场的狗一天平均只在走这么久（戴着约 23 小时）</span></div>
-  <div><b>14.5</b><i>个/天</i><span>智能打点（省电档）中位数</span></div>
-</div>
-<p class="muted">狗大部分时间在睡、在趴着、在原地转悠，这时候打的点几乎都落在同一个地方，全是浪费。真正需要追的只有它走出去的那十几二十分钟。</p>
-
-<h2 id="how">怎么做</h2>
-<div class="flow">
-  <div class="step"><b>① 计步</b><span>|a| 去掉 1 秒慢基线；峰值 &gt; 60 mg、两步至少隔 0.25 秒记一步。抓挠每秒 5–8 下，峰挤在一起，大部分不会被当成步子</span></div>
-  <div class="step"><b>② 在走 / 跑</b><span>最近 4 秒有 5–18 步，而且节奏均匀（步间隔变异 ≤45%）</span></div>
-  <div class="step"><b>③ 持续移动</b><span>最近 15 秒里至少 10 秒在走 / 跑。抖一下身、喝两口水不算</span></div>
-  <div class="step"><b>④ 打点</b><span>出发 · 移动中 · 到达 · 保底，四个时机，见下图</span></div>
-  <div class="step"><b>⑤ 压徘徊</b><span>打完点回传实际挪了多远：总在原地转，就把打点间隔放大，最多 4 倍</span></div>
+  <div><b>13</b><i>分钟</i><span>狗一天真正在走的时间</span></div>
+  <div><b class="bad">288</b><i>个点</i><span>每 5 分钟打一个，大多落在原地</span></div>
+  <div><b>14.5</b><i>个点</i><span>智能打点（省电档），省 95%</span></div>
 </div>
 
+<h2 id="how">怎么判断</h2>
+<div class="steps">
+  <div><b>数步子</b><span>每一步一个小峰</span></div><div class="arr">→</div>
+  <div><b>在走 / 跑</b><span>4 秒 5–18 步，节奏均匀</span></div><div class="arr">→</div>
+  <div><b>持续在走</b><span>15 秒里 ≥10 秒</span></div><div class="arr">→</div>
+  <div><b>打点</b><span>出发 · 移动中 · 到达 · 保底</span></div>
+</div>
 <div class="fig">
-<svg viewBox="0 0 1000 320" role="img" aria-label="打点状态机：静止、待出发、移动中，四种打点时机">
+<svg viewBox="0 0 1000 300" role="img" aria-label="打点状态机">
   <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
-  <g font-size="15" text-anchor="middle">
-    <rect x="40" y="110" width="200" height="80" rx="14" fill="var(--panel2)" stroke="var(--line)"/>
-    <text x="140" y="145" fill="var(--text)" font-weight="700">静止 / 原地</text><text x="140" y="170" fill="var(--muted)" font-size="13">卫星关着</text>
-    <rect x="400" y="110" width="200" height="80" rx="14" fill="var(--panel2)" stroke="var(--line)"/>
-    <text x="500" y="145" fill="var(--text)" font-weight="700">刚动起来</text><text x="500" y="170" fill="var(--muted)" font-size="13">先估算走出多远</text>
-    <rect x="760" y="110" width="200" height="80" rx="14" fill="var(--panel2)" stroke="var(--accent)"/>
-    <text x="860" y="145" fill="var(--text)" font-weight="700">移动中</text><text x="860" y="170" fill="var(--muted)" font-size="13">按距离 / 时间打点</text>
+  <g font-size="16" text-anchor="middle">
+    <rect x="40" y="100" width="200" height="76" rx="14" fill="var(--panel2)" stroke="var(--line)"/>
+    <text x="140" y="134" fill="var(--text)" font-weight="700">静止 / 原地</text><text x="140" y="158" fill="var(--muted)" font-size="13">卫星关着</text>
+    <rect x="400" y="100" width="200" height="76" rx="14" fill="var(--panel2)" stroke="var(--line)"/>
+    <text x="500" y="134" fill="var(--text)" font-weight="700">刚动起来</text><text x="500" y="158" fill="var(--muted)" font-size="13">先看走出多远</text>
+    <rect x="760" y="100" width="200" height="76" rx="14" fill="var(--panel2)" stroke="var(--accent)"/>
+    <text x="860" y="134" fill="var(--text)" font-weight="700">移动中</text><text x="860" y="158" fill="var(--muted)" font-size="13">按距离 / 时间打点</text>
   </g>
   <g fill="none" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#ar)">
-    <path d="M240 140 L398 140"/>
-    <path d="M600 140 L758 140"/>
-    <path d="M860 192 C860 300 140 300 140 192"/>
-    <path d="M860 108 C900 40 960 60 940 108"/>
-    <path d="M110 108 C80 40 30 60 60 108"/>
-    <path d="M500 192 C500 230 300 230 200 192"/>
+    <path d="M240 138 L398 138"/><path d="M600 138 L758 138"/>
+    <path d="M860 178 C860 280 140 280 140 178"/>
+    <path d="M500 178 C500 215 300 215 205 178"/>
+    <path d="M860 98 C900 30 960 50 940 98"/><path d="M110 98 C80 30 30 50 60 98"/>
   </g>
-  <g font-size="13" fill="var(--muted)" text-anchor="middle">
-    <text x="320" y="128">持续移动 ≥10/15 秒</text><text x="320" y="160" font-size="12">（静止过 1 分钟才算出发）</text>
-    <text x="680" y="128" fill="var(--f-dep)" font-weight="700">● 出发点</text><text x="680" y="160" font-size="12">走出 N 米（省电 20 m）</text>
-    <text x="500" y="308" fill="var(--f-arr)" font-weight="700">● 到达点：停下 60 秒，且上个点之后走了 ≥N 米</text>
-    <text x="925" y="40" fill="var(--f-mov)" font-weight="700">● 移动中</text><text x="925" y="58" font-size="12">每 N 米或每 T 秒</text>
-    <text x="70" y="40" fill="var(--f-hb)" font-weight="700">● 保底</text><text x="70" y="58" font-size="12">很久不动补一个</text>
-    <text x="350" y="242" font-size="12">没走出 N 米就停了（笼子里起身走两步）：不打点</text>
+  <g font-size="14" text-anchor="middle">
+    <text x="320" y="126" fill="var(--muted)">持续在走</text>
+    <text x="680" y="126" fill="var(--f-dep)" font-weight="700">● 出发</text><text x="680" y="158" fill="var(--muted)" font-size="12">走出 20 m</text>
+    <text x="925" y="26" fill="var(--f-mov)" font-weight="700">● 移动中</text><text x="925" y="44" fill="var(--muted)" font-size="12">每 100 m / 5 分钟</text>
+    <text x="70" y="26" fill="var(--f-hb)" font-weight="700">● 保底</text><text x="70" y="44" fill="var(--muted)" font-size="12">4 小时不动</text>
+    <text x="350" y="232" fill="var(--muted)" font-size="12">走两步就停：不打</text>
+    <text x="500" y="294" fill="var(--f-arr)" font-weight="700">● 到达：停下 1 分钟</text>
   </g>
 </svg>
+<p class="cap">图上是省电档的数。打完点回传实际挪了多远，一直在原地转就自动把间隔放大（最多 4 倍）。</p>
 </div>
 
-<h2 id="day">真实的一天：三档各打了多少点</h2>
-<p class="muted" id="daycap"></p>
-<div class="fig"><svg id="dayfig" viewBox="0 0 1000 330" role="img" aria-label="一只狗一天里每分钟走动的秒数，以及三档智能打点和每 5 分钟固定打点的时刻"></svg>
+<h2 id="day">真实的一天</h2>
+<div class="fig"><svg id="dayfig" viewBox="0 0 1000 330" role="img" aria-label="一只狗一天的走动和打点时刻"></svg>
   <div class="legend">
-    <span class="bar" style="--c:var(--mv)">这一分钟走了几秒</span>
+    <span class="bar" style="--c:var(--mv)">走动（秒/分钟）</span>
     <span style="--c:var(--f-dep)">出发</span><span style="--c:var(--f-mov)">移动中</span>
     <span style="--c:var(--f-arr)">到达</span><span style="--c:var(--f-hb)">保底</span>
   </div>
+  <p class="cap" id="daycap"></p>
 </div>
-<p class="muted">每 5 分钟固定打点那一行是密密一排，几乎全落在狗不动的时候；智能打点都挤在它真正走动的几段里。</p>
 
-<h2 id="presets">打点密度可调，默认省电</h2>
-<p class="muted">有的用户只想知道狗大概去了哪；有的想看它在小公园里怎么跑。在 App 里给一个开关，三档：</p>
-<div class="scroll"><table>
-<tr><th>档位</th><th>出发 / 每隔多远 / 最长多久 / 到达 / 保底</th><th>每天打点（中位）</th><th>GNSS 耗电（估算）</th><th>两点间最长漏追</th></tr>
-<tr><td><b>省电（默认）</b><br><span class="muted">只看大概去了哪</span></td><td>走出 20 m / 100 m / 5 分钟 / 20 m / 4 小时</td><td class="num"><b>14.5</b> 个</td><td class="num"><b>2.2 mAh</b></td><td class="num">约 96 m</td></tr>
-<tr><td><b>标准</b></td><td>10 m / 50 m / 2 分钟 / 10 m / 2 小时</td><td class="num">29.5 个</td><td class="num">3.3 mAh</td><td class="num">约 51 m</td></tr>
-<tr><td><b>精细</b><br><span class="muted">看小公园里怎么跑</span></td><td>0 / 15 m / 30 秒 / 5 m / 1 小时</td><td class="num">83.5 个</td><td class="num">7.4 mAh</td><td class="num">约 17 m</td></tr>
-<tr><td class="muted">对照：每 5 分钟一个</td><td>—</td><td class="num">288 个</td><td class="num">50 mAh</td><td class="num">最长 377 m</td></tr>
-<tr><td class="muted">对照：每 10 分钟一个</td><td>—</td><td class="num">144 个</td><td class="num">25 mAh</td><td class="num">最长 665 m</td></tr>
-</table></div>
-<div class="note">数字来自狗场 36 个狗·天的真实全天数据（2026-10-27 ~ 11-01，6 只狗，只用加速度 3 轴）。「最长漏追」是两个点之间按步数估算走过的最远距离。耗电按「离上次定位 &lt;5 分钟热启动 5 s、&lt;4 小时温启动 25 s、更久 35 s，25 mA」估算，换成实际模组手册的数会变。</div>
+<h2 id="presets">三档可调，默认省电</h2>
+<div class="two">
+  <div class="fig"><svg id="barFix" viewBox="0 0 480 190" role="img" aria-label="每天打点数"></svg></div>
+  <div class="fig"><svg id="barGap" viewBox="0 0 480 190" role="img" aria-label="两点之间最长漏追距离"></svg></div>
+</div>
+<p class="cap">省电：只看大概去了哪 · 标准 · 精细：看小公园里怎么跑。狗场 36 个狗·天真实数据模拟；耗电按常见模组估算（省电档约 2.2 mAh/天，每 5 分钟一个约 50 mAh/天）。</p>
 
-<h2 id="check">认得准不准</h2>
-<p class="muted">计步和「在走 / 跑」的判断，在 Vehkaoja 2022 公开数据集（颈部项圈，带行为标注）上逐秒验证，加上「15 秒里 10 秒」的持续规则：</p>
-<div class="scroll"><table>
-<tr><th>真实行为</th><th>被判成在走 / 跑</th><th>说明</th></tr>
-<tr><td>小跑</td><td class="num good">96.2%</td><td rowspan="3">真在移动，该打点</td></tr>
-<tr><td>走</td><td class="num good">91.2%</td></tr>
-<tr><td>奔跑</td><td class="num good">85.2%</td></tr>
-<tr><td>嗅闻 / 玩耍</td><td class="num mid">83% / 79%</td><td>多半是边走边嗅、跑着玩，本来就在挪地方</td></tr>
-<tr><td>趴 / 坐 / 站 / 喘气</td><td class="num good">2.5% / 1.7% / 5.2% / 3.6%</td><td>原地不动的，基本不会误开</td></tr>
-<tr><td>进食</td><td class="num mid">13.8%</td><td rowspan="3">原地但节律像走路，偏高；时间都短，靠「走出 N 米才打」挡掉</td></tr>
-<tr><td>饮水</td><td class="num bad">69.8%</td></tr>
-<tr><td>抖身</td><td class="num bad">62.3%</td></tr>
-</table></div>
-<p class="muted">板上的 C 实现跟 Python 版逐秒对拍，一致 98.9%。</p>
+<h2 id="check">认得准吗</h2>
+<div class="fig"><svg id="barAcc" viewBox="0 0 1000 300" role="img" aria-label="各种行为被判成在走的比例"></svg>
+<p class="cap">公开数据集（颈部项圈）逐秒验证。喝水、抖身偏高，但都很短，「走出 20 m 才打」能挡掉。板上 C 版跟 Python 版逐秒一致 98.9%。</p></div>
 
-<h2 id="board">板上怎么接</h2>
-<p class="muted">纯整数运算、没有 malloc，一个状态结构体约 200 字节。代码在 <a href="https://github.com/zhuyetuo/imu_train/tree/main/experiments/claude_2026_11/gnss">experiments/claude_2026_11/gnss/</a>（<code>gnss_trigger.c / .h</code>）。</p>
-<pre><code>gt_state_t st;
-gt_init(&amp;st, GT_PRESET_SAVE);              // 默认省电；App 里切档就调 gt_set_preset
+<h2 id="board">板上三行接入</h2>
+<pre><code>gt_init(&amp;st, GT_PRESET_SAVE);        // 默认省电，App 切档调 gt_set_preset
+gt_feed(&amp;st, ax, ay, az);            // 每个加速度样本（20 Hz，mg）
+if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
+    gnss_fix_once();                 // （网关、手机都连不上时）</code></pre>
+<p class="cap">纯整数、无 malloc。代码：<a href="https://github.com/zhuyetuo/imu_train/tree/main/experiments/claude_2026_11/gnss">experiments/claude_2026_11/gnss/</a></p>
 
-// 加速度计 20 Hz 回调（单位 mg）
-gt_feed(&amp;st, ax, ay, az);
-
-// 每秒一次
-gt_reason_t r = gt_tick(&amp;st);              // GT_DEPART / GT_MOVING / GT_ARRIVE / GT_HEARTBEAT
-if (r != GT_NONE &amp;&amp; !gateway_ok() &amp;&amp; !phone_ok()) {
-    gnss_fix_once();                        // 网关、手机都连不上才开卫星
-}
-
-// 打完点（可选）：告诉它跟上一个点实际差多远，用来压「原地徘徊」
-gt_on_fix(&amp;st, moved_m);</code></pre>
-
-<h2 id="todo">还没定的</h2>
+<h2 id="todo">还要定的</h2>
 <ol class="road">
-  <li><b>每步多少米</b> <span>现在按 60 cm 估。要拿真实 GNSS 轨迹标定，不同体型的狗可能要分档。</span></li>
-  <li><b>耗电</b> <span>换成实际定位模组的手册数字（启动时间、电流），再算一遍。</span></li>
-  <li><b>户外数据</b> <span>狗场的狗一天只走十几分钟。要补真实遛狗 / 独自外出的数据，看户外打点数和漏追距离。</span></li>
-  <li><b>喝水、抖身误开</b> <span>现在靠「走出 N 米」挡；如果户外数据里还多，再加一条「步子要有向前的规律」。</span></li>
+  <li><b>每步几米</b><span>现在按 60 cm，要用真实 GNSS 轨迹标定</span></li>
+  <li><b>真实耗电</b><span>换成实际定位模组的数</span></li>
+  <li><b>户外数据</b><span>补遛狗 / 独自外出的数据再验一遍</span></li>
 </ol>
-
-<section class="more">
-  <a href="ideas.html#gnss">想法清单 →<span>这件事在想法清单里的位置</span></a>
-  <a href="behavior.html">① 行为识别 →<span>同一颗加速度计还在认抓挠、舔、甩头</span></a>
-</section>
 
 </div>
 <script>
@@ -176,32 +147,56 @@ gt_on_fix(&amp;st, moved_m);</code></pre>
   const D = {"day":"2026_10_29","dog":"IMU17+IMU18","moving_min":21.1,"m":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,8,11,2,9,0,14,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,0,46,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,13,0,22,0,0,15,23,0,14,8,24,8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,5,0,0,0,0,0,0,0,0,0,0,0,0,3,3,0,21,0,0,0,0,0,0,0,3,19,54,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,5,10,0,0,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,0,0,0,8,0,4,29,4,0,0,0,0,16,0,12,4,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,2,6,3,0,0,22,1,0,6,12,4,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,5,6,0,0,0,5,6,0,9,0,0,0,0,12,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,24,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,1,0,0,0,0,0,0,0,0,0,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,13,18,6,0,0,0,0,0,2,9,6,15,0,7,0,0,0,0,0,0,0,0,0,0,0,4,4,8,43,38,2,5,3,36,24,0,0,8,0,10,0,0,0,5,13,5,0,0,0,0,0,11,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,12,25,8,22,0,31,45,9,0,0,0,0,0,13,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"p":{"省电":[[1,"h"],[9468,"d"],[12210,"d"],[12306,"a"],[17738,"d"],[17937,"d"],[18023,"a"],[24453,"m"],[24562,"d"],[25123,"d"],[25208,"a"],[39608,"h"],[40412,"d"],[54812,"h"],[58779,"m"],[64010,"d"],[68181,"d"],[69599,"d"],[71914,"d"],[73533,"d"],[73581,"a"],[73838,"d"],[73907,"a"],[74497,"m"],[75935,"d"],[76161,"d"],[76282,"a"]],"标准":[[1,"h"],[7201,"h"],[9436,"d"],[9517,"a"],[9671,"m"],[9798,"d"],[12051,"d"],[12201,"d"],[12241,"m"],[17605,"d"],[17730,"d"],[17805,"a"],[17931,"d"],[18023,"a"],[18103,"d"],[18250,"m"],[23581,"d"],[24453,"m"],[24553,"d"],[24626,"a"],[25115,"d"],[25173,"m"],[25208,"a"],[28945,"d"],[36145,"h"],[40383,"d"],[40468,"a"],[40749,"d"],[40898,"d"],[41074,"d"],[48274,"h"],[54175,"d"],[56572,"d"],[56780,"d"],[58779,"m"],[62736,"d"],[63975,"d"],[64047,"a"],[68171,"d"],[68207,"a"],[69589,"d"],[69660,"a"],[71905,"d"],[71930,"a"],[72520,"d"],[73526,"d"],[73562,"m"],[73804,"d"],[73869,"m"],[74188,"d"],[74497,"m"],[74919,"d"],[75031,"d"],[75902,"d"],[75952,"a"],[76072,"m"],[76154,"d"],[76239,"m"],[76282,"a"],[76673,"d"],[83873,"h"]],"精细":[[1,"h"],[3023,"d"],[3088,"a"],[6688,"h"],[9429,"d"],[9441,"m"],[9472,"m"],[9502,"m"],[9517,"a"],[9589,"m"],[9631,"m"],[9671,"m"],[9790,"d"],[9833,"m"],[10038,"d"],[12017,"d"],[12047,"m"],[12092,"a"],[12193,"d"],[12206,"m"],[12218,"m"],[12229,"m"],[12244,"m"],[15844,"h"],[17598,"d"],[17670,"a"],[17724,"d"],[17735,"m"],[17925,"d"],[17935,"m"],[17945,"m"],[17955,"m"],[18023,"a"],[18097,"d"],[18147,"m"],[18182,"m"],[18207,"m"],[18250,"m"],[18312,"m"],[21912,"h"],[23562,"d"],[23634,"a"],[24378,"d"],[24434,"m"],[24546,"d"],[24560,"m"],[24626,"a"],[25072,"d"],[25110,"m"],[25122,"m"],[25145,"m"],[25165,"m"],[25176,"m"],[25188,"m"],[25208,"a"],[25356,"d"],[25423,"a"],[26215,"d"],[26285,"a"],[28825,"d"],[28905,"d"],[28940,"m"],[28979,"a"],[29381,"d"],[29451,"a"],[33051,"h"],[36651,"h"],[37761,"d"],[37829,"a"],[39968,"d"],[40212,"d"],[40244,"m"],[40376,"d"],[40387,"m"],[40417,"m"],[40468,"a"],[40740,"d"],[40792,"m"],[40890,"d"],[40948,"m"],[41068,"d"],[41140,"a"],[42458,"d"],[45799,"d"],[49399,"h"],[52404,"d"],[54165,"d"],[54235,"a"],[54345,"d"],[56160,"d"],[56234,"d"],[56324,"d"],[56376,"m"],[56537,"d"],[56568,"m"],[56619,"a"],[56742,"d"],[56775,"m"],[56819,"a"],[56876,"d"],[58672,"d"],[58702,"m"],[58779,"m"],[58987,"d"],[59059,"d"],[59205,"d"],[59273,"a"],[59470,"d"],[59541,"a"],[59591,"d"],[62729,"d"],[62741,"m"],[63961,"d"],[63998,"m"],[64018,"m"],[67618,"h"],[68121,"d"],[68168,"m"],[68182,"m"],[69582,"d"],[69595,"m"],[70257,"d"],[71840,"d"],[71877,"m"],[71907,"m"],[71930,"a"],[71969,"m"],[72302,"d"],[72367,"d"],[72437,"d"],[72514,"d"],[72588,"a"],[72643,"d"],[73376,"d"],[73443,"a"],[73464,"d"],[73517,"m"],[73531,"m"],[73541,"m"],[73553,"m"],[73581,"a"],[73597,"m"],[73610,"m"],[73678,"d"],[73797,"d"],[73811,"m"],[73841,"m"],[73852,"m"],[73864,"m"],[73908,"m"],[74076,"d"],[74143,"a"],[74176,"d"],[74245,"a"],[74429,"d"],[74497,"m"],[74536,"m"],[74906,"d"],[74976,"a"],[75023,"d"],[75095,"a"],[75856,"d"],[75902,"m"],[75933,"m"],[75952,"a"],[75995,"m"],[76038,"m"],[76068,"m"],[76147,"d"],[76158,"m"],[76169,"m"],[76201,"m"],[76216,"m"],[76242,"m"],[76255,"m"],[76301,"m"],[76665,"d"],[76699,"m"],[80299,"h"],[83899,"h"]]}};
   const NS = "http://www.w3.org/2000/svg";
   const el = (t, a, p, txt) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; if (p) p.appendChild(e); return e; };
-  const day = D.day.replace(/_/g, "-");
-  const tot = (k) => D.p[k].length;
+  // ── 一天 ──
   document.getElementById("daycap").textContent =
-    day + "，" + D.dog + "（狗场，戴了一整天，走动约 " + Math.round(D.moving_min) + " 分钟，在 36 个狗·天里偏活跃）。"
-    + "这一天：省电 " + tot("省电") + " 个点、标准 " + tot("标准") + " 个、精细 " + tot("精细") + " 个；每 5 分钟固定打点是 288 个。";
+    D.day.replace(/_/g, "-") + " · " + D.dog + " · 走了约 " + Math.round(D.moving_min) + " 分钟。固定打点几乎全落在它没动的时候；智能打点只在它走动时出现。";
   const svg = document.getElementById("dayfig");
   const L = 92, R = 985, X = (s) => L + (s / 86400) * (R - L);
-  // 顶部：每分钟走了几秒
   const top = 20, H = 80;
-  el("text", { x: L - 8, y: top + 12, "text-anchor": "end", fill: "var(--muted)", "font-size": 12 }, svg, "走动");
+  el("text", { x: L - 8, y: top + H / 2 + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 13 }, svg, "走动");
   el("line", { x1: L, x2: R, y1: top + H, y2: top + H, stroke: "var(--line)" }, svg);
   D.m.forEach((v, i) => { if (v) el("rect", { x: X(i * 60), y: top + H - (v / 60) * H, width: Math.max(1, X(60) - X(0)), height: (v / 60) * H, fill: "var(--mv)" }, svg); });
-  el("text", { x: L - 8, y: top + H, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }, svg, "秒/分");
-  // 四行打点
   const C = { d: "var(--f-dep)", m: "var(--f-mov)", a: "var(--f-arr)", h: "var(--f-hb)" };
   const rows = [["省电", D.p["省电"]], ["标准", D.p["标准"]], ["精细", D.p["精细"]], ["每 5 分钟", Array.from({ length: 288 }, (_, i) => [i * 300, "f"])]];
   rows.forEach(([name, pts], r) => {
     const y = top + H + 40 + r * 44;
     el("line", { x1: L, x2: R, y1: y, y2: y, stroke: "var(--line)" }, svg);
-    el("text", { x: L - 8, y: y + 4, "text-anchor": "end", fill: "var(--text)", "font-size": 13, "font-weight": r < 3 ? 700 : 400 }, svg, name);
-    el("text", { x: R, y: y - 10, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }, svg, pts.length + " 个");
-    for (const [t, k] of pts) el("circle", { cx: X(t), cy: y, r: k === "f" ? 2.2 : 4, fill: k === "f" ? "var(--muted)" : C[k], "fill-opacity": k === "f" ? 0.7 : 0.95 }, svg);
+    el("text", { x: L - 8, y: y + 5, "text-anchor": "end", fill: r === 3 ? "var(--muted)" : "var(--text)", "font-size": 14, "font-weight": r === 0 ? 700 : 400 }, svg, name);
+    el("text", { x: R, y: y - 10, "text-anchor": "end", fill: r === 3 ? "var(--bad)" : "var(--muted)", "font-size": 12 }, svg, pts.length + " 个");
+    for (const [t, k] of pts) el("circle", { cx: X(t), cy: y, r: k === "f" ? 2.2 : 4.2, fill: k === "f" ? "var(--bad)" : C[k], "fill-opacity": k === "f" ? 0.55 : 0.95 }, svg);
   });
-  // 时间轴
-  const yb = top + H + 40 + 3 * 44 + 26;
-  for (let h = 0; h <= 24; h += 3) el("text", { x: X(h * 3600), y: yb, "text-anchor": "middle", fill: "var(--muted)", "font-size": 11 }, svg, h + ":00");
+  const yb = top + H + 40 + 3 * 44 + 28;
+  for (let h = 0; h <= 24; h += 3) el("text", { x: X(h * 3600), y: yb, "text-anchor": "middle", fill: "var(--muted)", "font-size": 12 }, svg, h + ":00");
+
+  // ── 横条图 ──
+  function bars(id, title, items, max, unit) {
+    const s = document.getElementById(id), L2 = 96, W = 480 - L2 - 60;
+    el("text", { x: 0, y: 18, fill: "var(--text)", "font-size": 15, "font-weight": 700 }, s, title);
+    items.forEach(([name, v, color, bold], i) => {
+      const y = 38 + i * 36;
+      el("text", { x: L2 - 10, y: y + 15, "text-anchor": "end", fill: bold ? "var(--text)" : "var(--muted)", "font-size": 13, "font-weight": bold ? 700 : 400 }, s, name);
+      el("rect", { x: L2, y, width: Math.max(2, (v / max) * W), height: 22, rx: 4, fill: color }, s);
+      el("text", { x: L2 + Math.max(2, (v / max) * W) + 6, y: y + 16, fill: "var(--text)", "font-size": 13 }, s, v + unit);
+    });
+  }
+  bars("barFix", "每天打几个点", [["省电", 14.5, "var(--accent)", 1], ["标准", 29.5, "var(--accent2)"], ["精细", 83.5, "var(--accent2)"], ["每 5 分钟", 288, "var(--bad)"]], 288, " 个");
+  bars("barGap", "两点间最长漏追", [["省电", 96, "var(--accent)", 1], ["标准", 51, "var(--accent2)"], ["精细", 17, "var(--accent2)"], ["每 5 分钟", 377, "var(--bad)"]], 377, " m");
+
+  // ── 准确率 ──
+  const A = [["小跑", 96.2, "go"], ["走", 91.2, "go"], ["奔跑", 85.2, "go"], ["嗅闻（边走边嗅）", 82.8, "mv"], ["趴", 2.5, "st"], ["坐", 1.7, "st"], ["站", 5.2, "st"], ["进食", 13.8, "cf"], ["饮水", 69.8, "cf"], ["抖身", 62.3, "cf"]];
+  const col = { go: "var(--ok)", mv: "var(--accent2)", st: "var(--muted)", cf: "var(--mid)" };
+  const s = document.getElementById("barAcc"), L3 = 150, W3 = 1000 - L3 - 70;
+  el("text", { x: 0, y: 18, fill: "var(--text)", "font-size": 15, "font-weight": 700 }, s, "被判成「在走」的比例");
+  [["该开", "go"], ["其实在挪", "mv"], ["原地，不该开", "st"], ["原地但像在走", "cf"]].forEach(([t, k], i) => {
+    el("rect", { x: 330 + i * 160, y: 6, width: 12, height: 12, rx: 2, fill: col[k] }, s);
+    el("text", { x: 348 + i * 160, y: 17, fill: "var(--muted)", "font-size": 13 }, s, t);
+  });
+  A.forEach(([name, v, k], i) => {
+    const y = 34 + i * 26;
+    el("text", { x: L3 - 10, y: y + 14, "text-anchor": "end", fill: "var(--text)", "font-size": 13 }, s, name);
+    el("rect", { x: L3, y, width: Math.max(2, (v / 100) * W3), height: 18, rx: 3, fill: col[k] }, s);
+    el("text", { x: L3 + Math.max(2, (v / 100) * W3) + 6, y: y + 14, fill: "var(--text)", "font-size": 13 }, s, v + "%");
+  });
 })();
 </script>
 </body>
