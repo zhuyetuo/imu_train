@@ -1094,6 +1094,16 @@ def main(a):
                 holdout = te
             print(f"  交叉验证 {k + 1}/{folds}", flush=True)
         pred = proba.argmax(1)
+        # TRAIN_V2_DUMP_OOF=<文件.npz>：把交叉验证里每个验证窗口的预测存下来（查误报 / 漏报用）。
+        # seg 是窗口所属片段在 segs 里的下标，片段信息（csv / 起止 / 标签 / 数据集）一起存成 json
+        dump = os.environ.get("TRAIN_V2_DUMP_OOF")
+        if dump:
+            np.savez_compressed(dump, proba=proba.astype(np.float32), y=y_ev, seg=np.asarray(seg_ev),
+                                classes=np.array(classes), stride_s=S / hz, window_s=W / hz)
+            with open(dump + ".segs.json", "w", encoding="utf-8") as f:
+                json.dump([{k: s_.get(k) for k in ("csv", "start_ms", "end_ms", "name", "coarse", "leaf", "sample_code", "dataset")}
+                           for s_ in segs], f, ensure_ascii=False)
+            print(f"▶ 交叉验证逐窗预测存到 {dump}", flush=True)
     else:
         print("  ⚠ 只有一组数据，没法分组交叉验证，指标留空")
         pred = None
