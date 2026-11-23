@@ -23,7 +23,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">第一步 · 行为识别 · 更新于 2026-11-18</div>
+  <div class="eyebrow">第一步 · 行为识别 · 更新于 2026-11-23</div>
   <h1>从项圈 IMU 里认出抓挠、舔、甩头、吃喝和休息</h1>
   <p class="lead">项圈里有一颗 6 轴 IMU（加速度 + 陀螺仪）。这一步的输出是一串<strong>行为事件</strong>（几点几分、抓了多久、多大把握），交给第二步皮肤评估去算“这只狗今天抓得正不正常”。核心是<strong>把抓挠找准，同时把误报压低</strong>：误报会直接把皮肤评分抬高。</p>
 </header>
@@ -32,24 +32,66 @@
 <div class="flow">
   <div class="step"><b>① 采集</b><span>项圈 IMU 20 Hz，6 轴；同时录视频当“答案”</span></div>
   <div class="step"><b>② 标注平台</b><span>视频 + 波形对齐标片段；模型先给疑似片段，人来确认</span></div>
-  <div class="step"><b>③ 训练</b><span>8 秒窗口；按“天 × 项圈”分组 5 折，防止同一只狗同一天泄漏</span></div>
+  <div class="step"><b>③ 训练</b><span>4 秒窗口、0.5 秒步长（端侧现有版本 8 秒）；按“天 × 项圈”分组 5 折，防止同一只狗同一天泄漏</span></div>
   <div class="step"><b>④ 后处理</b><span>动作门 + Viterbi 平滑，把逐窗结果连成事件</span></div>
   <div class="step"><b>⑤ 端侧导出</b><span>int8 1D-CNN，导出 C 数组进固件</span></div>
   <div class="step"><b>⑥ 服务端</b><span>XGB / CNN 推理服务，给平台打候选、给 App 复核</span></div>
 </div>
-<div class="note">评估口径：<b>片段级</b>——人工标的一段抓挠，模型只要在里面报出来就算“命中”；模型报了但人工没有，就算“误报”，按每小时次数统计。这比逐窗准确率更接近用户真实感受。</div>
+
+<h2 id="eval">评估指标：窗口级、片段级、事件级</h2>
+<p>行为识别同时是两件事：<b>逐窗分类</b>（这 4 秒是抓挠还是活动？）和<b>时间序列分割</b>（抓挠从几点到几点？）。前者衡量“看得准不准”，后者衡量“切得对不对”。所以评估分三层，缺一层都会得出错误结论。</p>
+
+<div class="scroll"><table>
+<tr><th>口径</th><th>怎么算</th><th>学术界对应</th><th>产业界对应</th><th>我们现在的数（4 s / 0.5 s CNN）</th></tr>
+<tr>
+<td><b>窗口级</b><br><span class="muted">window-level</span></td>
+<td>每个滑窗一个样本，跟人标的类别比。常用 accuracy、每类 P / R / F1、macro-F1、混淆矩阵。切分必须按“天 × 项圈”分组，否则同一只狗同一天相邻窗口漏进测试集，数字虚高。</td>
+<td>时间序列分类（UCR / UEA 基准）默认 accuracy；类别不平衡时看 macro-F1 / balanced accuracy / Cohen's κ</td>
+<td>端侧监控单类召回（防某类突然塌）、模型回归对比；不直接当产品验收线</td>
+<td>accuracy 0.877 · macro-F1 0.685<br>抓挠 P 0.855 / R 0.854 / F1 0.854</td>
+</tr>
+<tr>
+<td><b>片段级（宽松）</b><br><span class="muted">segment-level</span></td>
+<td>以人标的每一段为单位：这段所有窗口的概率取平均再判类，主类判对就算整段对。召回 = 判对的真值段 / 真值段；查准 = 判对的段 / 被判成该类的真值段。只统计人标过的段，模型多报的段不进入这个口径。</td>
+<td>state / segment 分类准确率；回答“这一段属不属于抓挠”，不考边界</td>
+<td>与历史版本、平台展示对齐（用户看到的是“这段是什么”）</td>
+<td>F1 0.939 · 查全 0.903 / 查准 0.978<br>佛山 0.936 / 影棚 0.959 / 深圳 0.938</td>
+</tr>
+<tr>
+<td><b>事件级（严格）</b><br><span class="muted">event / range-level</span></td>
+<td>后处理后的预测段跟人标段同类 + IoU ≥ 0.5 才算命中，一对一贪心匹配（一个真值只配一个预测）。查全 = 命中真值段 / 真值段；查准 = 命中预测段 / 全部预测段（多报、切碎、边界差都扣分）。另报整段有重叠率、每小时误报、起止误差、每文件次数差，并按场地 / 段长分桶。</td>
+<td>事件检测：pyannote.metrics 的 Detection（1-to-1 匹配 + IoU 阈值）；TimeEval / dtaianomaly 的 range-based P/R；tsseg-eval（NeurIPS'25）的 WARI / SMS，专门指出 ARI、逐点指标无法反映分割质量</td>
+<td>穿戴设备验收常用 episode 灵敏度 / 阳性预测值、每天（小时）误报次数、检测延迟（心律失常、癫痫、睡眠分期都这么做）</td>
+<td>查全 0.646 · 查准 0.470 · F1 0.544<br>整段有重叠 0.892 · 误报 6.19 次/h · 起止误差 0.57 / 0.85 s</td>
+</tr>
+</table></div>
+
+<div class="note">
+<b>三者关系：</b>窗口级是“零件”，片段级是“装配对不对”，事件级才是“用户拿到的那一串事件准不准”。同一份模型：窗口抓挠 F1 0.854 → 宽松片段 F1 0.939 → 事件 F1 0.544。后两个不矛盾：宽松口径只回答“有没有抓到”，事件口径还要求起止对、时长对、不多报。产品验收和对外承诺用<b>事件级</b>；宽松口径只用于跟历史版本对齐。
+</div>
+
+<div class="note">
+<b>评估的已知局限：</b>
+① 滑窗重叠（4 s 窗 / 0.5 s 步 = 8 倍重叠），窗口之间高度相关，窗口级数字天然偏乐观，所以不作为验收线；
+② 数据池是稀疏标注（每个文件只标约 0.8% 的时间）：按“标了别的类的时间”算的每小时误报是下限；事件查准则把所有预测都放进分母，落在未标时间的预测也会拉低查准，所以查准偏保守；
+③ 人标边界本身有 1 秒左右误差，IoU 0.5 对 2 秒的段非常苛刻；
+④ 交叉验证按“天 × 项圈”分组，但跟现场分布仍有差异（影棚争议），所以指标要按场地拆开、并配合失败样本回放。
+</div>
+
+<p class="muted">工具参考：<a href="https://github.com/pyannote/pyannote-metrics">pyannote-metrics</a>（Detection）、<a href="https://github.com/TimeEval/timeeval">TimeEval</a>（range-based）、<a href="https://github.com/ML-KULeuven/dtaianomaly">dtaianomaly</a>、<a href="https://github.com/fchavelli/tsseg-eval">tsseg-eval</a>（WARI / SMS）、<a href="https://github.com/fchavelli/tsseg">tsseg</a>。实现：<code>src/ml/train_v2.py</code> 的 <code>segment_metrics()</code>。</p>
 
 <h2 id="modules">算法模块和进展</h2>
 <div class="cards">
 
   <div class="card">
     <h3>抓挠识别<span class="state ok">可用，在打磨</span></h3>
-    <div class="big">91.8% <small>片段命中（6 轴 端侧 CNN）</small></div>
-    <p>查准约 94–95%，误报约 4–5 次/小时。</p>
+    <div class="big">91.8% <small>片段命中（6 轴端侧 CNN · 8 s 窗）</small></div>
+    <p>查准约 94–95%，误报约 4–5 次/小时（均为宽松片段口径）。</p>
     <ul>
       <li>3 轴版本（只用加速度）：87.3%</li>
       <li>服务端 XGB：92.0%，但误报约 8 次/小时</li>
       <li>加了公开狗数据集一起训，稳定了 1–2 个点</li>
+      <li>4 s / 0.5 s 新版：宽松片段 F1 0.939；按事件口径（IoU≥0.5）F1 0.544，<a href="#eval">口径见上</a></li>
     </ul>
   </div>
 
