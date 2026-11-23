@@ -91,3 +91,26 @@ footer{color:var(--muted);font-size:13px;border-top:1px solid var(--line);margin
 #toc a.on{color:var(--accent);border-left-color:var(--accent)}
 @media (min-width:1400px){#toc{display:block}}
 @media (max-width:640px){.wrap{padding:18px 16px 40px}h1{font-size:24px}nav.top{padding:8px 16px;gap:12px}}
+
+/* 图示与交互图 */
+figure.fig{margin:16px 0;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+figure.fig svg{display:block;width:100%;height:auto}
+figure.fig svg text{font:12px -apple-system,"Segoe UI","PingFang SC",sans-serif;fill:var(--muted)}
+figure.fig svg .ttl{font-size:13px;fill:var(--text)}
+figure.fig svg .small{font-size:11px}
+figure.fig figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+figure.fig figcaption b{color:var(--text)}
+.ctl{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin:12px 0 6px}
+.ctl label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.ctl input[type=range]{width:130px;accent-color:var(--accent)}
+.ctl output{color:var(--text);font-variant-numeric:tabular-nums;min-width:46px;text-align:right}
+.ctl .btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:3px 10px;font:inherit;font-size:13px;cursor:pointer}
+.ctl .btn:hover{border-color:var(--accent);color:var(--accent)}
+.ctl .btn.on{color:var(--accent);border-color:var(--accent)}
+.readout{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:10px}
+.readout b{color:var(--text);font-variant-numeric:tabular-nums}
+.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:99px;font-weight:600}
+.pill.ok{background:rgba(60,207,142,.16);color:var(--ok)}
+.pill.bad{background:rgba(255,107,107,.16);color:var(--bad)}
+.figlegend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:6px}
+.figlegend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
