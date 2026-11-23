@@ -669,7 +669,7 @@ def _to_device_normalized(X: np.ndarray, idx: np.ndarray, mu, sd, dev, chunk: in
 
 def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int, seed: int = 0, idx=None):
     """X: [N, T, C] 原始窗口（inv 通道），y: 归并后的类别（对应 X[idx]）。idx 是训练用的那部分窗口（交叉验证的训练折），
-    省掉先切一份副本。训练数据整份放显存（放不下才放内存）。返回 (网络（cpu、eval）, ch_mean, ch_std)"""
+    省掉先切一份副本。训练数据整份放显存（放不下才放内存）。返回 (网络（cpu、eval）, ch_mean, ch_std, 每轮曲线)"""
     import torch
     import torch.nn as nn
 
@@ -693,26 +693,36 @@ def fit_cnn(X: np.ndarray, y: np.ndarray, n_classes: int, cfg: dict, epochs: int
     nb = (len(y) + bs - 1) // bs
     sch = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-3, total_steps=max(1, epochs * nb))
     shift = max(1, X.shape[1] // 10)
-    for _ in range(epochs):
+    # 每轮的平均 loss / 训练准确率，平台「训练曲线」画这个：不额外跑前向，
+    # 直接拿训练时每个 batch 的统计累加，几乎不花时间
+    hist: list[dict] = []
+    for ep in range(epochs):
         net.train()
         perm = torch.randperm(len(y), device=Xt.device)
+        tot, hit, seen = 0.0, 0, 0
         for b in range(nb):
             ix = perm[b * bs:(b + 1) * bs]
             xb = Xt[ix].to(dev)
             # 增强：幅度缩放、小噪声、整体平移（窗口里动作出现的位置不固定）
             xb = xb * (1 + 0.1 * torch.randn(len(ix), 1, 1, device=dev)) + 0.02 * torch.randn_like(xb)
             xb = torch.roll(xb, int(rng.integers(-shift, shift + 1)), 2)
-            loss = lossf(net(xb), yt[ix].to(dev))
+            logits = net(xb)
+            loss = lossf(logits, yt[ix].to(dev))
             opt.zero_grad()
             loss.backward()
             opt.step()
             sch.step()
+            tot += float(loss) * len(ix)
+            hit += int((logits.argmax(1) == yt[ix]).sum())
+            seen += len(ix)
+        hist.append({"epoch": ep + 1, "loss": round(tot / max(1, seen), 4),
+                     "train_acc": round(hit / max(1, seen), 4)})
     if int(cfg.get("qat_epochs") or 0) > 0:
         _qat_finetune(net, Xt, yt, lossf, dev, int(cfg["qat_epochs"]), rng, shift)
     del Xt, yt
     if dev == "cuda":
         torch.cuda.empty_cache()
-    return net.cpu().eval(), mu.astype(np.float64), sd.astype(np.float64)
+    return net.cpu().eval(), mu.astype(np.float64), sd.astype(np.float64), hist
 
 
 def cnn_proba(net, mu, sd, X: np.ndarray) -> np.ndarray:
@@ -916,6 +926,35 @@ def _group_of(sample_code: str) -> str:
     return f"{day.group(1) if day else '?'}_{imu.group(0).lower() if imu else sample_code}"
 
 
+# 抓挠按场地分开看。训练数据混了公司影棚 / 深圳雷诺 / 佛山博朗旺几个场地，
+# 同一个模型在不同场地的实际表现差得很远；合在一起的 P/R/F1 会被样本多的
+# 那个场地盖住，看不出「佛山很准、影棚几乎判不出来」这种情况。
+# 场地从 CSV 路径认：采集端从 2026-10 起把场地写进日期目录
+# （2026_11_16_bolangwang / _yingpeng），深圳那段是 _gouchang。
+# 7~9 月的老目录还没有后缀，那时只在影棚采，按影棚算；公开数据集不是场地数据，不算。
+SITE_NAMES = {"bolangwang": "佛山博朗旺", "yingpeng": "公司影棚", "gouchang": "深圳雷诺"}
+
+
+def _site_of_csv(p: str) -> str | None:
+    low = (p or "").lower()
+    if "bolangwang" in low or "博朗旺" in low:
+        return "bolangwang"
+    if "gouchang" in low or "雷诺" in low:
+        return "gouchang"
+    if "yingpeng" in low or "影棚" in low:
+        return "yingpeng"
+    if "public_datasets" in low:
+        return None
+    return "yingpeng"
+
+
+def _prf(rec: float | None, pre: float | None) -> float | None:
+    """查全 / 查准 → F1；两边都缺（这一类在这个场地没有样本）就是 None"""
+    if rec is None or pre is None or rec + pre <= 0:
+        return None
+    return round(2 * rec * pre / (rec + pre), 3)
+
+
 def main(a):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -1046,12 +1085,15 @@ def main(a):
     proba = np.zeros((len(y_ev), len(classes)))
     seg_files: list[dict] = []
     holdout = None
+    # 每折的成绩 + CNN 的逐轮曲线，平台「训练曲线」看收敛过程
+    curves: dict = {"folds": []}
     if folds >= 2:
         cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=0)
         # CNN 不算手工特征（F_ev 是 None）：分折只看标签和分组，X 用个占位
         for k, (_, te) in enumerate(cv.split(F_ev if F_ev is not None else np.zeros((len(y_ev), 1)), y_ev, g_ev)):
             test_g = set(g_ev[te])
             tr = ~np.isin(g_tr, list(test_g))
+            fold_hist = None
             def _feats(Xraw):
                 if kind == "cnn":
                     return _map_inv_chunked(Xraw), None
@@ -1063,8 +1105,8 @@ def main(a):
                     p_ = xgb_proba(m, mc, F_, len(classes)) * scale[None, :]
                     return p_ / p_.sum(1, keepdims=True)
             elif kind == "cnn":
-                net, mu, sd = fit_cnn(Xtr_m, back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k,
-                                      idx=np.flatnonzero(tr))
+                net, mu, sd, fold_hist = fit_cnn(Xtr_m, back_arr[yf_tr[tr]], len(classes), cnn_cfg, cnn_epochs, seed=k,
+                                                 idx=np.flatnonzero(tr))
                 def _pred(Xm_, F_, net=net, mu=mu, sd=sd):
                     p_ = cnn_proba(net, mu, sd, Xm_) * scale[None, :]
                     return apply_motion_gate(p_ / p_.sum(1, keepdims=True), motion_of(Xm_), gate)
@@ -1073,6 +1115,14 @@ def main(a):
                 def _pred(Xm_, F_, m=m):
                     return m.predict_proba(F_)
             proba[te] = _pred(Xev_m[te], F_ev[te] if F_ev is not None else None)
+            if len(te):
+                pred_te = proba[te].argmax(1)
+                curves["folds"].append({
+                    "fold": k + 1,
+                    "accuracy": round(float((pred_te == y_ev[te]).mean()), 4),
+                    "macro_f1": round(float(f1_score(y_ev[te], pred_te, average="macro", zero_division=0)), 4),
+                    **({"history": fold_hist} if fold_hist else {}),
+                })
             # 片段级（后处理之后）：这一折留出的文件，在标注范围内连续推理
             for p_csv, tl in tls.items():
                 ss = by_csv.get(p_csv) or []
@@ -1123,7 +1173,8 @@ def main(a):
         yc = back_arr[yf_tr]
         if len(set(yc.tolist())) != len(classes):
             sys.exit(f"全部数据里缺类别 {[classes[i] for i in set(range(len(classes))) - set(yc.tolist())]}")
-        model, ch_mean, ch_std = fit_cnn(Xtr_m, yc, len(classes), cnn_cfg, cnn_epochs, seed=0)
+        model, ch_mean, ch_std, final_hist = fit_cnn(Xtr_m, yc, len(classes), cnn_cfg, cnn_epochs, seed=0)
+        curves["final"] = final_hist
         model = bake_cnn_scale(model, scale)
         n_nodes = int(sum(p.numel() for p in model.parameters()))
         print(f"▶ 全量训练完成：1D-CNN {cnn_cfg}，{n_nodes} 个参数（int8 ≈ {n_nodes / 1024:.0f} KB）", flush=True)
@@ -1165,6 +1216,8 @@ def main(a):
         # 静止 / 活动按动作强度重新分（窗口级指标按改过的标签算；片段级指标仍按人标的片段）
         "still_motion_g": still_g, "still_by_motion": still_info,
         "cv": f"按（天, 项圈）分组 {folds} 折" if pred is not None else None,
+        # 逐折成绩（准确率 / macro-F1）；CNN 还有每折、全量训练的逐轮 loss 与训练准确率
+        "curves": curves,
         # 主数据集（标注平台上点「用它训练」的那份，一般标得最干净）：列表上的各类 F1 默认看它
         "main_dataset": spec["datasets"][0]["name"],
     }
@@ -1188,8 +1241,9 @@ def main(a):
         print(f"  片段级（后处理后）：{result['postprocess_segments']}", flush=True)
         if "抓挠" in classes:
             k = classes.index("抓挠")
-            result["scratch_segments"] = {"recall": round(float((sp[sy == k] == k).mean()), 3) if (sy == k).any() else None,
-                                          "precision": round(float((sy[sp == k] == k).mean()), 3) if (sp == k).any() else None}
+            rec = round(float((sp[sy == k] == k).mean()), 3) if (sy == k).any() else None
+            pre = round(float((sy[sp == k] == k).mean()), 3) if (sp == k).any() else None
+            result["scratch_segments"] = {"recall": rec, "precision": pre, "f1": _prf(rec, pre)}
         # 分数据集看：老数据标得粗（整夜一段的睡觉、抓挠间隙标成活动），混在一起的总分会被拉低
         ds_of = np.array([segs[s]["dataset"] for s in seg_ev])
         result["per_dataset"] = {}
@@ -1222,11 +1276,42 @@ def main(a):
                   + (f"  抓挠按次数 查全 {sc['recall']} 查准 {sc['precision']}" if sc.get("recall") is not None else "")
                   + f"  {r['n']:>7} 窗")
             print("      " + "  ".join(f"{k} {v:.2f}" for k, v in r["f1"].items()))
+        # 抓挠按场地：佛山 / 影棚 / 深圳（分开看，别被样本多的场地盖住）
+        site_ev = np.array([_site_of_csv(segs[s]["csv"]) or "" for s in seg_ev])
+        site_su = np.array([_site_of_csv(segs[x]["csv"]) or "" for x in su])
+        result["per_site"] = {}
+        for key, cn in SITE_NAMES.items():
+            mk, sm = site_ev == key, site_su == key
+            if not mk.any():
+                continue
+            pr_ = sorted(set(y_ev[mk]))
+            rep_s = classification_report(y_ev[mk], pred[mk], labels=pr_, target_names=[classes[i] for i in pr_],
+                                          zero_division=0, output_dict=True)
+            row = {"name": cn, "n_windows": int(mk.sum()), "n_segments": int(sm.sum()),
+                   "macro_f1": round(float(f1_score(y_ev[mk], pred[mk], labels=pr_, average="macro")), 4),
+                   "per_class": {classes[i]: {m: round(rep_s[classes[i]][m], 4) for m in ("precision", "recall", "f1-score")}
+                                 for i in pr_}}
+            if "抓挠" in classes and sm.any():
+                k = classes.index("抓挠")
+                t_, p_ = sy[sm], sp[sm]
+                rec = round(float((p_[t_ == k] == k).mean()), 3) if (t_ == k).any() else None
+                pre = round(float((t_[p_ == k] == k).mean()), 3) if (p_ == k).any() else None
+                row["scratch_segments"] = {"recall": rec, "precision": pre, "f1": _prf(rec, pre),
+                                           "n_gt": int((t_ == k).sum()), "n_pred": int((p_ == k).sum())}
+            result["per_site"][key] = row
+        print("\n  ── 抓挠按场地（按片段；合计看上面）──")
+        for key, r in result["per_site"].items():
+            sc = r.get("scratch_segments")
+            if sc is None:
+                continue
+            print(f"  {r['name']:<8} 查全 {sc['recall']}  查准 {sc['precision']}  F1 {sc['f1']}"
+                  f"  人标 {sc['n_gt']} 段 / 模型报 {sc['n_pred']} 段")
         print("\n" + classification_report(y_ev, pred, labels=present, target_names=[classes[i] for i in present],
                                            zero_division=0, digits=3))
         print(text)
         print(f"  （以上是全部数据集合在一起）片段级 macro F1 {result['segment_macro_f1']}" +
               (f"；抓挠按段 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
+               f" F1 {result['scratch_segments']['f1']}"
                if "scratch_segments" in result else ""))
     if kind == "cnn":
         # 跟 src/dl/train.py 同一套产物：dl_cnn_best.pt（state_dict）+ dl_cnn_best.json（推理元数据）
