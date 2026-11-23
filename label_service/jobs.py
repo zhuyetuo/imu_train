@@ -646,9 +646,12 @@ async def run_job(job_id: int) -> None:
             # start_new_session：自己一个进程组。脚本会再拉起一堆 python，
             # 「带合成」那一版还是后台 & 跑的——要停就得整组一起停，只杀 bash
             # 那一个的话，孩子们照样在后台吃 CPU、往目录里写文件
+            # 主进程为了不占显存把 INFER_FORCE_CPU 设成了 1（见 app.py），训练要用
+            # GPU（也顺带让训练后的回放走 GPU），这里必须去掉——不然每版都拿 CPU 训
+            _env = {k: v for k, v in os.environ.items() if k != "INFER_FORCE_CPU"}
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=config.REPO_ROOT, stdout=log_f, stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1", **train_env()},
+                env={**_env, "PYTHONUNBUFFERED": "1", **train_env()},
                 start_new_session=True,
                 preexec_fn=_lower_priority,
             )

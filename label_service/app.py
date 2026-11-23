@@ -47,6 +47,14 @@ from label_service.registry import DEFAULT_TAG, registry  # noqa: E402
 _bundle: dict = {}      # 主进程只留元数据（health 用），真正推理在 pool 的 worker 进程里
 _pool = None
 
+# 这个 API 进程**永远不跑模型**：推理在 worker 进程里（pool 自己会设 INFER_FORCE_CPU
+# 走 CPU），训练是子进程。但启动时和首次用到某个模型时（registry.get）都会
+# load_model_bundle 一下只为读元数据，默认会挑 CUDA 并把权重搬上显存，父进程
+# 从此常驻一个 ~500MB 的 CUDA context，权重下一行就 pop 了，纯属白占
+# （2026-11-23 实测 nvidia-smi 里就这一个 python 占着 500MiB，释放后整卡 18MiB）。
+# 训练子进程需要 GPU，jobs.py 起子进程时会把这一项从环境里去掉
+os.environ["INFER_FORCE_CPU"] = "1"
+
 
 def _warm_skin_ml():
     try:
