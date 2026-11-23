@@ -931,6 +931,45 @@ def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
     return out
 
 
+def add_gap_negatives(segs: list[dict], cfg: dict, scratch: str = "抓挠", neg: str = "活动") -> int:
+    """每个文件标注范围内的空档 → 「活动」伪片段（pseudo=True）。返回加了多少段"""
+    m_scr = float(cfg.get("margin_scr", 30)) * 1000
+    m_any = float(cfg.get("margin_any", 2)) * 1000
+    min_len = float(cfg.get("min_len", 8)) * 1000
+    ratio = float(cfg.get("max_ratio", 1.0))
+    by: dict[str, list[dict]] = {}
+    for x in segs:
+        if x.get("start_ms") is not None and x.get("end_ms") is not None:
+            by.setdefault(x["csv"], []).append(x)
+    add = []
+    for csv, ss in by.items():
+        lo, hi = min(x["start_ms"] for x in ss), max(x["end_ms"] for x in ss)
+        block = sorted([(x["start_ms"] - m_any, x["end_ms"] + m_any) for x in ss] +
+                       [(x["start_ms"] - m_scr, x["end_ms"] + m_scr) for x in ss if x["coarse"] == scratch])
+        gaps, cur = [], lo
+        for a, b in block:
+            if a > cur:
+                gaps.append((cur, min(a, hi)))
+            cur = max(cur, b)
+        if cur < hi:
+            gaps.append((cur, hi))
+        gaps = [(a, b) for a, b in gaps if b - a >= min_len]
+        budget = ratio * sum(x["end_ms"] - x["start_ms"] for x in ss)
+        ref = ss[0]
+        for a, b in gaps:
+            if budget <= 0:
+                break
+            b = min(b, a + budget)
+            if b - a < min_len:
+                break
+            budget -= b - a
+            add.append({**{k: ref.get(k) for k in ("csv", "sample_code", "dataset", "source_hz")},
+                        "start_ms": a, "end_ms": b, "start": None, "end": None,
+                        "name": neg, "coarse": neg, "leaf": "未标时间", "pseudo": True})
+    segs.extend(add)
+    return len(add)
+
+
 def window_phys(Xraw: np.ndarray, hz: float) -> np.ndarray:
     """每窗物理特征（跟 label_service/pool.py 的质量门限同口径）：[模长均值, 陀螺仪模长 std, 加速度模长 2–10 Hz 节律占比]。
     3 轴数据陀螺仪那一列是 NaN"""
@@ -1090,6 +1129,9 @@ def main(a):
     segs = collect_segments(spec["datasets"], spec["nas_root"], remap, classes, fine)
     if not segs:
         sys.exit("没有可训练的片段：检查类别归并表")
+    if spec.get("gap_negatives"):
+        n_gap = add_gap_negatives(segs, spec["gap_negatives"])
+        print(f"▶ 未标时间当负例：加了 {n_gap} 段「活动」伪片段（{spec['gap_negatives']}）", flush=True)
     for i, s in enumerate(segs):
         s["idx"] = i
     names = list(classes) + sorted({s["name"] for s in segs} - set(classes))
@@ -1228,8 +1270,9 @@ def main(a):
                                      "fold": k, "t0": tl["t0"].isoformat(), "starts": np.asarray(st_c, np.int32),
                                      "P": P_c.astype(np.float16), "phys": window_phys(Xc, hz).astype(np.float16),
                                      "segs": [(s_["start_ms"] / 1000, s_["end_ms"] / 1000, s_["coarse"], s_.get("name"), s_.get("leaf"))
-                                              for s_ in ss if s_.get("start_ms") is not None]})
-                hs = [(s["start_ms"] / 1000, s["end_ms"] / 1000, s["coarse"]) for s in ss if s.get("start_ms") is not None]
+                                              for s_ in ss if s_.get("start_ms") is not None and not s_.get("pseudo")]})
+                hs = [(s["start_ms"] / 1000, s["end_ms"] / 1000, s["coarse"]) for s in ss
+                      if s.get("start_ms") is not None and not s.get("pseudo")]
                 seg_files.append({"site": _site_of_csv(p_csv) or "",
                                   "gt": {c: [(x0, x1) for x0, x1, cc in hs if cc == c] for c in EVENT_EVAL},
                                   "other": {c: [(x0, x1) for x0, x1, cc in hs if cc != c] for c in EVENT_EVAL},
