@@ -931,6 +931,23 @@ def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
     return out
 
 
+def window_phys(Xraw: np.ndarray, hz: float) -> np.ndarray:
+    """每窗物理特征（跟 label_service/pool.py 的质量门限同口径）：[模长均值, 陀螺仪模长 std, 加速度模长 2–10 Hz 节律占比]。
+    3 轴数据陀螺仪那一列是 NaN"""
+    n, T = Xraw.shape[0], Xraw.shape[1]
+    am = np.linalg.norm(Xraw[:, :, :3], axis=2)
+    out = np.full((n, 3), np.nan, np.float32)
+    out[:, 0] = am.mean(1)
+    if Xraw.shape[2] >= 6:
+        out[:, 1] = np.linalg.norm(Xraw[:, :, 3:6], axis=2).std(1)
+    a = am - am.mean(1, keepdims=True)
+    pw = np.abs(np.fft.rfft(a * np.hanning(T)[None, :], axis=1)) ** 2
+    f = np.fft.rfftfreq(T, 1 / hz)
+    tot = pw[:, (f >= 0.5) & (f <= 15)].sum(1)
+    out[:, 2] = np.divide(pw[:, (f >= 2) & (f <= 10)].sum(1), tot, out=np.zeros_like(tot), where=tot > 0)
+    return out
+
+
 def postprocess_segments(P: np.ndarray, starts: np.ndarray, t0, classes: list[str], W: int, S: int, hz: float, repo: str):
     """一个文件的逐窗口概率 → 稳定版 v2（viterbi，平台 STABLE_* 参数）→ {类: [(开始秒, 结束秒)]}"""
     from datetime import timedelta
@@ -1157,6 +1174,7 @@ def main(a):
     curves: dict = {"folds": []}
     if folds >= 2:
         cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=0)
+        seg_dump = [] if os.environ.get("TRAIN_V2_DUMP_SEG") else None
         # CNN 不算手工特征（F_ev 是 None）：分折只看标签和分组，X 用个占位
         for k, (_, te) in enumerate(cv.split(F_ev if F_ev is not None else np.zeros((len(y_ev), 1)), y_ev, g_ev)):
             test_g = set(g_ev[te])
@@ -1201,9 +1219,16 @@ def main(a):
                     continue
                 Xc, st_c, _span = cw
                 Xm_c, F_c = _feats(Xc)
+                P_c = _pred(Xm_c, F_c)
                 # 代码根目录（label_service 在这里），不是 --repo（产物目录，测试里是临时目录）
-                pred_seg = postprocess_segments(_pred(Xm_c, F_c), st_c, tl["t0"], classes, W, S, hz,
+                pred_seg = postprocess_segments(P_c, st_c, tl["t0"], classes, W, S, hz,
                                                 os.path.abspath(os.path.join(_HERE, "..", "..")))
+                if seg_dump is not None:
+                    seg_dump.append({"csv": p_csv, "site": _site_of_csv(p_csv) or "", "dataset": ss[0].get("dataset"),
+                                     "fold": k, "t0": tl["t0"].isoformat(), "starts": np.asarray(st_c, np.int32),
+                                     "P": P_c.astype(np.float16), "phys": window_phys(Xc, hz).astype(np.float16),
+                                     "segs": [(s_["start_ms"] / 1000, s_["end_ms"] / 1000, s_["coarse"], s_.get("name"), s_.get("leaf"))
+                                              for s_ in ss if s_.get("start_ms") is not None]})
                 hs = [(s["start_ms"] / 1000, s["end_ms"] / 1000, s["coarse"]) for s in ss if s.get("start_ms") is not None]
                 seg_files.append({"site": _site_of_csv(p_csv) or "",
                                   "gt": {c: [(x0, x1) for x0, x1, cc in hs if cc == c] for c in EVENT_EVAL},
@@ -1213,6 +1238,12 @@ def main(a):
                 holdout = te
             print(f"  交叉验证 {k + 1}/{folds}", flush=True)
         pred = proba.argmax(1)
+        if seg_dump is not None:
+            import gzip
+            import pickle
+            with gzip.open(os.environ["TRAIN_V2_DUMP_SEG"], "wb") as f:
+                pickle.dump({"classes": classes, "W": W, "S": S, "hz": hz, "files": seg_dump}, f)
+            print(f"▶ 交叉验证连续推理存到 {os.environ['TRAIN_V2_DUMP_SEG']}（{len(seg_dump)} 个文件）", flush=True)
         # TRAIN_V2_DUMP_OOF=<文件.npz>：把交叉验证里每个验证窗口的预测存下来（查误报 / 漏报用）。
         # seg 是窗口所属片段在 segs 里的下标，片段信息（csv / 起止 / 标签 / 数据集）一起存成 json
         dump = os.environ.get("TRAIN_V2_DUMP_OOF")
