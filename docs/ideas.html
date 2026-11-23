@@ -23,7 +23,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-19</div>
+  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-23</div>
   <h1>想法清单</h1>
   <p class="lead">先把手上的做完，再回来这里挑。每条写清楚：为什么值得做、现在到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
   <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
@@ -70,6 +70,10 @@
 <div class="scroll"><table>
 <tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
 <tr><td><b>用已确认的负例重训</b></td><td><span class="state ok">进行中</span></td><td>误报主要来自吃、喝、舔、啃。标注员按“现在重点补”一次确认一类；判完一批就重训主模型和负例挖掘模型。目标误报 4–5 → 2–3 次/小时</td><td>等标注；训练 1–2 小时</td></tr>
+<tr><td><b>影棚 vs 狗场的域偏移</b></td><td><span class="state ok">进行中</span></td><td>指标按场地拆开后看得很清楚：佛山狗场很好、影棚几乎判不出。先查影棚的漏报 / 误报样本（换狗、戴法、动作幅度、标注口径），再试补难例 / 分场地微调 / 阈值校准。端侧只有一套模型，域适应要轻</td><td>数据 + 训练</td></tr>
+<tr><td><b>窗口 / 步长继续往下试</b></td><td><span class="state ok">进行中</span></td><td>8 s / 1 s → 4 s / 0.5 s 正在训（job58）。看三件事：误报片段长度、短抓挠命中、起止误差。若 4 s 还漏短抓挠，再试 2 s 窗；步长优先 0.5 s</td><td>20 分钟 / 版</td></tr>
+<tr><td><b>误报片段长度约束</b></td><td><span class="state mid">待做</span></td><td>短窗口只是把上限降下来；后处理再加最短段 / 最长段、相邻段合并间隔，避免一次误报被拖成十几秒。先量现有误报段的长度分布</td><td>小</td></tr>
+<tr><td><b>按狗 / 按项圈看指标</b></td><td><span class="state mid">待做</span></td><td>现在按场地拆了，下一步按狗拆：分清是整个场地都差，还是个别狗 / 个别戴法差。评估代码里补一个分组就行</td><td>小</td></tr>
 <tr><td><b>GR5513 小模型上板</b></td><td><span class="state ok">进行中</span></td><td>11-18：训练记录 #44（train40，6 轴，命中 90.6%，Flash 71.6 KB）/ #45（train41，3 轴，86.9%，70.7 KB），端侧包已出（停用中，由你启用）。剩下：真板子上跑</td><td>上板</td></tr>
 <tr><td><b>板上精准版：3–9 Hz 能量对齐</b></td><td><span class="state mid">待定</span></td><td>平移那一步 11-18 已经进板上后处理（给设备的包自动打开）。能量对齐要流式带通 + 缓存几分钟包络，约 2–8 KB RAM，跟 GR5513 预算冲突</td><td>1 天</td></tr>
 <tr><td><b>级联省电</b></td><td><span class="state mid">待做</span></td><td>极便宜的“有没有在动 / 有没有节律”门先过，可能是抓挠才跑 CNN</td><td>中</td></tr>
@@ -79,7 +83,7 @@
 <tr><td><b>聚类用来查标注</b></td><td><span class="state mid">待做</span></td><td>标了抓挠却落在活动簇里的，多半标错；也能给主动学习挑数据</td><td>小</td></tr>
 <tr><td><b>甩头 / 抖身补数据</b></td><td><span class="state bad">缺数据</span></td><td>只有约 170 段，换什么模型都难；规则候选在攒</td><td>标注</td></tr>
 <tr><td><b>用画面找喝水</b></td><td><span class="state bad">暂停</span></td><td>SigLIP 画面向量先找候选，再回到 IMU 确认。先记着</td><td>半天</td></tr>
-<tr><td><b>FilterNet 逐点输出 / 大小窗口并行 / 16 s TCN</b></td><td><span class="state bad">试过，没赢</span></td><td>11-18 都跑了 5 折，没有一个赢过现在的 8 s CNN（见<a href="history.html">来时路</a>）。除非数据大变，不再排</td><td>—</td></tr>
+<tr><td><b>FilterNet 逐点输出 / 大小窗口并行 / 16 s TCN</b></td><td><span class="state bad">试过，没赢</span></td><td>11-18 都跑了 5 折，没有一个赢过现在的 8 s CNN（见<a href="history.html">来时路</a>）；11-23 复盘再次确认不再排。端侧多一份窗口就是算力 / 内存翻倍。除非数据大变，不然不回头</td><td>—</td></tr>
 <tr><td><b>自监督预训练加大规模</b></td><td><span class="state bad">暂停</span></td><td>1500 → 6000 个文件抓挠都没涨，瓶颈不在数据量。除非换更大的编码器 + 蒸馏</td><td>GPU 几小时起</td></tr>
 <tr><td><b>量化感知训练（QAT）</b></td><td><span class="state bad">暂停</span></td><td>代码有了，默认关；量化损失只有 0.4–1.4 个点，压到更小模型时再开</td><td>小</td></tr>
 <tr><td><b>传感器内置决策树（ST MLC）</b></td><td><span class="state bad">暂停</span></td><td>动作门放进 IMU 里跑，主芯片可以睡；要换传感器</td><td>硬件</td></tr>
