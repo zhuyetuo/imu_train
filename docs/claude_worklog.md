@@ -731,3 +731,58 @@ TODO
 - 现在按 佛山博朗旺 / 公司影棚 / 深圳雷诺 分开算，再加「合计」，抓挠按片段给 P/R/F1。
 - 场地从 CSV 路径认：`*_bolangwang` / `*_yingpeng` / `*_gouchang`；2026-07~09 老目录没有场地后缀，那时只在影棚采，按影棚算；公开数据集不计入。
 - 平台在「各类 F1」的抓挠悬停、以及 F1 列悬停里展示；2026-11-23 之前训的版本没有这份数据。
+
+## 2026-11-23（续）：事件查全 0.65 → 0.78~0.82 的分解与诊断
+
+**目标**：事件级抓挠查全（同类 + IoU≥0.5 + 一对一贪心，后处理之后，五折交叉验证按天×项圈分组）从 0.654 提到 **0.78~0.82**；
+查准不能掉太多（目前 precision_iou50 = 0.733）。
+
+**现状（#58，4s 窗 / 0.5s 步、6 轴 CNN、池+老抓挠+公开集）**
+
+| 指标 | 值 |
+|---|---|
+| 整段至少盖到（any-overlap 命中率） | 0.8915 |
+| 盖到的段里 IoU≥0.5 的比例 | 0.733 |
+| 事件查全（两者相乘） | 0.6537 |
+| 查准 / F1（IoU≥0.5） | 0.733 / ~0.69 |
+| 窗口 F1 / 片段宽松 F1 | 0.855 / 0.939 |
+| 每场地宽松 F1 | 佛山 0.937 / 影棚 0.961 / 深圳 0.936 |
+
+查全的两个乘数含义不同：
+- **0.8915**：还有 10.85% 的真值段模型/后处理整段没报 → 模型问题（短段、弱动作）或后处理吞段（最小窗数、平均概率门槛、viterbi 平滑、合并间隔）；
+- **0.733**：报到了但边界或时长差太多 → 后处理 / 窗口宽度问题（4s 窗最短预测段 4s，1~2s 的抓挠 IoU 天然到不了 0.5）。
+
+**诊断（本次加进 train_v2）**：`segment_metrics()` 新增
+- `by_len`：真值段按持续时间分桶 `<3s / 3–6s / 6–10s / ≥10s`，每桶给 `n_gt / hit / iou50 / hit_rate / iou50_rate / iou50_given_hit`；
+  `hit_rate` 低 = 整段没报（模型问题），`iou50_given_hit` 低 = 盖到了但边界差（后处理问题）；
+- `frag`：有重叠的真值段被切成几个预测段（中位数）、合起来盖住真值的比例（中位数），看碎片化。
+写入 `postprocess_segments[类].by_len / .frag`，同时每类在训练日志里打印一张小表（不用去翻 JSON）。
+
+`synthetic` 自测（4 段：2s/5s/7s/30s，其中 5s 段被切成两块、30s 段漏报）输出符合预期：
+`lt3` 1/1/1、`3to6` hit 1 iou50 0、`6to10` 1/1/1、`ge10` 0/1，`frag` = 1 个预测段、覆盖 98.6%。
+
+**已提交（跑完看日志）**：job60，tag `v6_base4s_diag_20261123`，配置与 #58 完全相同（只多了诊断），
+`POST http://127.0.0.1:8383/api/v1/label/train`，body `{"dataset": <job58 dataset_spec>, "model_type":"cnn", "tag":"v6_base4s_diag_20261123"}`。
+约 1 小时。看日志：`docker logs` 或 `GET /api/v1/label/train/60/log`（也可以直接看平台训练记录）。
+指标落在 `metrics.postprocess_segments["抓挠"]`。
+
+**拿到 by_len 后怎么定方向（决策树）**
+1. 漏检集中在 `<3s` → 扫 2s / 3s 窗口（步长 0.5s），或短窗与 4s 双窗后处理合并；端侧只保留一个窗口的话，看短窗对长段的损失。
+2. 漏检集中在 `≥10s`，或 `iou50_given_hit` 明显低于 `hit_rate`（尤其 3–6s 桶）→ 改后处理：最小预测段长、事件合并间隔、
+   边界按信号（4–8Hz 包络）收紧/放宽、`STABLE_EVENT_MIN_MEAN` / `EVENT_SINGLE_CONF` 扫描。
+3. `frag.preds_per_hit_median > 1.5` → 同一动作被切碎，优先加合并间隔（`STABLE_EVENT_GAP_S`），比换模型便宜。
+4. 均匀地漏（各桶 hit_rate 都低）→ 模型本身：补标 / 类权重 / 校准系数（`class_scale` 抓挠 ×α）扫一遍。
+
+**复现**
+```
+cd /home/toky/imu_train && python -m py_compile src/ml/train_v2.py
+# 提交（dataset_spec 取自任意已完成 job 的 dataset_spec）
+curl -s -X POST http://127.0.0.1:8383/api/v1/label/train -H 'Content-Type: application/json' \
+  -d '{"dataset": <spec>, "model_type":"cnn", "tag":"v6_base4s_diag_20261123"}'
+# 结果
+curl -s http://127.0.0.1:8383/api/v1/label/train/60 | python -m json.tool | less
+```
+
+**下一步**
+- [ ] job60 跑完 → 抄 by_len / frag → 按上面决策树选 1~2 个实验（预计先扫窗口长度 + 后处理合并间隔）。
+- [ ] 每个实验都只动一个变量，记录在同一天的分组交叉验证口径下，别混着比。

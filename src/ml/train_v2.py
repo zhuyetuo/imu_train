@@ -826,18 +826,42 @@ def _ov(a, b):
     return min(a[1], b[1]) - max(a[0], b[0]) > 0
 
 
+# 事件查全诊断：真值段按持续时间分桶，看漏的是短段还是长段
+LEN_BUCKETS = ((0.0, 3.0, "lt3"), (3.0, 6.0, "3to6"), (6.0, 10.0, "6to10"), (10.0, None, "ge10"))
+
+
+def _len_bucket(d: float) -> str:
+    for lo, hi, name in LEN_BUCKETS:
+        if d >= lo and (hi is None or d < hi):
+            return name
+    return LEN_BUCKETS[0][2]
+
+
 def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
-    """per_file: [{gt: {类: [(s,e)]}, pred: {类: [(s,e)]}, other: {类: [(s,e)] 标成别的类的时间}}]"""
+    """per_file: [{site, gt: {类: [(s,e)]}, pred: {类: [(s,e)]}, other: {类: [(s,e)] 标成别的类的时间}}]
+
+    事件级（跟 pyannote.metrics 的 Detection 一个思路）：
+      - 同类 + IoU ≥ 0.5 才算命中，一对一匹配（按 IoU 从大到小贪心，和 pyannote 的匹配顺序一致）
+      - recall_iou50 = 命中的真值段 / 真值段；precision_iou50 = 命中的预测段 / 预测段
+      - 真值一段被拆成几段、或只盖住一部分（IoU 不够），只算一次命中，其余预测段算误报
+    """
     out = {}
     for c in EVENT_EVAL:
         if c not in classes:
             continue
-        n_gt = hit = n_iou = fp = n_pred_judged = 0
+        n_gt = hit = n_iou = fp = n_pred_judged = n_pred = 0
         other_h = 0.0
         on, off, cnt = [], [], []
+        by_len = {name: {"n_gt": 0, "hit": 0, "iou50": 0} for _, _, name in LEN_BUCKETS}
+        frag, cover = [], []        # 每个有任何重叠的真值段：被几个预测段盖住、盖住的比例
+        sites: dict[str, dict[str, int]] = {}
         for f in per_file:
             gt, pr, other = f["gt"].get(c, []), f["pred"].get(c, []), f["other"].get(c, [])
+            st = sites.setdefault(str(f.get("site") or ""), {"n_gt": 0, "n_pred": 0, "matched": 0})
             n_gt += len(gt)
+            n_pred += len(pr)
+            st["n_gt"] += len(gt)
+            st["n_pred"] += len(pr)
             hit += sum(any(_ov(g, p) for p in pr) for g in gt)
             pairs = sorted(((_iou(g, p), i, j) for i, g in enumerate(gt) for j, p in enumerate(pr) if _iou(g, p) >= 0.5), reverse=True)
             ug, up = set(), set()
@@ -846,6 +870,26 @@ def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
                     ug.add(i); up.add(j)
                     on.append(pr[j][0] - gt[i][0]); off.append(pr[j][1] - gt[i][1])
             n_iou += len(ug)
+            st["matched"] += len(ug)
+            # 诊断：漏的是短段还是长段；命中段被切碎成几块、盖住多少
+            for i, g in enumerate(gt):
+                b = by_len[_len_bucket(g[1] - g[0])]
+                b["n_gt"] += 1
+                if i in ug:
+                    b["iou50"] += 1
+                ovs = sorted(p for p in pr if _ov(g, p))
+                if not ovs:
+                    continue
+                b["hit"] += 1
+                frag.append(len(ovs))
+                cur0, cur1, cov = ovs[0][0], ovs[0][1], 0.0
+                for p in ovs[1:]:
+                    if p[0] <= cur1:
+                        cur1 = max(cur1, p[1])
+                    else:
+                        cov += cur1 - cur0; cur0, cur1 = p[0], p[1]
+                cov += cur1 - cur0
+                cover.append(min(1.0, cov / max(g[1] - g[0], 1e-6)))
             other_h += sum(e - s for s, e in other) / 3600
             for p in pr:
                 tp = any(_ov(p, g) for g in gt)
@@ -856,10 +900,34 @@ def segment_metrics(per_file: list[dict], classes: list[str]) -> dict:
             if gt:
                 cnt.append(len(pr) - len(gt))
         med = (lambda v: round(float(np.median(np.abs(v))), 2) if v else None)
-        out[c] = {"n_gt": n_gt, "recall_hit": round(hit / max(n_gt, 1), 4), "recall_iou50": round(n_iou / max(n_gt, 1), 4),
-                  "precision": round(1 - fp / max(n_pred_judged, 1), 4), "fp_per_h_other": round(fp / max(other_h, 1e-9), 2),
+        recall_all = round(n_iou / max(n_gt, 1), 4)
+        precision_all = round(n_iou / n_pred, 4) if n_pred else None
+
+        def _site_row(s: dict[str, int]) -> dict:
+            rec = round(s["matched"] / s["n_gt"], 3) if s["n_gt"] else None
+            pre = round(s["matched"] / s["n_pred"], 3) if s["n_pred"] else None
+            return {"n_gt": s["n_gt"], "n_pred": s["n_pred"], "matched": s["matched"],
+                    "recall": rec, "precision": pre, "f1": _prf(rec, pre)}
+
+        out[c] = {"n_gt": n_gt, "n_pred": n_pred, "recall_hit": round(hit / max(n_gt, 1), 4), "recall_iou50": recall_all,
+                  "precision": round(1 - fp / max(n_pred_judged, 1), 4), "precision_iou50": precision_all,
+                  "f1_iou50": _prf(recall_all, precision_all) if precision_all is not None else None,
+                  "fp_per_h_other": round(fp / max(other_h, 1e-9), 2),
                   "other_hours": round(other_h, 1), "onset_abs_err_s": med(on), "offset_abs_err_s": med(off),
-                  "count_diff_mean_abs": round(float(np.mean(np.abs(cnt))), 2) if cnt else None}
+                  "count_diff_mean_abs": round(float(np.mean(np.abs(cnt))), 2) if cnt else None,
+                  # 按场地拆（佛山 / 影棚 / 深圳），跟 per_site 的 key 对齐；public_datasets 是空 key，不展示
+                  "per_site": {k: _site_row(v) for k, v in sites.items() if v["n_gt"] or v["n_pred"]},
+                  # 诊断：真值段按时长分桶（<3s / 3–6s / 6–10s / ≥10s）。
+                  # iou50_given_hit 低 = 盖到了但边界/时长差太多（后处理问题）；hit_rate 低 = 整段没报（模型问题）
+                  "by_len": {k: {"n_gt": v["n_gt"], "hit": v["hit"], "iou50": v["iou50"],
+                                 "hit_rate": round(v["hit"] / v["n_gt"], 3),
+                                 "iou50_rate": round(v["iou50"] / v["n_gt"], 3),
+                                 "iou50_given_hit": round(v["iou50"] / v["hit"], 3) if v["hit"] else None}
+                             for k, v in by_len.items() if v["n_gt"]},
+                  # 有重叠的真值段：被几个预测段盖住（碎片）、合起来盖住的比例（中位数）
+                  "frag": {"n": len(frag),
+                           "preds_per_hit_median": round(float(np.median(frag)), 2) if frag else None,
+                           "cover_median": round(float(np.median(cover)), 3) if cover else None}}
     return out
 
 
@@ -1137,7 +1205,8 @@ def main(a):
                 pred_seg = postprocess_segments(_pred(Xm_c, F_c), st_c, tl["t0"], classes, W, S, hz,
                                                 os.path.abspath(os.path.join(_HERE, "..", "..")))
                 hs = [(s["start_ms"] / 1000, s["end_ms"] / 1000, s["coarse"]) for s in ss if s.get("start_ms") is not None]
-                seg_files.append({"gt": {c: [(x0, x1) for x0, x1, cc in hs if cc == c] for c in EVENT_EVAL},
+                seg_files.append({"site": _site_of_csv(p_csv) or "",
+                                  "gt": {c: [(x0, x1) for x0, x1, cc in hs if cc == c] for c in EVENT_EVAL},
                                   "other": {c: [(x0, x1) for x0, x1, cc in hs if cc != c] for c in EVENT_EVAL},
                                   "pred": pred_seg})
             if holdout is None:
@@ -1239,11 +1308,26 @@ def main(a):
         # 片段级（经过稳定版 v2 后处理）：用户最后看到的是这个
         result["postprocess_segments"] = segment_metrics(seg_files, classes)
         print(f"  片段级（后处理后）：{result['postprocess_segments']}", flush=True)
+        for ev, evr in result["postprocess_segments"].items():
+            print(f"  [{ev}] 按时长分桶：", flush=True)
+            for k, b in evr.get("by_len", {}).items():
+                print(f"    {k:<5} 人标 {b['n_gt']:>4} 段  整段报出 {b['hit_rate']:.3f}"
+                      f"  IoU≥0.5 {b['iou50_rate']:.3f}  报出段里 IoU≥0.5 {b['iou50_given_hit']}", flush=True)
+            fg = evr.get("frag") or {}
+            if fg.get("n"):
+                print(f"    报出的段被切成 {fg['preds_per_hit_median']} 个预测段（中位），"
+                      f"合起来盖住 {fg['cover_median']:.1%}（中位）", flush=True)
         if "抓挠" in classes:
             k = classes.index("抓挠")
             rec = round(float((sp[sy == k] == k).mean()), 3) if (sy == k).any() else None
             pre = round(float((sy[sp == k] == k).mean()), 3) if (sp == k).any() else None
             result["scratch_segments"] = {"recall": rec, "precision": pre, "f1": _prf(rec, pre)}
+            # 事件级（后处理之后、IoU ≥ 0.5 一对一）：比上面那套宽松口径严格，多报/漏报/切碎都扣分
+            pe = (result.get("postprocess_segments") or {}).get("抓挠")
+            if pe:
+                result["scratch_events"] = {"alpha": 0.5, "recall": pe.get("recall_iou50"),
+                                            "precision": pe.get("precision_iou50"), "f1": pe.get("f1_iou50"),
+                                            "n_gt": pe.get("n_gt"), "n_pred": pe.get("n_pred")}
         # 分数据集看：老数据标得粗（整夜一段的睡觉、抓挠间隙标成活动），混在一起的总分会被拉低
         ds_of = np.array([segs[s]["dataset"] for s in seg_ev])
         result["per_dataset"] = {}
@@ -1298,21 +1382,32 @@ def main(a):
                 pre = round(float((t_[p_ == k] == k).mean()), 3) if (p_ == k).any() else None
                 row["scratch_segments"] = {"recall": rec, "precision": pre, "f1": _prf(rec, pre),
                                            "n_gt": int((t_ == k).sum()), "n_pred": int((p_ == k).sum())}
+                # 事件级也按场地拆（IoU ≥ 0.5 一对一）：这个更接近“现场到底抓没抓到”
+                ev_site = ((result.get("postprocess_segments") or {}).get("抓挠") or {}).get("per_site", {}).get(key)
+                if ev_site:
+                    row["scratch_events"] = ev_site
             result["per_site"][key] = row
         print("\n  ── 抓挠按场地（按片段；合计看上面）──")
         for key, r in result["per_site"].items():
             sc = r.get("scratch_segments")
             if sc is None:
                 continue
-            print(f"  {r['name']:<8} 查全 {sc['recall']}  查准 {sc['precision']}  F1 {sc['f1']}"
+            print(f"  {r['name']:<8} 宽松 查全 {sc['recall']}  查准 {sc['precision']}  F1 {sc['f1']}"
                   f"  人标 {sc['n_gt']} 段 / 模型报 {sc['n_pred']} 段")
+            ev = r.get("scratch_events")
+            if ev:
+                print(f"      按事件(IoU≥0.5) 查全 {ev['recall']}  查准 {ev['precision']}  F1 {ev['f1']}"
+                      f"  命中 {ev['matched']}/{ev['n_gt']} 段")
         print("\n" + classification_report(y_ev, pred, labels=present, target_names=[classes[i] for i in present],
                                            zero_division=0, digits=3))
         print(text)
         print(f"  （以上是全部数据集合在一起）片段级 macro F1 {result['segment_macro_f1']}" +
-              (f"；抓挠按段 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
+              (f"；抓挠宽松 查全 {result['scratch_segments']['recall']} 查准 {result['scratch_segments']['precision']}"
                f" F1 {result['scratch_segments']['f1']}"
-               if "scratch_segments" in result else ""))
+               if "scratch_segments" in result else "") +
+              (f"；按事件(IoU≥0.5) 查全 {result['scratch_events']['recall']} 查准 {result['scratch_events']['precision']}"
+               f" F1 {result['scratch_events']['f1']}"
+               if "scratch_events" in result else ""))
     if kind == "cnn":
         # 跟 src/dl/train.py 同一套产物：dl_cnn_best.pt（state_dict）+ dl_cnn_best.json（推理元数据）
         # + dl_cnn.json（指标）。平台推理（infer_csv_scratch._load_dl_model）和端侧导出（algo_tinyml
