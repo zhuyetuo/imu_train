@@ -79,7 +79,14 @@ def _load_dl_model(model_path):
     with open(meta_path, encoding="utf-8") as f:
         dl_meta = json.load(f)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # label_service 的进程池 worker 是 fork 出来的：父进程只要碰过 CUDA，子进程
+    # 再 torch.load(map_location="cuda") 就会抛 "Cannot re-initialize CUDA in
+    # forked subprocess"，整个进程池直接不可用（所有推理全失败）。worker 里由
+    # INFER_FORCE_CPU 显式走 CPU——CNN 只有几十万参数，CPU 推理够快，也不用占
+    # 显存。命令行直接跑 infer_csv_scratch 时不设这个变量，照旧用 GPU。
+    force_cpu = os.environ.get("INFER_FORCE_CPU", "").strip().lower() in ("1", "true", "yes")
+    device = torch.device("cpu") if force_cpu else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu")
     model_name = dl_meta["model"]
     cfg_wrapped = {model_name: dl_meta["model_cfg"]}
     net = _build_model(model_name, dl_meta["n_channels"], dl_meta["window_size"],
@@ -225,6 +232,34 @@ def sliding_windows(data, window_size, stride):
     return np.stack(windows) if windows else np.empty((0, window_size, data.shape[1])), indices
 
 
+def sliding_windows_valid(data, good, window_size, stride):
+    """只在 good=True 的连续段里滑窗：每段从段首开始、按 stride 走，段尾不足
+    一个窗口的丢掉，**段与段之间绝不跨窗**。
+
+    顺序很关键——先扔掉断连/全 0 段，再窗口化。反过来（整条时间轴先滑窗、
+    再把跟缺失重叠的窗口筛掉）会出两个问题：横跨"有数据+没数据"的窗口特征
+    被假数据带偏；掉线期间照样凑得出窗口、输出预测。实测一小时的流里有几段
+    断连，就应该只剩那几段各自窗口化，掉线段里一个窗口都没有。
+
+    返回 (X, starts, region_ends)，region_ends[k] 是第 k 个窗口所在有效段的
+    结束下标（用来保证片段的区间不会延伸进后面的断连段）。
+    """
+    n_empty = (np.empty((0, window_size, data.shape[1])), [], [])
+    if len(good) == 0:
+        return n_empty
+    windows, starts, ends = [], [], []
+    edges = np.diff(np.concatenate(([0], np.asarray(good, dtype=np.int8), [0])))
+    for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        a, b = int(a), int(b)
+        for s in range(a, b - window_size + 1, stride):
+            windows.append(data[s:s + window_size])
+            starts.append(s)
+            ends.append(b)
+    if not windows:
+        return n_empty
+    return np.stack(windows), starts, ends
+
+
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
                confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
                output_dir=None, min_windows=1, keep_isolated=True, label_mode="majority",
@@ -267,30 +302,20 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         orig = min(int(i * ratio), len(ts) - 1) if ts is not None else -1
         return ts.iloc[orig] if ts is not None and orig >= 0 else None
 
-    # 重力对齐 + 滑窗（跳过缺失率>30%的窗口）
+    # 重力对齐 + 滑窗
     #
     # **喂几个通道要跟模型训练时一致。** n_channels 是含姿态角那两列的总数
     # （6 轴 → 8，3 轴 → 5），所以传感器通道是它减 2。拿 6 轴数据喂 3 轴模型
     # （或反过来）特征维数就对不上，轻则报错，重则悄悄算出一串没意义的数。
     sensor_ch = max(3, int(n_channels) - 2)
     data_in = acc_ds if sensor_ch <= 3 else np.concatenate([acc_ds, gyro_ds], axis=1)
-    X, start_indices = sliding_windows(data_in, window_size, stride)
-    if len(X) > 0:
-        valid_windows = [
-            valid_mask_ds[s:s + window_size].mean() >= 0.7
-            for s in start_indices
-        ]
-        X            = X[valid_windows]
-        start_indices = [s for s, v in zip(start_indices, valid_windows) if v]
-        n_skipped = sum(not v for v in valid_windows)
-        # 之前这条跟--scratch_only绑在一起，被压没了——scratch_only本来是
-        # 为了减少"没检测到目标行为"这种噪音，但"这个文件因为数据缺失跳过
-        # 了多少窗口"是数据质量诊断，跟检没检测到目标行为是两回事，不该
-        # 被一起压掉。run_review_bins_all_days.sh默认就带--scratch_only，
-        # 之前这条消息在正常批量跑的日志里从来看不到，没法确认某段时间轴
-        # 上的空白到底是不是这里跳过的窗口导致的。
-        if n_skipped:
-            print(f"  [过滤] {display_name}: 跳过 {n_skipped} 个缺失率>30% 的窗口")
+    # 先扔掉没有真实信号的样本（采集端断连时的空值 / 六轴全 0 占位行），
+    # 再对剩下的每一段独立滑窗。掉线段里一个窗口都不会有，窗口也不会横跨
+    # "有数据 + 没数据"两段
+    zero_ds = ((np.abs(acc_ds) < 1e-9).all(axis=1)
+               & (np.abs(gyro_ds) < 1e-9).all(axis=1))
+    good_ds = valid_mask_ds & ~zero_ds
+    X, start_indices, region_ends = sliding_windows_valid(data_in, good_ds, window_size, stride)
     if len(X) == 0:
         return
 
@@ -324,16 +349,25 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     # 维护"majority怎么显示"和"怎么把majority的重叠裁回去"两套逻辑。
     def window_zone(k):
         s = start_indices[k]
+        nxt = start_indices[k + 1] if k + 1 < len(start_indices) else None
+        # 只有"下一个窗口正好差一个步长"才算同一段有效数据里相邻的窗口；
+        # 跨过断连段的下一个窗口在时间上离得很远，不能拿它当本段的结束边界
+        same_run = nxt is not None and nxt - s == stride
         if label_mode == "center":
             center = s + window_size / 2
             half_pad = stride / 2
             return center - half_pad, center + half_pad
-        next_s = start_indices[k + 1] if k + 1 < len(start_indices) else s + window_size
+        region_end = region_ends[k]
         if label_mode == "segment":
             # 新版流程的模型：窗口代表的是中间那段，整体往后挪 (窗口 - 步长)/2，
             # 跟 label_service/postprocess._zones 一致（那里有原因）
             sh = (window_size - stride) / 2
-            return s + sh, next_s + sh
+            if same_run:
+                return s + sh, nxt + sh
+            # 这一段有效数据的最后一个窗口：只负责到本段结束，不往后面的
+            # 断连段里延伸（否则片段会跨过掉线段）
+            return s + sh, region_end
+        next_s = nxt if same_run else min(s + window_size, region_end)
         return s, next_s
 
     # 打印逐窗口结果（多类别时，一个窗口只可能是argmax出来的那一个类别，

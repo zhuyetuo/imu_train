@@ -122,6 +122,8 @@ class InferRequest(BaseModel):
     device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
+    mine_neg: bool = Field(True, description="模型判成负例类别（进食/饮水/嗅闻/啃…）的片段是否输出成候选。"
+                                             "web 上补负例标注要开；端侧不需要这些，传 false")
 
 
 class Segment(BaseModel):
@@ -190,6 +192,11 @@ def _stable_params() -> postprocess.StableParams:
         event_min_mean=config.STABLE_EVENT_MIN_MEAN,
         event_single_conf=config.STABLE_EVENT_SINGLE_CONF,
         spectral_min=config.STABLE_SPECTRAL_MIN,
+        gyro_std_min=config.STABLE_GYRO_STD_MIN,
+        missing_max=config.STABLE_MISSING_MAX,
+        amag_min=config.STABLE_AMAG_MIN,
+        amag_max=config.STABLE_AMAG_MAX,
+        acc_rhythm_min=config.STABLE_ACC_RHYTHM_MIN,
         viterbi_switch=config.STABLE_VITERBI_SWITCH,
         notworn_min_s=config.STABLE_NOTWORN_MIN_S,
         cand_enter=config.CAND_ENTER,
@@ -205,7 +212,7 @@ def _stable_params() -> postprocess.StableParams:
 
 async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infer_queue.PRIORITY_BATCH,
                          device_hz: float | None = None,
-                         bundle: dict | None = None, pool_obj=None) -> dict:
+                         bundle: dict | None = None, pool_obj=None, mine_neg: bool = True) -> dict:
     """bundle/pool 不传 = 默认模型，跟以前完全一样。
 
     **几何必须跟着模型走**（window_s / stride_s / label_mode 都从 bundle 读）。
@@ -224,13 +231,18 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
         log.exception("推理失败 %s (%.1fs)", full_path, time.time() - t0)
         raise
     envelope = result.pop("envelope", None)
+    # 掉数据（六轴全 0 / 空值）的精确时间段，worker 里按原始样本时间轴算出来的。
+    # 以前只用"窗口缺数据比例 ≥ 0.5"推，掉线时采集端写的占位行只有 25Hz，比例被
+    # 稀释到 0.5 以下就漏了（短掉线更是永远凑不够半个窗口），全 0 段又冒出预测。
+    missing_holes = result.pop("missing_holes", None) or []
     grooming_cands = result.pop("grooming", None) or []
     result["candidates"] = []
     # 掉数据的时间段（六轴全 0 / MISSING）。这些窗口模型照样会给一个类别，但那
     # 是凭空来的：既不该算进有效佩戴，也不该进训练集，更不能变成一段"睡觉"。
     # 三个版本都挖——调试版是拿来看模型说了什么的，同样不该被这种段污染。
     geom_all = (b["window_s"], b["stride_s"], b["label_mode"])
-    holes = postprocess.missing_spans(result["windows"], *geom_all, config.MISSING_MIN_RATIO)
+    holes = missing_holes or postprocess.missing_spans(
+        result["windows"], *geom_all, config.MISSING_MIN_RATIO)
     result["missing"] = [
         {"start_ts": postprocess._fmt_ts(a), "end_ts": postprocess._fmt_ts(b),
          "seconds": round((b - a).total_seconds(), 1)}
@@ -290,14 +302,21 @@ async def _infer_in_pool(full_path: str, mode: str = "raw", priority: str = infe
                     one = sorted(one, key=lambda c: c.get("conf_mean") or 0, reverse=True)[: config.GROOM_MAX]
                 kept += one
             result["candidates"] = result["candidates"] + kept
-        # 负例挖掘：模型单独训了进食 / 饮水 / 嗅闻…这些类别的话，它们的片段挪成候选（见 mining.py）
-        from label_service import mining as _mining
-        result["segments"], mined = _mining.mine_negatives(
-            result["segments"], result["candidates"], b["classes"], config.MINE_LABELS,
-            config.MINE_MERGE_TO, config.MINE_MAX, min_mean=config.MINE_MIN_MEAN,
-            gap_s=config.MINE_GAP_S, min_s=config.MINE_MIN_S)
-        if mined:
-            result["candidates"] = result["candidates"] + mined
+        # 负例挖掘：模型单独训了进食 / 饮水 / 嗅闻…这些类别的话，它们的片段挪成候选（见 mining.py）。
+        # mine_neg=False：既不进候选，也不留在正式片段里（平台会把它当 AI 标注入），
+        # 那段时间并进「活动」——跟 mining 打开时草稿里的写法一致。端侧只要抓挠/活动这些
+        if mine_neg:
+            from label_service import mining as _mining
+            result["segments"], mined = _mining.mine_negatives(
+                result["segments"], result["candidates"], b["classes"], config.MINE_LABELS,
+                config.MINE_MERGE_TO, config.MINE_MAX, min_mean=config.MINE_MIN_MEAN,
+                gap_s=config.MINE_GAP_S, min_s=config.MINE_MIN_S)
+            if mined:
+                result["candidates"] = result["candidates"] + mined
+        else:
+            from label_service import mining as _mining
+            result["segments"] = _mining.strip_negatives(
+                result["segments"], b["classes"], config.MINE_LABELS, config.MINE_MERGE_TO)
     if holes:
         result["segments"] = {k: postprocess.drop_missing(v, holes) for k, v in result["segments"].items()}
         result["candidates"] = postprocess.drop_missing(result["candidates"], holes)
@@ -338,7 +357,7 @@ async def infer(req: InferRequest):
     b, px = _pick_model(req.model)
     try:
         result = await _infer_in_pool(full_path, req.mode, infer_queue.PRIORITY_INTERACTIVE,
-                                      req.device_hz, bundle=b, pool_obj=px)
+                                      req.device_hz, bundle=b, pool_obj=px, mine_neg=req.mine_neg)
     except Exception as e:  # noqa: BLE001 把底层错误原样带给调用方，方便排查
         raise HTTPException(500, f"推理失败: {type(e).__name__}: {e}") from e
     return InferResponse(
@@ -431,6 +450,7 @@ class InferBatchRequest(BaseModel):
                   "stable_noshake", "viterbi_noshake", "viterbi_precise"] = "raw"
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
+    mine_neg: bool = Field(True, description="模型判成负例类别的片段是否输出成候选，见 /infer")
 
 
 class InferBatchResult(BaseModel):
@@ -458,7 +478,7 @@ async def infer_batch(req: InferBatchRequest):
         try:
             full_path = _resolve_nas_path(item.path)
             result = await _infer_in_pool(full_path, req.mode, device_hz=item.device_hz,
-                                          bundle=b, pool_obj=px)
+                                          bundle=b, pool_obj=px, mine_neg=req.mine_neg)
             return InferBatchResult(sample_id=item.sample_id, path=item.path, ok=True, result=InferResponse(
                 sample_id=item.sample_id, path=item.path, model_path=b["model_path"],
                 classes=b["classes"], **result))

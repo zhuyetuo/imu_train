@@ -9,6 +9,7 @@ worker 里跑的 _infer_one 跟单进程版一模一样：让 infer_file 在临�
 自己的格式落 *_infer.json 再读回来，返回的就是命令行产出的同一份东西。
 """
 
+import datetime as dt
 import json
 import logging
 import os
@@ -25,6 +26,49 @@ _bundle: dict = {}
 
 
 log = logging.getLogger(__name__)
+
+
+def _missing_holes(ts_vals, bad, min_s: float = 0.2, merge_gap_s: float = 0.2) -> list[tuple]:
+    """六轴全 0 / 空值（bad）的连续时间段，**按时间轴算，不按行数**。
+
+    为什么不能按行数：掉数据时采集端只按 25 Hz 写占位行，正常是 47~50 Hz。
+    拿固定的 window_s×device_hz 行去切，一个"8 秒窗口"实际会覆盖到 11 秒，
+    零段被正常数据稀释，比例掉到 0.5 以下——整段掉线就漏判了（线上 333
+    项目 704–708s、750–755s 都漏过）。直接从原始样本找连续零段就没有这个问题，
+    也不受"掉线必须长于半个窗口"的限制。
+    """
+    if ts_vals is None or bad is None or len(bad) == 0:
+        return []
+    idx = np.flatnonzero(bad)
+    if len(idx) == 0:
+        return []
+    n = len(bad)
+    splits = np.where(np.diff(idx) > 1)[0] + 1
+    diffs = np.diff(ts_vals).astype("timedelta64[us]").astype(np.float64) / 1e6
+    step = float(np.median(diffs)) if len(diffs) else 0.02
+    step = step if step > 0 else 0.02
+    spans: list[list] = []
+    for g in np.split(idx, splits):
+        a = ts_vals[g[0]]
+        last = int(g[-1])
+        # 零段结束时间取"最后一个零样本之后的下一个时间戳"，这样这一段覆盖到
+        # 恢复前的整个空档；文件末尾就往后延一个采样间隔
+        b = ts_vals[last + 1] if last + 1 < n else ts_vals[last] + np.timedelta64(int(step * 1e6), "us")
+        spans.append([a, b])
+    merged: list[list] = []
+    gap = np.timedelta64(int(merge_gap_s * 1e6), "us")
+    for a, b in spans:
+        if merged and (a - merged[-1][1]) <= gap:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    out = []
+    for a, b in merged:
+        sec = float((b - a).astype("timedelta64[us]").astype(np.float64) / 1e6)
+        if sec >= min_s:
+            out.append((a.astype("datetime64[us]").astype(dt.datetime),
+                        b.astype("datetime64[us]").astype(dt.datetime)))
+    return out
 
 def _memoize_load_csv() -> None:
     """
@@ -76,6 +120,9 @@ def _limit_threads_in_worker() -> None:
 
 
 def _init_worker(model_path: str) -> None:
+    # 子进程是 fork 出来的，父进程初始化过 CUDA 时子进程不能再初始化（会整池崩），
+    # CNN 推理改走 CPU：模型小、延迟低，又不用跟训练抢显存
+    os.environ["INFER_FORCE_CPU"] = "1"
     _limit_threads_in_worker()
     sys.path.insert(0, os.path.join(config.REPO_ROOT, "src"))
     from label_service.logging_setup import worker_setup_logging
@@ -92,19 +139,23 @@ def _init_worker(model_path: str) -> None:
 
 
 def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: float,
-                               device_hz: float | None = None) -> dict | None:
+                               device_hz: float | None = None) -> tuple[dict | None, list[tuple]]:
     """
     给每个窗口算陀螺仪 4–8 Hz 能量占 1–15 Hz 的比例，写进 window["spec"]。抓挠是
     后腿高频往复，这个频段有明显峰；模型之外的独立证据，稳定版可按它过滤误报
     （config.STABLE_SPECTRAL_MIN）。算不出来（没陀螺仪/没时间戳）就全 None。
     同时返回 10 Hz 的陀螺仪能量包络 {t0, hz, energy}，给边界微调用（postprocess.refine_boundaries）。
+
+    第二个返回值是**掉数据（六轴全 0 / 空值）的连续时间区间**，直接按原始样本
+    的时间轴算，见 _missing_holes。app.py 拿它挖掉预测结果里落在断连段的部分。
     """
     envelope = None
+    holes: list[tuple] = []
     try:
         from infer_csv_scratch import load_csv
         acc, gyro, ts, valid_mask, _null = load_csv(full_path)
         if gyro is None or ts is None or len(gyro) == 0:
-            return None
+            return None, []
         # 采样率按这个文件实际的来：8-11 之前的数据是采集端就降到 16Hz 存的，
         # 8-11 起才是 50Hz 原始流。用全局默认值去算 16Hz 的文件，频段和窗口长度全错
         hz = float(device_hz or config.DEVICE_HZ)
@@ -151,10 +202,25 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
         except Exception:  # noqa: BLE001 判不出来就不判，别让整次推理失败
             bad = None
 
+        # 掉数据的**真实时间段**：按每行占的时长累加，不按行数。掉数据时采集端
+        # 只写 25 Hz 的占位行，按行数算会把零段的比例低估掉一半（见 _missing_holes）
+        if bad is not None and len(bad):
+            holes = _missing_holes(ts_vals, bad)
+        # 每个样本点实际覆盖的时长，用来算窗口的缺数据比例
+        cum_bad = None
+        if bad is not None:
+            dd = np.diff(ts_vals).astype("timedelta64[us]").astype(np.float64) / 1e6
+            durs = np.append(dd, dd[-1] if len(dd) else 0.02)
+            durs = np.clip(durs, 0.0, 0.5)
+            cum_bad = np.concatenate(([0.0], np.cumsum(durs * bad)))
+
         starts, idx_of = [], []
         for k, w in enumerate(windows):
             w["spec"] = None
             w["missing"] = None
+            w["amag"] = None
+            w["gstd"] = None
+            w["arhythm"] = None
             t = w.get("ts")
             if not t:
                 continue
@@ -163,10 +229,18 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             except ValueError:
                 continue
             i0 = int(np.searchsorted(ts_vals, t0))
-            # 缺数据比例先算——末尾不足半个窗口的会在下面被跳过，但它照样要算
-            if bad is not None:
-                seg = bad[i0 : i0 + n_samp]
-                w["missing"] = round(float(seg.mean()), 3) if len(seg) else None
+            # 缺数据比例先算——末尾不足半个窗口的会在下面被跳过，但它照样要算。
+            # 窗口按**时间**取 [t0, t0+window_s) 而不是固定 n_samp 行：采样率不是
+            # 恒定的时候（掉数据段 25 Hz、正常 47~50 Hz）按行数切出来的窗口根本不是
+            # window_s 秒，比例就失真了
+            if cum_bad is not None and i0 < len(ts_vals):
+                t1 = t0 + np.timedelta64(int(round(window_s * 1e6)), "us")
+                span_end = min(ts_vals[-1], t1)
+                elapsed = float((span_end - t0).astype("timedelta64[us]").astype(np.float64) / 1e6)
+                if elapsed > 0.5:
+                    i1 = int(np.searchsorted(ts_vals, t1))
+                    miss = float(cum_bad[min(i1, len(ts_vals))] - cum_bad[i0])
+                    w["missing"] = round(min(1.0, max(0.0, miss / elapsed)), 3)
             if len(mag) - i0 < n_samp // 2:
                 continue
             starts.append(i0)
@@ -180,13 +254,40 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             pw = np.abs(np.fft.rfft(segs * hann, axis=1)) ** 2
             tot = pw[:, wide].sum(axis=1)
             ratio = np.divide(pw[:, band].sum(axis=1), tot, out=np.zeros_like(tot), where=tot > 0)
-            for k, r, tt in zip(idx_of, ratio, tot):
+            # 加速度模长 / 陀螺仪幅值 std：给「是不是真在挠」的质量门限用。抓挠是
+            # 身体在动（陀螺仪几十到几百 °/s、模长 1.1–2.5g）；设备没戴、躺着被碰
+            # 时陀螺仪几乎不动、模长还可能低于 1g。都在同一份窗口矩阵上算，省一次读文件
+            am = np.linalg.norm(np.asarray(acc, dtype=np.float32), axis=1)
+            gm = np.linalg.norm(np.asarray(gyro, dtype=np.float32), axis=1)
+            pa = np.zeros(len(am) + n_samp, dtype=np.float32)
+            pa[: len(am)] = am
+            pg = np.zeros(len(gm) + n_samp, dtype=np.float32)
+            pg[: len(gm)] = gm
+            w_amag = pa[offsets].mean(axis=1)
+            w_gstd = pg[offsets].std(axis=1)
+            # 加速度自身的「节律」：真抓挠是后腿高频往复，模长在 2–10 Hz 有明显能量；
+            # 信号不好/设备被碰的波动是低频漂移（实测误报段 84% 能量在 1 Hz 以下）。
+            # 这样即使陀螺仪那一路不可用，也能拦住"加速度乱抖"冒充抓挠
+            asegs = pa[offsets]
+            asegs = asegs - asegs.mean(axis=1, keepdims=True)
+            apw = np.abs(np.fft.rfft(asegs * hann, axis=1)) ** 2
+            aband = (freqs >= 2) & (freqs <= 10)
+            awide = (freqs >= 0.5) & (freqs <= 15)
+            atot = apw[:, awide].sum(axis=1)
+            aratio = np.divide(apw[:, aband].sum(axis=1), atot, out=np.zeros_like(atot), where=atot > 0)
+            for k, r, tt, am_v, gs_v, ar, at in zip(idx_of, ratio, tot, w_amag, w_gstd, aratio, atot):
                 windows[k]["spec"] = round(float(r), 3) if tt > 0 else None
+                windows[k]["amag"] = round(float(am_v), 3)
+                windows[k]["gstd"] = round(float(gs_v), 1)
+                windows[k]["arhythm"] = round(float(ar), 3) if at > 0 else None
     except Exception:  # noqa: BLE001 频谱只是附加信息，算不出来不影响推理
         for w in windows:
             w.setdefault("spec", None)
             w.setdefault("missing", None)
-    return envelope
+            w.setdefault("amag", None)
+            w.setdefault("gstd", None)
+            w.setdefault("arhythm", None)
+    return envelope, holes
 
 
 def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
@@ -222,7 +323,8 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
                 data = json.load(f)
             segments[label] = data["scratch_segments"]
             windows, n_windows = data["windows"], data["n_windows"]  # 各类别文件里这两项相同
-    envelope = _spectral_ratio_per_window(full_path, windows, b["window_s"], device_hz) if windows else None
+    envelope, missing_holes = (_spectral_ratio_per_window(full_path, windows, b["window_s"], device_hz)
+                               if windows else (None, []))
     # 疑似舔/啃候选：只看加速度姿态，跟模型无关，但要读同一份 CSV（load_csv 在 worker
     # 里 memoize 过，不会再读一次盘）。挖不出来就空，绝不能让它把推理整个拖垮
     # 同一次读盘顺带出：姿态段按节律分成 舔 / 进食 / 饮水，再加疑似吠叫（见 behaviors.py）
@@ -239,7 +341,7 @@ def _infer_one(full_path: str, device_hz: float | None = None) -> dict:
         except Exception:  # noqa: BLE001 候选是锦上添花，出错只记日志
             log.exception("疑似舔/啃/进食/饮水/吠叫/甩头/如厕候选挖掘失败 %s", full_path)
     return {"segments": segments, "windows": windows, "n_windows": n_windows, "envelope": envelope,
-            "grooming": grooming}
+            "missing_holes": missing_holes, "grooming": grooming}
 
 
 def _groom_params():

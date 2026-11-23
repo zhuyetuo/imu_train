@@ -70,6 +70,17 @@ class StableParams:
     event_min_mean: float = 0.45   # bout 内该事件的平均概率下限
     event_single_conf: float = 0.85  # 单窗口也保留的最高概率下限
     spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
+    # 「真的在挠」的物理证据门限（0 = 不启用）。CNN 只用三轴加速度：设备没戴、
+    # 躺在笼子里被碰、或者信号掉点，加速度都会抖，很容易被判成抓挠。真实抓挠
+    # 是身体在动：陀螺仪 50–360°/s、几乎不丢帧、模长 1.1–2.5g；而误报样本
+    # 陀螺仪只有 ~1°/s（设备根本没转动）、30% 的行是 0、模长 0.6g（低于重力）。
+    gyro_std_min: float = 0.0      # 窗口陀螺仪幅值 std 下限
+    missing_max: float = 0.0       # 窗口缺数据（空值/六轴全 0）比例上限
+    amag_min: float = 0.0          # 窗口加速度模长均值下限（佩戴时≈1g）
+    amag_max: float = 0.0          # 窗口加速度模长均值上限（抓挠 1.1–2.5g）
+    # 加速度模长在 2–10 Hz 的能量占比下限。抓挠是后腿高频往复（真抓挠 0.37–0.93），
+    # 信号不好/设备被碰的波动集中在 1 Hz 以下（实测误报 0.16）
+    acc_rhythm_min: float = 0.0
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
     # 短的「未佩戴」碎片并回旁边的静止：狗睡着 / 趴着不动时，模型偶尔冒出几十秒未佩戴——
     # 戴着的项圈总有呼吸、心跳带来的细微晃动，跟放在桌上不完全一样，但模型分不太清。
@@ -140,8 +151,14 @@ def _zones(ts: list[datetime], window_s: float, stride_s: float, label_mode: str
             c = ts[k] + timedelta(seconds=window_s / 2)
             out.append((c - timedelta(seconds=stride_s / 2), c + timedelta(seconds=stride_s / 2)))
         else:
-            end = ts[k + 1] if k + 1 < n else ts[k] + timedelta(seconds=window_s)
-            out.append((ts[k] + shift, end + shift))
+            # 只有下一个窗口刚好差一个步长，才是同一段有效数据里相邻的窗口。
+            # 窗口现在只在有效段内滑（先扔全 0/断连段再窗口化），跨段时下一个
+            # 窗口的时间会跳很远，不能拿它当本段的结束边界，否则片段会横跨
+            # 掉线段。最后一个窗口只负责到自己的数据结束
+            if k + 1 < n and (ts[k + 1] - ts[k]).total_seconds() <= stride_s * 1.5:
+                out.append((ts[k] + shift, ts[k + 1] + shift))
+            else:
+                out.append((ts[k] + shift, ts[k] + timedelta(seconds=window_s)))
     return out
 
 
@@ -399,6 +416,10 @@ def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]
         # 低置信那一路要求整段平均够高；频谱那一路本来就是靠物理证据进来的，不看概率
         if reason == "low_conf" and mean_c < p.cand_min_mean:
             continue
+        # 候选是低门槛找漏检，但也得是"可能漏掉的抓挠"：设备没戴/躺着被碰、
+        # 信号掉点的波动不成立（陀螺仪不动、模长不对、没有 2–10 Hz 节律）
+        if not _scratch_quality_ok(b, windows, p):
+            continue
         sv = [spec[i] for i in range(i0, i1 + 1) if spec[i] is not None]
         out.append({
             "start_ts": _fmt_ts(zones[i0][0]),
@@ -534,6 +555,27 @@ def precise_boundaries(segments: list[dict], envelope: dict | None, bias: tuple[
             seg["end_ts"] = _fmt_ts(t0 + timedelta(seconds=(new_e + 1) / hz))
 
 
+def _scratch_quality_ok(b: list[int], windows: list[dict], p: StableParams) -> bool:
+    """抓挠 bout 的「身体真的在动」证据。特征算不出来时不拦（宁可多留，不误杀）。"""
+    gs = [windows[i]["gstd"] for i in b if windows[i].get("gstd") is not None]
+    if p.gyro_std_min > 0 and gs and sum(gs) / len(gs) < p.gyro_std_min:
+        return False
+    ms = [windows[i]["missing"] for i in b if windows[i].get("missing") is not None]
+    if p.missing_max > 0 and ms and sum(ms) / len(ms) > p.missing_max:
+        return False
+    ar = [windows[i]["arhythm"] for i in b if windows[i].get("arhythm") is not None]
+    if p.acc_rhythm_min > 0 and ar and sum(ar) / len(ar) < p.acc_rhythm_min:
+        return False
+    am = [windows[i]["amag"] for i in b if windows[i].get("amag") is not None]
+    if am:
+        mean_am = sum(am) / len(am)
+        if p.amag_min > 0 and mean_am < p.amag_min:
+            return False
+        if p.amag_max > 0 and mean_am > p.amag_max:
+            return False
+    return True
+
+
 def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
               window_s: float, stride_s: float, label_mode: str,
               params: StableParams | None = None, algo: str = "stable") -> dict[str, list[dict]]:
@@ -646,6 +688,10 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
                 sv = [spec[i] for i in b if spec[i] is not None]
                 if sv and sum(sv) / len(sv) < p.spectral_min:
                     keep = False
+            # 概率再高也要有「身体真的在动」的证据：陀螺仪不动 / 大量掉点 /
+            # 模长偏离 1g 的，是设备没戴或被碰，不是抓挠
+            if keep and ev == sl:
+                keep = _scratch_quality_ok(b, windows, p)
             if not keep:
                 continue
             for i in b:
