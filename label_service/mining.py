@@ -66,6 +66,26 @@ def _spans(items) -> list[tuple]:
     return out
 
 
+def strip_negatives(segments: dict[str, list[dict]], classes: list[str], labels: list[str],
+                    merge_to: str = "活动") -> dict[str, list[dict]]:
+    """开关关掉时用：负例类别从正式片段里拿掉，时间并进 merge_to，也不出候选。
+
+    为什么不能简单留着：平台拿到 segments 会当成 AI 标注入到草稿里，留着等于
+    「关掉了还在输出进食/饮水」。并进「活动」跟 mining 打开时草稿里的写法一致，
+    时间线不断档，只是不再单独报这些类别。
+    """
+    mine = [c for c in classes if c in labels]
+    moved = False
+    for lab in mine:
+        segs = segments.pop(lab, None) or []
+        if segs:
+            segments.setdefault(merge_to, []).extend(dict(s) for s in segs)
+            moved = True
+    if moved:
+        segments[merge_to].sort(key=lambda s: s.get("start_ts") or "")
+    return segments
+
+
 def mine_negatives(segments: dict[str, list[dict]], candidates: list[dict], classes: list[str],
                    labels: list[str], merge_to: str = "活动", max_per_label: int = 40,
                    scratch_head: str = "抓挠", min_mean: float = 0.0, gap_s: float = 0.0,

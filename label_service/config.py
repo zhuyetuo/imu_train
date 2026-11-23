@@ -87,6 +87,16 @@ STABLE_EVENT_SINGLE_CONF = float(_env("STABLE_EVENT_SINGLE_CONF", "0.85"))
 # 抓挠 bout 陀螺仪 4–8 Hz 能量占比下限（0 = 不启用）。每个片段都带 spec 字段，先看
 # 一批真/假抓挠的分布再定阈值，经验上真抓挠 > 0.3、误报 < 0.15
 STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
+# 「真的在挠」的物理证据门限：CNN 只看三轴加速度，设备没戴/躺着被碰/信号掉点时
+# 加速度也会抖，容易被判成抓挠。实测误报段陀螺仪 std≈0.8°/s、34% 的行是 0、
+# 模长 0.64g；真实抓挠分别是 50–360°/s、0%、1.1–2.5g。
+STABLE_GYRO_STD_MIN      = float(_env("STABLE_GYRO_STD_MIN", "5"))
+STABLE_MISSING_MAX       = float(_env("STABLE_MISSING_MAX", "0.1"))
+STABLE_AMAG_MIN          = float(_env("STABLE_AMAG_MIN", "0.8"))
+STABLE_AMAG_MAX          = float(_env("STABLE_AMAG_MAX", "3.0"))
+# 加速度模长 2–10 Hz 能量占比下限：抓挠是节律性高频往复（真抓挠 0.37–0.93），
+# 信号不好/设备被碰的波动集中在 1 Hz 以下（误报 0.16）
+STABLE_ACC_RHYTHM_MIN    = float(_env("STABLE_ACC_RHYTHM_MIN", "0.25"))
 # viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
 STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
 # 短于这么多秒、挨着静止的「未佩戴」并回静止（睡着时模型偶尔冒出的碎片；真摘下来充电都很长）。0 = 不启用
