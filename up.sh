@@ -17,6 +17,10 @@
 #
 #   ./up.sh --only label     只动 label_service
 #   ./up.sh --only vision    只动 vision_service
+#   ./up.sh --no-vision      完全不动 vision_service（SAM/画面检索），start/deploy/
+#                            status/down 都跳过它。机器上不跑 vision 时用它，
+#                            免得本来关着的服务被 up.sh 又拉起来。也可以 export
+#                            UP_NO_VISION=1 当默认值
 #
 # 开关可以叠：./up.sh -p -g
 #
@@ -56,6 +60,7 @@ fi
 [ -n "${UP_SH_HOME:-}" ] && cd "$UP_SH_HOME"
 
 ONLY=""
+NO_VISION="${UP_NO_VISION:-0}"   # 1 = 完全不动 vision_service（下面 want 里生效）
 PASS=()          # 透传给 label_service/up.sh 的开关
 RESTART_ONLY=0
 SUB=""
@@ -65,13 +70,18 @@ while [ $# -gt 0 ]; do
         --only) ONLY="${2:-}"; shift 2 ;;
         -d|--restart)   RESTART_ONLY=1; PASS+=("$1"); shift ;;
         -g|--gpu|-p|--pull) PASS+=("$1"); shift ;;
+        --no-vision)    NO_VISION=1; shift ;;
         down|stop|status|deploy) SUB="$1"; shift ;;
-        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
         *) echo "不认识的参数: $1（-h 看用法）"; exit 1 ;;
     esac
 done
 
-want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+# --no-vision 优先于 --only：两个都写的时候别把 vision 也拉起来
+want() {
+    [ "$NO_VISION" = "1" ] && [ "$1" = "vision" ] && return 1
+    [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]
+}
 line() { echo; echo "────────── $* ──────────"; }
 
 # ── deploy：更新到最新，一条命令 ────────────────────────────────────────
