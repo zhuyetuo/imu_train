@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>想法清单</title>
-<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="site.css?v=20261124">
 </head>
 <body>
 <nav class="top">
@@ -25,87 +25,95 @@
 <header>
   <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-23</div>
   <h1>想法清单</h1>
-  <p class="lead">先把手上的做完，再回来这里挑。每条写清楚：为什么值得做、现在到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
-  <p><span class="state ok">进行中</span> <span class="state mid">待做</span> <span class="state bad">缺数据 / 暂停</span></p>
+  <p class="lead">先把手上的做完，再回来挑。每条写清楚为什么值得做、到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
+  <div class="key"><span><i style="background:var(--ok)"></i>进行中 / 有结论</span><span><i style="background:var(--mid)"></i>待做</span><span><i style="background:var(--bad)"></i>缺数据 / 暂停 / 试过没赢</span></div>
 </header>
 
-<h2 id="gnss">IMU 智能打点：只用 3 轴加速度计决定什么时候开卫星定位 <span class="state ok">有方案、有数</span></h2>
-<p><a href="gnss.html">→ 专页：蓝牙启停、轨迹示意、真实一天的打点对比、板上怎么接</a>。网关和手机都是蓝牙：<b>蓝牙断开满 30 秒才启动（先打一个离开点），重新连上立刻停</b>。</p>
-<p class="muted">定位分三种情况：在家连得上网关就用网关定位；户外主人手机在旁边就用手机；<b>狗独自外出、两样都连不上，只能靠卫星定位</b>。死板地定时打点很费电，狗在休息或在一小块地方转悠时还会打出一堆重复点。所以平时卫星定位关着，由加速度计判断「真的在走 / 跑、走出去了」才打一个点。</p>
+<h2 id="gnss">IMU 智能打点 <span class="state ok">有方案、有数</span></h2>
+<p>狗独自外出、蓝牙连不上网关和手机时才靠卫星定位。平时卫星关着，<b>加速度计判断“真的走出去了”才打一个点</b>；蓝牙断开满 30 秒启动，重新连上立刻停。<a href="gnss.html">→ 专页</a></p>
+<div class="tiles">
+  <div class="tile"><div class="k">省电（默认）</div><div class="v"><b>14.5</b> <small>个点/天</small></div><div class="n">2.2 mAh/天 · 最长漏追约 96 m</div></div>
+  <div class="tile"><div class="k">标准</div><div class="v"><b>29.5</b> <small>个点/天</small></div><div class="n">3.3 mAh/天 · 约 51 m</div></div>
+  <div class="tile"><div class="k">精细</div><div class="v"><b>83.5</b> <small>个点/天</small></div><div class="n">7.4 mAh/天 · 约 17 m</div></div>
+  <div class="tile"><div class="k">对照：每 5 分钟一个</div><div class="v"><b>288</b> <small>个点/天</small></div><div class="n">50 mAh/天 · 最长 377 m</div></div>
+</div>
+<details class="more">
+<summary>怎么判断、怎么验证的、还没定的</summary>
 <div class="flow">
-  <div class="step"><b>计步</b><span>|a| 去掉 1 秒慢基线，峰值 &gt; 60 mg、两步至少隔 0.25 s 记一步</span></div>
-  <div class="step"><b>在走 / 跑</b><span>最近 4 秒 5–18 步、节奏均匀（间隔变异 ≤45%）</span></div>
-  <div class="step"><b>持续移动</b><span>15 秒里至少 10 秒在走 / 跑；抖一下、喝两口水不算</span></div>
-  <div class="step"><b>打点</b><span>出发（静止 1 分钟后动起来、走出一段）· 移动中（每走 N 米或每 T 秒）· 到达（停下 1 分钟）· 保底（很久不动）</span></div>
-  <div class="step"><b>压徘徊</b><span>打完点拿实际位移回传：总在原地就把间隔放大，最多 4 倍</span></div>
+  <div class="step"><b>计步</b><span>去掉慢基线，峰值 &gt; 60 mg、两步至少隔 0.25 s</span></div>
+  <div class="step"><b>在走 / 跑</b><span>最近 4 秒 5–18 步、节奏均匀</span></div>
+  <div class="step"><b>持续移动</b><span>15 秒里至少 10 秒在走</span></div>
+  <div class="step"><b>打点</b><span>出发 · 移动中 · 到达 · 保底</span></div>
+  <div class="step"><b>压徘徊</b><span>总在原地就把间隔放大，最多 4 倍</span></div>
 </div>
-<div class="scroll"><table>
-<tr><th>打点密度（用户可调）</th><th>出发 / 每隔 / 最长 / 到达 / 保底</th><th>每天打点（中位）</th><th>GNSS 耗电估算</th><th>最长漏追距离</th></tr>
-<tr><td><b>省电（默认）</b> 只看大概去了哪</td><td>走出 20 m / 100 m / 5 分钟 / 20 m / 4 小时</td><td><b>14.5</b> 个</td><td><b>2.2 mAh/天</b></td><td>≈96 m</td></tr>
-<tr><td><b>标准</b></td><td>10 m / 50 m / 2 分钟 / 10 m / 2 小时</td><td>29.5 个</td><td>3.3 mAh/天</td><td>≈51 m</td></tr>
-<tr><td><b>精细</b> 看小公园里怎么跑</td><td>0 / 15 m / 30 秒 / 5 m / 1 小时</td><td>83.5 个</td><td>7.4 mAh/天</td><td>≈17 m</td></tr>
-<tr><td class="muted">对照：每 5 分钟打一个</td><td>—</td><td>288 个</td><td>50 mAh/天</td><td>最长 377 m</td></tr>
-<tr><td class="muted">对照：每 10 分钟打一个</td><td>—</td><td>144 个</td><td>25 mAh/天</td><td>最长 665 m</td></tr>
-</table></div>
-<div class="note">
-<b>怎么验证的：</b>① 计步 / 移动检测在 Vehkaoja 2022 公开数据（颈部项圈，带走 / 小跑 / 奔跑标注）上：加上持续规则后走 91%、小跑 96% 能认出来，趴 / 坐 / 站 / 喘气被当成在走只有 2–5%；喝水、抖身偏高（约 6 成），但都是短时间，靠「走出 N 米才打」挡住。② 打点在狗场 36 个狗·天真实全天数据（10-27 ~ 11-01，6 只狗）上模拟，只用加速度 3 轴。③ 板上 C 参考实现（纯整数、无 malloc）跟 Python 版逐秒一致 98.9%。<br>
-<b>还没定的：</b>每步多少米（先按 60 cm）要拿真实 GNSS 轨迹标定；耗电按「离上次定位越久启动越慢：离上次 热启动 5 s / 温 15–25 s / 冷 35 slt;5 分钟热启动 5 s、热启动 5 s / 温 15–25 s / 冷 35 slt;4 小时温启动 25 s、更久 35 s、25 mA」估的，换成实际模组手册的数；狗场的狗一天只走 10 分钟左右，户外遛狗的数据还要补。
-<b>在家里看轨迹</b>靠的是网关定位（只到房间级），卫星信号进不了屋，「精细」档主要用在户外小公园。
-</div>
-<p class="muted">代码：<code>experiments/claude_2026_11/gnss/</code>（Python 模拟 + 板上 C 参考实现 <code>gnss_trigger.c/.h</code>，三档 <code>GT_PRESET_SAVE / STANDARD / FINE</code>，默认省电）。</p>
+<ul class="tight">
+<li><b>验证：</b>Vehkaoja 2022 公开项圈数据上，走 91%、小跑 96% 能认出来，趴 / 坐 / 站被当成在走只有 2–5%；狗场 36 个狗·天真实数据模拟打点；板上 C 版跟 Python 版逐秒一致 98.9%。</li>
+<li><b>还没定：</b>每步多少米（先按 60 cm，要用真实 GNSS 轨迹标定）；耗电是按常见模组的冷 / 温 / 热启动时间估的，要换成实际模组手册的数；户外遛狗数据还要补。</li>
+<li><b>代码：</b><code>experiments/claude_2026_11/gnss/</code>（Python 模拟 + 板上 <code>gnss_trigger.c/.h</code>，三档默认省电）。</li>
+</ul>
+</details>
 
-<h2 id="new7">11-18 新提的 7 个方向（一个个来）</h2>
-<div class="scroll"><table>
-<tr><th>方向</th><th>状态</th><th>思路 / 先做什么</th><th>代价</th></tr>
-<tr><td><b>1. 陀螺仪按需开（一天 ≤2 小时）</b></td><td><span class="state bad">试过：不用</span></td><td>11-18 离线模拟：开 18% 的时间只追回 1.5 个点（陀螺仪总共值 4.6）。陀螺仪开机要攒满 8 s 才能用，多数抓挠只有几秒。按 2 h/天的预算追回不到 1 个点 → 主力用 3 轴</td><td>—</td></tr>
-<tr><td><b>2. 加速度计智能开关</b></td><td><span class="state ok">值得做</span></td><td>全天：未佩戴 40.5%、睡觉 35.3%、活动 20.3%。戴着的时间约六成在睡 / 静止 → 静止时降采样率或用 IMU 运动唤醒中断让主控睡觉，省电空间比陀螺仪大得多。下一步：板上状态机 + 实测电流</td><td>上板</td></tr>
-<tr><td><b>3. 原始 IMU 压缩上传</b></td><td><span class="state ok">有数了</span></td><td>真实数据 20 Hz：3 轴原始 10.4 MB/天 → <b>差分 + Rice 无损 4.3 MB</b>（比 lzma / zstd 还小，单片机几十行 C），有损 2.5 MB；只传疑似事件前后（约 2 h/天）0.36 MB。<b>有损量化（1/512 g 甚至 1/128 g）对识别没影响</b>。下一步：蓝牙电量、板上编码器</td><td>半天</td></tr>
-<tr><td><b>4. 变采样率</b></td><td><span class="state ok">有数了</span></td><td>3 轴 12.5–25 Hz 命中都约 87%，采样率越低误报越多，10 Hz 掉到 81.5%；<b>3 轴 31.25 Hz（原生）命中 88.1% 最高</b>，25 Hz 误报最低。策略：静止 10–12.5 Hz，活动 25–31.25 Hz</td><td>—</td></tr>
-<tr><td><b>5. CMSIS-NN vs 现在的推理</b></td><td><span class="state ok">有结论</span></td><td>不换推理框架（算子就 50–200 KB，比模型还大），只换 CMSIS-NN 算子（已做，包里两版都有）。宿主机模拟快 2.9×，Flash +7 KB、RAM +5 KB，输出一致。待上板实测</td><td>上板</td></tr>
-<tr><td><b>6. 端侧别的模型 / 自己改造</b></td><td><span class="state ok">可以做</span></td><td><b>流式增量卷积</b>：不补零的结构精度不掉（6 轴大 92.1%、小 90.1%），可省 ~6–8 倍计算；要改步长到 0.8 s、改导出和板上推理。深度可分离小模型 2.2 万参数，掉 2–4 个点</td><td>2–3 天</td></tr>
-<tr><td><b>7. 皮肤评估</b></td><td><span class="state ok">查到原因</span></td><td>① 抓挠日统计存在库里、改标注不自动重算（最后一次 11-09）：<b>11-09 ~ 11-14 这 6 天最新数据从没算进来</b>，4 天算完后标注又改过，10 天的项目已删但旧数还留着。当初是故意「提醒 + 人按」，要不要改成自动待你定；② 照片评级 364 条，但评级账号<b>没勾「兽医」</b>，系统一条都不认 → 在账号管理里勾上，再用人工版重训模型 B；③ 皮肤 AI 版还在用 8 月的老模型：训练池任务上新模型每天抓挠次数跟人工对上（老模型只有七成），老数据上新模型多报，要先抽视频看</td><td>等你操作</td></tr>
-</table></div>
+<h2 id="new7">11-18 新提的 7 个方向</h2>
+<div class="cards">
+  <div class="card"><h3>1. 陀螺仪按需开<span class="state bad">试过：不用</span></h3><p>开 18% 的时间只追回 1.5 个点；陀螺仪要攒满 8 s 才能用，多数抓挠只有几秒。主力用 3 轴。</p></div>
+  <div class="card"><h3>2. 加速度计智能开关<span class="state ok">值得做</span></h3><p>戴着的时间约六成在睡 / 静止：静止时降采样或用运动唤醒中断让主控睡。下一步：板上状态机 + 实测电流。</p></div>
+  <div class="card"><h3>3. 原始 IMU 压缩上传<span class="state ok">有数了</span></h3><p>3 轴 10.4 MB/天 → 差分 + Rice 无损 4.3 MB；只传疑似事件前后 0.36 MB。有损量化对识别没影响。</p></div>
+  <div class="card"><h3>4. 变采样率<span class="state ok">有数了</span></h3><p>3 轴 31.25 Hz 命中 88.1% 最高，10 Hz 掉到 81.5%。策略：静止 10–12.5 Hz、活动 25–31.25 Hz。</p></div>
+  <div class="card"><h3>5. CMSIS-NN 算子<span class="state ok">有结论</span></h3><p>只换算子不换框架：宿主机快 2.9×，Flash +7 KB、RAM +5 KB，输出一致。待上板实测。</p></div>
+  <div class="card"><h3>6. 流式增量卷积<span class="state ok">可以做</span></h3><p>不补零的结构精度不掉，计算省 6–8 倍；要改步长、导出和板上推理，2–3 天。</p></div>
+  <div class="card"><h3>7. 皮肤评估数据不跟着标注变<span class="state ok">查到原因</span></h3><p>日统计不自动重算；照片评级账号没勾「兽医」系统不认；AI 版还在用 8 月老模型。前两项等你操作。</p></div>
+</div>
 
 <h2 id="behavior">① 行为识别</h2>
-<div class="note"><b>事件查全 0.65 → 0.78~0.82 的路线：</b>① 先修短段（2 s / 3 s 窗）和边界对齐；② 再看多余预测段（查准只有 0.47）；③ 最后才补数据 / 调阈值。每步都按事件口径（同类 + IoU≥0.5 + 一对一）和段长分桶比，不再只看宽松片段总分。</div>
-<div class="scroll"><table>
-<tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
-<tr><td><b>用已确认的负例重训</b></td><td><span class="state ok">进行中</span></td><td>误报主要来自吃、喝、舔、啃。标注员按“现在重点补”一次确认一类；判完一批就重训主模型和负例挖掘模型。目标误报 4–5 → 2–3 次/小时</td><td>等标注；训练 1–2 小时</td></tr>
-<tr><td><b>影棚 vs 狗场的域偏移</b></td><td><span class="state ok">先查清再动</span></td><td>现场说影棚几乎判不出，但 job58 交叉验证里影棚 F1 0.961（佛山 0.937 / 深圳 0.936），先别急着做域适应：确认现场加载的模型版本、推理窗口/步长是否和训练一致，再拿失败样本回放。真是域差异再试补难例 / 分场地微调 / 阈值校准</td><td>数据 + 训练</td></tr>
-<tr><td><b>2 s / 3 s 窗口</b></td><td><span class="state mid">下一步</span></td><td>按段长诊断（job60）：&lt;3 s 的段事件命中只有 0.318、3–6 s 0.631，短段是主要缺口；1 s 窗 RF 已经证明太短（事件查全 0.293）。下一步 2 s / 3 s 窗 + 0.5 s 步，在同一事件口径下比，先确认长段不因窗口变短掉太多</td><td>20 分钟 / 版</td></tr>
-<tr><td><b>现场失败样本回放</b></td><td><span class="state ok">进行中</span></td><td>影棚「一段都判不出」和交叉验证（0.961）矛盾。核对发现 label_service 当前默认加载的仍是 8 月老 RF（1 s 窗 / 0.5 s 步、5 类），不是 job57/58；平台「启用模型」只改运行时、服务重启会回到配置。先确认现场测的是平台预标注还是项圈，再导出失败样本用同一版模型回放</td><td>半天</td></tr>
-<tr><td><b>预测段长度 / 多余段</b></td><td><span class="state mid">待做</span></td><td>诊断结果：碎片不是问题（每个命中的真值段中位只对应 1 个预测段、合起来覆盖 100%），问题是预测段比真值长、以及 7286 个预测里 2553 个完全不碰任何真值。先量多余段落在哪（没标的时间 / 其他动作 / 真值附近）和长度分布，再决定后处理最短/最长段、合并间隔，还是模型阈值</td><td>小</td></tr>
-<tr><td><b>边界对齐适配 4 s / 2 s 窗口</b></td><td><span class="state mid">待做</span></td><td>「精准版」的 3–9 Hz 能量对齐目前只在 8 s 窗口生效（precise_bias 里写死 8±0.5 s），4 s 窗只做了 (窗−步)/2 平移，中位起止误差 0.57 / 0.85 s。按段长分桶看，2 s 的段要边界误差 ≤0.3 s 才能稳过 IoU 0.5</td><td>1 天</td></tr>
-<tr><td><b>按段长分层验收</b></td><td><span class="state mid">待做</span></td><td>总分会被长段盖住。&lt;3 s / 3–6 s / 6–10 s / ≥10 s 分别定线（&lt;3 s ≥0.6、3–6 s ≥0.75、≥10 s ≥0.85），每次实验都报这张表，防止“总分涨了、短段更差”</td><td>小</td></tr>
-<tr><td><b>按狗 / 按项圈看指标</b></td><td><span class="state mid">待做</span></td><td>现在按场地拆了，下一步按狗拆：分清是整个场地都差，还是个别狗 / 个别戴法差。评估代码里补一个分组就行</td><td>小</td></tr>
-<tr><td><b>GR5513 小模型上板</b></td><td><span class="state ok">进行中</span></td><td>11-18：训练记录 #44（train40，6 轴，命中 90.6%，Flash 71.6 KB）/ #45（train41，3 轴，86.9%，70.7 KB），端侧包已出（停用中，由你启用）。剩下：真板子上跑</td><td>上板</td></tr>
-<tr><td><b>板上精准版：3–9 Hz 能量对齐</b></td><td><span class="state mid">待定</span></td><td>平移那一步 11-18 已经进板上后处理（给设备的包自动打开）。能量对齐要流式带通 + 缓存几分钟包络，约 2–8 KB RAM，跟 GR5513 预算冲突</td><td>1 天</td></tr>
-<tr><td><b>级联省电</b></td><td><span class="state mid">待做</span></td><td>极便宜的“有没有在动 / 有没有节律”门先过，可能是抓挠才跑 CNN</td><td>中</td></tr>
-<tr><td><b>Mantis / MOMENT 特征找负例</b></td><td><span class="state mid">待做</span></td><td>现在 IMU 相似度检索前 10 只命中 17–23%。预训练时序模型冻结当特征提取器，只在服务端用</td><td>半天</td></tr>
-<tr><td><b>MiniRocket 对照组</b></td><td><span class="state mid">待做</span></td><td>随机卷积核 + 线性分类，几乎不用调参，看我们的 CNN 有没有被便宜方法追上</td><td>小</td></tr>
-<tr><td><b>伪标签</b></td><td><span class="state mid">待做</span></td><td>高置信的抓挠 / 非抓挠片段加进训练，尤其补负样本</td><td>中</td></tr>
-<tr><td><b>聚类用来查标注</b></td><td><span class="state mid">待做</span></td><td>标了抓挠却落在活动簇里的，多半标错；也能给主动学习挑数据</td><td>小</td></tr>
-<tr><td><b>甩头 / 抖身补数据</b></td><td><span class="state bad">缺数据</span></td><td>只有约 170 段，换什么模型都难；规则候选在攒</td><td>标注</td></tr>
-<tr><td><b>用画面找喝水</b></td><td><span class="state bad">暂停</span></td><td>SigLIP 画面向量先找候选，再回到 IMU 确认。先记着</td><td>半天</td></tr>
-<tr><td><b>FilterNet 逐点输出 / 大小窗口并行 / 16 s TCN</b></td><td><span class="state bad">试过，没赢</span></td><td>11-18 都跑了 5 折，没有一个赢过现在的 8 s CNN（见<a href="history.html">来时路</a>）；11-23 复盘再次确认不再排。端侧多一份窗口就是算力 / 内存翻倍。除非数据大变，不然不回头</td><td>—</td></tr>
-<tr><td><b>自监督预训练加大规模</b></td><td><span class="state bad">暂停</span></td><td>1500 → 6000 个文件抓挠都没涨，瓶颈不在数据量。除非换更大的编码器 + 蒸馏</td><td>GPU 几小时起</td></tr>
-<tr><td><b>量化感知训练（QAT）</b></td><td><span class="state bad">暂停</span></td><td>代码有了，默认关；量化损失只有 0.4–1.4 个点，压到更小模型时再开</td><td>小</td></tr>
-<tr><td><b>传感器内置决策树（ST MLC）</b></td><td><span class="state bad">暂停</span></td><td>动作门放进 IMU 里跑，主芯片可以睡；要换传感器</td><td>硬件</td></tr>
-</table></div>
+<div class="note"><b>事件查全 0.65 → 0.78~0.82 的路线：</b>先修短段（2 s / 3 s 窗）和边界对齐 → 再看多余预测段（查准 0.47）→ 最后才补数据 / 调阈值。每步都按事件口径和段长分桶比。</div>
+<div class="kanban">
+  <div class="col ok"><h3>进行中<small>4</small></h3>
+    <div class="item"><b>现场失败样本回放</b><p>影棚现场“一段都判不出”，交叉验证却有 0.961。线上默认加载的还是 8 月老 RF，先确认现场测的是哪一版。</p><span class="cost">半天</span></div>
+    <div class="item"><b>影棚 vs 狗场的域偏移</b><p>先查清模型版本、窗口 / 步长是否一致，真是域差异再补难例或分场地校准。</p><span class="cost">数据 + 训练</span></div>
+    <div class="item"><b>用已确认的负例重训</b><p>误报主要来自吃、喝、舔、啃；标注员按“现在重点补”一次确认一类，判完一批就重训。</p><span class="cost">等标注</span></div>
+    <div class="item"><b>GR5513 小模型上板</b><p>11-18 正式小模型 train44（6 轴）/ train45（3 轴），64 KB，端侧包已出（停用，由你启用）。剩真板子实测。</p><span class="cost">上板</span></div>
+  </div>
+  <div class="col mid"><h3>待做<small>11</small></h3>
+    <div class="item"><b>2 s / 3 s 窗口（下一步）</b><p>&lt;3 s 的段 IoU 过关只有 0.318，是主要缺口；1 s 窗已证明太短。</p><span class="cost">20 分钟 / 版</span></div>
+    <div class="item"><b>预测段长度 / 多余段</b><p>7286 个预测里 2553 个不碰任何真值；先量落在哪、多长，再定后处理。</p><span class="cost">小</span></div>
+    <div class="item"><b>边界对齐适配 4 s / 2 s 窗口</b><p>精准版能量对齐目前只在 8 s 生效；2 s 的段要边界误差 ≤0.3 s 才稳过 IoU 0.5。</p><span class="cost">1 天</span></div>
+    <div class="item"><b>按段长分层验收</b><p>&lt;3 s ≥0.6、3–6 s ≥0.75、≥10 s ≥0.85，防止“总分涨了、短段更差”。</p><span class="cost">小</span></div>
+    <div class="item"><b>按狗 / 按项圈看指标</b><p>分清是整个场地差，还是个别狗、个别戴法差。</p><span class="cost">小</span></div>
+    <div class="item"><b>板上精准版能量对齐</b><p>平移已进板上；能量对齐要 2–8 KB RAM，跟 GR5513 预算冲突。</p><span class="cost">1 天 · 待定</span></div>
+    <div class="item"><b>级联省电</b><p>便宜的“有没有节律”门先过，可能是抓挠才跑 CNN。</p><span class="cost">中</span></div>
+    <div class="item"><b>Mantis / MOMENT 找负例</b><p>现在相似度检索前 10 只命中 17–23%；预训练模型冻结当特征。</p><span class="cost">半天</span></div>
+    <div class="item"><b>MiniRocket 对照组</b><p>看我们的 CNN 有没有被便宜方法追上。</p><span class="cost">小</span></div>
+    <div class="item"><b>伪标签</b><p>高置信片段加进训练，尤其补负样本。</p><span class="cost">中</span></div>
+    <div class="item"><b>聚类查标注</b><p>标了抓挠却落在活动簇里的多半标错；也能给主动学习挑数据。</p><span class="cost">小</span></div>
+  </div>
+  <div class="col bad"><h3>缺数据 / 暂停 / 试过没赢<small>6</small></h3>
+    <div class="item"><b>甩头 / 抖身补数据</b><p>只有约 170 段，换什么模型都难；规则候选在攒。</p><span class="cost">标注</span></div>
+    <div class="item"><b>FilterNet / 大小窗口并行 / 16 s TCN</b><p>11-18 都跑了 5 折，没有一个赢；11-23 复盘确认不再排。</p><span class="cost">不回头</span></div>
+    <div class="item"><b>自监督预训练加大规模</b><p>1500 → 6000 个文件抓挠没涨，瓶颈不在数据量。</p><span class="cost">暂停</span></div>
+    <div class="item"><b>量化感知训练（QAT）</b><p>量化损失只有 0.4–1.4 个点，压到更小模型时再开。</p><span class="cost">暂停</span></div>
+    <div class="item"><b>用画面找喝水</b><p>SigLIP 画面向量先找候选，再回 IMU 确认。</p><span class="cost">暂停</span></div>
+    <div class="item"><b>传感器内置决策树（ST MLC）</b><p>动作门放进 IMU 里跑，主芯片可以睡；要换传感器。</p><span class="cost">硬件</span></div>
+  </div>
+</div>
 
 <h2 id="skin">② 皮肤评估</h2>
-<div class="scroll"><table>
-<tr><th>想法</th><th>状态</th><th>为什么 / 现在到哪</th><th>代价</th></tr>
-<tr><td><b>算法评级 vs 兽医评级对照</b></td><td><span class="state ok">进行中</span></td><td>每日对照表已备好。先验证 C 值四个子分和兽医判断方向一致，再校准参数</td><td>数据</td></tr>
-<tr><td><b>模型 B 用真实标签重训</b></td><td><span class="state bad">缺数据</span></td><td>接口已有：兽医照片评级攒够就重训，交叉验证比 PM 规则准才启用</td><td>兽医评级</td></tr>
-<tr><td><b>评分层换稳健 Z 分数 / CUSUM 变点检测</b></td><td><span class="state mid">待做</span></td><td>现在的四项加权 + 红旗例外分支多、没有统一目标。变点检测只要个体历史就能跑，性价比最高</td><td>1–2 天</td></tr>
-<tr><td><b>个人基线参数校准</b></td><td><span class="state bad">缺数据</span></td><td>14 天中位数、满 21 天启用、红旗 3 倍，这些都是经验值</td><td>每只狗 3 周以上历史</td></tr>
-<tr><td><b>分层贝叶斯接真实数据</b></td><td><span class="state bad">缺数据</span></td><td>合成数据验证过。现在 4 只狗品种都不同，群体层没意义；早期用户里有同品种时先试两层版</td><td>用户数据</td></tr>
-<tr><td><b>模型 C：照片看皮肤</b></td><td><span class="state mid">待做</span></td><td>抓得多 ≠ 皮肤差；照片检测皮损 / 秃毛，和 IMU 互相印证。先和兽医定类别，再做 MVP</td><td>标注 + 1 周</td></tr>
-<tr><td><b>无监督异常检测</b></td><td><span class="state mid">待做</span></td><td>Isolation Forest 等离线跑一遍，看有没有规则没覆盖到的异常模式</td><td>小</td></tr>
-<tr><td><b>抓挠 / 舔啃的部位</b></td><td><span class="state mid">待做</span></td><td>同样是抓，抓耳朵和抓肚子对应的皮肤问题不同。已经开始用姿态给“哪个部位”攒标注</td><td>标注</td></tr>
-<tr><td><b>生存分析：多久会恶化</b></td><td><span class="state bad">缺数据</span></td><td>直接回答“要不要预警”，但要有“恶化 → 就诊”的真实记录</td><td>长期</td></tr>
-</table></div>
+<div class="kanban">
+  <div class="col ok"><h3>进行中<small>1</small></h3>
+    <div class="item"><b>算法评级 vs 兽医评级对照</b><p>每日对照表已备好；先验证 C 值四个子分和兽医方向一致，再校准参数。</p><span class="cost">数据</span></div>
+  </div>
+  <div class="col mid"><h3>待做<small>4</small></h3>
+    <div class="item"><b>评分层换稳健 Z 分数 / CUSUM</b><p>现在四项加权 + 红旗例外分支多；变点检测只要个体历史就能跑，性价比最高。</p><span class="cost">1–2 天</span></div>
+    <div class="item"><b>模型 C：照片看皮肤</b><p>先和兽医定类别，再做 MVP。</p><span class="cost">标注 + 1 周</span></div>
+    <div class="item"><b>无监督异常检测</b><p>Isolation Forest 离线跑一遍，看有没有规则没覆盖的模式。</p><span class="cost">小</span></div>
+    <div class="item"><b>抓挠 / 舔啃的部位</b><p>抓耳朵和抓肚子对应的皮肤问题不同；已开始攒部位标注。</p><span class="cost">标注</span></div>
+  </div>
+  <div class="col bad"><h3>缺数据<small>4</small></h3>
+    <div class="item"><b>模型 B 用真实标签重训</b><p>接口已有，兽医照片评级攒够就重训。</p><span class="cost">兽医评级</span></div>
+    <div class="item"><b>个人基线参数校准</b><p>14 天、21 天、红旗 3 倍都是经验值。</p><span class="cost">每只狗 3 周以上</span></div>
+    <div class="item"><b>分层贝叶斯接真实数据</b><p>现在 4 只狗品种都不同，群体层没意义。</p><span class="cost">用户数据</span></div>
+    <div class="item"><b>生存分析：多久会恶化</b><p>要有“恶化 → 就诊”的真实记录。</p><span class="cost">长期</span></div>
+  </div>
+</div>
 
 <footer>这一页随时更新；挑哪条做，由你定。</footer>
 </div>

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>狗狗皮肤评估 · 总览</title>
-<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="site.css?v=20261124">
 </head>
 <body>
 <nav class="top">
@@ -23,72 +23,81 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">项目效果总览 · 更新于 2026-11-18</div>
+  <div class="eyebrow">项目效果总览 · 更新于 2026-11-23</div>
   <h1>狗狗戴上项圈，就能知道它的皮肤和毛发怎么样</h1>
-  <p class="lead">皮肤问题（过敏、皮炎、真菌感染等）最早的信号是<strong>抓挠变多</strong>。项目分两步：第一步从项圈 IMU 里认出抓挠、舔、啃、蹭等行为；第二步把每天的行为事件和主人填的问卷合起来，评估皮肤状态，给出“正常 / 留意 / 建议看兽医”三档。</p>
+  <p class="lead">皮肤问题最早的信号是<strong>抓挠变多</strong>。第一步从项圈 IMU 认出抓挠等行为；第二步把每天的行为和问卷合起来，给出“正常 / 留意 / 建议看兽医”三档。</p>
 </header>
 
 <h2 id="steps">两步走</h2>
 <div class="two">
-  <div class="big-step">
-    <span class="num">1</span><h3>行为识别</h3><span class="state ok">可用，在打磨</span>
-    <p>项圈 6 轴 IMU → 1D-CNN（端侧 int8）/ XGB（服务端）→ 抓挠事件（几点几分、多久）。</p>
-    <div class="big">91.8% <small style="color:var(--muted);font-size:13px;font-weight:400">抓挠片段命中 · 误报 4–5 次/小时</small></div>
-    <a class="go" href="behavior.html">看行为识别的各个模块 →</a>
+  <div class="big-step" style="border-top:4px solid var(--k-b)">
+    <span class="num" style="background:var(--k-b)">1</span><h3 class="k-b">行为识别</h3><span class="state ok">可用，在打磨</span>
+    <p>项圈 6 轴 IMU → 1D-CNN（端侧 int8）→ 抓挠事件（几点几分、多久）。</p>
+    <div class="big k-b">0.939 <small style="color:var(--muted);font-size:13px;font-weight:400">抓挠片段 F1 · 事件级（起止也要对）0.544</small></div>
+    <a class="go" href="behavior.html">看行为识别 →</a>
   </div>
-  <div class="big-step">
-    <span class="num">2</span><h3>皮肤评估</h3><span class="state mid">规则版已上线，模型等真实标签</span>
-    <p>每天的抓挠次数 / 时长 / 夜间占比 / 跟自己基线比 + 问卷（发红、异味、皮损、秃毛、毛发）→ C 值（行为）、S 总分（综合）。</p>
-    <div class="big">C0 / C1 / C2 <small style="color:var(--muted);font-size:13px;font-weight:400">正常 · 留意 · 建议看兽医</small></div>
-    <a class="go" href="skin.html">看皮肤评估的各个模块 →</a>
+  <div class="big-step" style="border-top:4px solid var(--k-s)">
+    <span class="num" style="background:var(--k-s)">2</span><h3 class="k-s">皮肤评估</h3><span class="state mid">规则版已上线，模型等真实标签</span>
+    <p>抓挠次数 / 时长 / 夜间 / 跟自己基线比 + 问卷 → C 值（行为）、S 总分（综合）。</p>
+    <div class="big k-s">C0 / C1 / C2 <small style="color:var(--muted);font-size:13px;font-weight:400">正常 · 留意 · 建议看兽医</small></div>
+    <a class="go" href="skin.html">看皮肤评估 →</a>
   </div>
 </div>
 <div class="flow">
   <div class="step"><b>IMU 采集</b><span>项圈 20 Hz</span></div>
-  <div class="step"><b>行为识别</b><span>抓挠 / 舔 / 啃 / 蹭 / 静止 / 未佩戴</span></div>
-  <div class="step"><b>日统计</b><span>次数、时长、夜间、聚集、被抓醒</span></div>
-  <div class="step"><b>跟自己比</b><span>个人基线（14 天中位数）</span></div>
-  <div class="step"><b>+ 问卷 / 照片</b><span>皮肤组、毛发组；兽医照片评级</span></div>
+  <div class="step"><b>行为识别</b><span>抓挠 / 舔 / 啃 / 静止 / 未佩戴</span></div>
+  <div class="step"><b>日统计</b><span>次数、时长、夜间、扎堆</span></div>
+  <div class="step"><b>跟自己比</b><span>14 天中位数基线</span></div>
+  <div class="step"><b>+ 问卷 / 照片</b><span>皮肤、毛发；兽医评级</span></div>
   <div class="step"><b>皮肤评估</b><span>C 值、S 总分 → 三档</span></div>
 </div>
-<div class="note">第一步的误报会直接抬高第二步的分数：多报 5 次/小时抓挠，一天就是几十次“假抓挠”。所以现在的重点仍在第一步压误报。</div>
+<div class="note">第一步的误报会直接抬高第二步的分数，所以现在的重点仍在第一步：<b>压误报、把短抓挠的起止找准</b>。</div>
 
 <h2 id="modules">算法模块一览</h2>
-<div class="scroll"><table>
-<tr><th>步骤</th><th>模块</th><th>做法</th><th>进展</th></tr>
-<tr><td class="y">①</td><td>抓挠识别</td><td>6 轴 1D-CNN，8 s 窗口，int8</td><td><span class="state ok">可用</span> 片段命中 91.8%，误报 4–5 次/h</td></tr>
-<tr><td class="y">①</td><td>静止 / 活动 / 未佩戴</td><td>动作门</td><td><span class="state ok">稳定</span> 未佩戴 F1 0.98</td></tr>
-<tr><td class="y">①</td><td>负例（吃喝嗅舔啃蹭）</td><td>规则候选 + 负例挖掘模型 + 人工确认</td><td><span class="state mid">补数据中</span> 候选确认率约 51%</td></tr>
-<tr><td class="y">①</td><td>甩头 / 抖身</td><td>同一个 CNN</td><td><span class="state bad">偏弱</span> F1 0.16–0.24</td></tr>
-<tr><td class="y">①</td><td>事件切分与起止</td><td>动作门 + Viterbi + 精准版起止</td><td><span class="state ok">可用</span> 起止误差约 0.6 s</td></tr>
-<tr><td class="y">①</td><td>端侧部署</td><td>int8 C 代码</td><td><span class="state mid">要瘦身</span> 236 KB；小模型 6.4 万参数、命中 90.3%，能进 GR5513 的 128 KB</td></tr>
-<tr><td class="y">②</td><td>PM 规则：C 值 / S 总分</td><td>Scratch Burden（变化、聚集、持续、中断）+ 问卷加权</td><td><span class="state ok">已上线</span> 平台可整批算</td></tr>
-<tr><td class="y">②</td><td>个人基线</td><td>14 天中位数，满 21 天启用；之前用文献阈值兜底</td><td><span class="state mid">已实现，待真实数据验证</span></td></tr>
-<tr><td class="y">②</td><td>模型 A / 模型 B</td><td>梯度提升树：A 纯 IMU 44 特征预测 C 档；B 加问卷共 54 特征预测 S 档</td><td><span class="state mid">只在合成数据上训过</span> 等兽医照片评级</td></tr>
-<tr><td class="y">②</td><td>分层贝叶斯模型</td><td>品种 → 狗 → 天，三层借力，处理冷启动</td><td><span class="state mid">合成数据验证过</span> 缺真实数据</td></tr>
-<tr><td class="y">②</td><td>模型 C：照片看皮肤</td><td>视觉检测皮损 / 秃毛，和 IMU 互相印证</td><td><span class="state bad">方案阶段</span></td></tr>
-</table></div>
+<div class="key small">
+  <span><i style="background:var(--ok)"></i>可用 / 已上线</span>
+  <span><i style="background:var(--mid)"></i>在做 / 等数据</span>
+  <span><i style="background:var(--bad)"></i>偏弱 / 方案阶段</span>
+</div>
+<div class="grp k-b">① 行为识别</div>
+<div class="mods">
+  <div class="mod ok"><div class="h"><b>抓挠识别</b><span>可用</span></div><div class="n">0.646<small>事件查全（目标 0.78）</small></div><p>4 s 窗 6 轴 CNN；短于 3 s 的抓挠是主要短板</p></div>
+  <div class="mod ok"><div class="h"><b>静止 / 活动 / 未佩戴</b><span>稳定</span></div><div class="n">0.98<small>未佩戴 F1</small></div><p>动作门，端侧直接用</p></div>
+  <div class="mod ok"><div class="h"><b>事件切分与起止</b><span>可用</span></div><div class="n">0.6 s<small>中位起止误差</small></div><p>动作门 + Viterbi + 精准版起止</p></div>
+  <div class="mod mid"><div class="h"><b>负例（吃喝嗅舔啃蹭）</b><span>补数据中</span></div><div class="n">51%<small>候选确认率</small></div><p>规则候选 + 负例挖掘模型 + 人工确认</p></div>
+  <div class="mod mid"><div class="h"><b>端侧部署</b><span>能跑，待上板</span></div><div class="n">64 KB<small>GR5513 小模型</small></div><p>int8 与浮点判决一致 99%；大模型 237 KB 只能进 GR5515</p></div>
+  <div class="mod bad"><div class="h"><b>甩头 / 抖身</b><span>偏弱</span></div><div class="n">0.2<small>F1 左右</small></div><p>只有约 170 段，1–2 秒的动作在长窗里被稀释</p></div>
+</div>
+<div class="grp k-s">② 皮肤评估</div>
+<div class="mods">
+  <div class="mod ok"><div class="h"><b>PM 规则：C 值 / S 总分</b><span>已上线</span></div><p>变化、聚集、持续、中断 + 问卷加权；平台可整批算</p></div>
+  <div class="mod mid"><div class="h"><b>个人基线</b><span>待验证</span></div><p>14 天中位数，满 21 天启用；之前用文献阈值兜底</p></div>
+  <div class="mod mid"><div class="h"><b>模型 A / B</b><span>只在合成数据上训过</span></div><p>A：44 个 IMU 特征 → C 档；B：加问卷共 54 个 → S 档；等兽医照片评级</p></div>
+  <div class="mod mid"><div class="h"><b>分层贝叶斯</b><span>缺真实数据</span></div><p>品种 → 狗 → 天三层借力，处理冷启动</p></div>
+  <div class="mod bad"><div class="h"><b>模型 C：照片看皮肤</b><span>方案阶段</span></div><p>检测皮损 / 秃毛，和 IMU 互相印证</p></div>
+</div>
 
-<h2 id="recent">最近一次更新</h2>
+<h2 id="recent">最近的进展</h2>
 <div class="tiles">
-  <div class="tile"><div class="k">抓挠终点误差</div><div class="v"><s>1.75 s</s><b>0.58 s</b></div><div class="n">后处理「精准版 · 起止对齐」上线（11-18）</div></div>
-  <div class="tile"><div class="k">甩头起止对齐</div><div class="v"><s>9.8%</s><b>53.4%</b></div><div class="n">同一个模型，只换后处理</div></div>
-  <div class="tile"><div class="k">GR5513 小模型</div><div class="v"><s>24 万</s><b>6.4 万参数</b></div><div class="n">抓挠命中 90.3%，只低 1.5 个点</div></div>
-  <div class="tile"><div class="k">抓挠片段命中</div><div class="v"><s>87.3%</s><b>91.8%</b></div><div class="n">6 轴 8 s CNN；FilterNet、双窗口、16 s TCN 都没赢过它</div></div>
+  <div class="tile"><div class="k">事件查全（起止也要对）</div><div class="v"><s>0.44</s><b>0.65</b></div><div class="n">窗口 8 s → 4 s、步长 1 s → 0.5 s（11-23）</div></div>
+  <div class="tile"><div class="k">正式模型误报</div><div class="v"><b>0.59</b> <small>次/小时</small></div><div class="n">数据池 + B 组人工标注 + 公开数据，在 692 小时负例上算（11-18）</div></div>
+  <div class="tile"><div class="k">GR5513 小模型</div><div class="v"><s>237 KB</s><b>64 KB</b></div><div class="n">int8 与浮点判决一致 99%（train44 / train45）</div></div>
+  <div class="tile"><div class="k">智能打点</div><div class="v"><s>288</s><b>14.5</b> <small>个点/天</small></div><div class="n">只用 3 轴加速度计决定什么时候开卫星定位</div></div>
 </div>
 
 <h2 id="next">接下来</h2>
 <ol class="road">
-  <li><b>压抓挠误报</b><br><span>用已确认的负例重训，目标 4–5 → 2–3 次/小时，命中不掉。</span></li>
-  <li><b>攒兽医照片评级，重训模型 B</b><br><span>交叉验证比 PM 规则准才启用；没有真实标签前，模型 A/B 只作对照。</span></li>
-  <li><b>GR5513 小模型上板</b><br><span>6.4 万参数版导出 int8、量真实体积；精准版起止也移植到板上。</span></li>
+  <li><b>短抓挠：试 2 s / 3 s 窗口</b><br><span>3 秒以内的段 IoU 过关只有 32%，是事件查全的主要缺口。</span></li>
+  <li><b>现场失败样本回放</b><br><span>线上默认加载的还是 8 月的老模型；先确认现场测的是哪一版，再回放失败样本。</span></li>
+  <li><b>攒兽医照片评级，重训模型 B</b><br><span>比 PM 规则准才启用。</span></li>
+  <li><b>GR5513 小模型上板</b><br><span>端侧包已出，剩真板子实测。</span></li>
 </ol>
 
 <section class="more">
   <a href="history.html">来时路 →<span>里程碑、每轮试了什么、哪些有用哪些没用</span></a>
-  <a href="landscape.html">业界进展 →<span>别人用什么模型、做到多少，哪些值得我们试</span></a>
-  <a href="gnss.html">IMU 智能打点 →<span>狗独自外出时，只用加速度计决定什么时候开卫星定位</span></a>
-  <a href="market.html">市场与竞品 →<span>产品怎么一代代演进、别家做到哪一步、哪些公开数据能用</span></a>
+  <a href="landscape.html">业界进展 →<span>别人用什么模型、哪些值得我们试</span></a>
+  <a href="gnss.html">智能打点 →<span>狗独自外出时，加速度计决定什么时候开卫星定位</span></a>
+  <a href="market.html">市场与竞品 →<span>产品怎么演进、别家做到哪、哪些公开数据能用</span></a>
   <a href="ideas.html">想法清单 →<span>还没做、做了一半、缺数据的</span></a>
 </section>
 

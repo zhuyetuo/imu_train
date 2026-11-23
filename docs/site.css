@@ -1,11 +1,15 @@
 :root{
   --bg:#0b1424; --panel:#111d33; --panel2:#16243f; --line:#22345a;
   --text:#dbe4f3; --muted:#8fa0bd; --accent:#22c7d6; --accent2:#7c9cff;
-  --ok:#3ccf8e; --mid:#f2b84b; --bad:#ff6b6b;
+  --ok:#2ecc71; --mid:#f5b83d; --bad:#ff4d6d;
   /* 图里的语义色：彼此色相拉开，一眼分得清 */
   --c-gt:#4f8cff; --c-pred:#ff9f1c; --c-hit:#2ecc71; --c-miss:#ff4d6d; --c-fp:#c084fc;
   /* 三层评估口径 */
   --lv-win:#22d3ee; --lv-seg:#facc15; --lv-evt:#f472b6;
+  /* 两步 + 平台：全站分类色（来时路、总览、想法清单都用这三种） */
+  --k-b:#22d3ee; --k-s:#facc15; --k-p:#c084fc;
+  /* 流程 / 编号 / 数字块循环用的 6 种色：蓝、橙、绿、紫、黄、红，相邻两个色相都拉开 */
+  --s1:#4f8cff; --s2:#ff9f1c; --s3:#2ecc71; --s4:#c084fc; --s5:#facc15; --s6:#ff4d6d;
 }
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
@@ -170,3 +174,103 @@ ol.tight li,ul.tight li{margin:3px 0}
 .methods b{color:var(--text);margin-right:8px}
 .pill.mid{background:rgba(242,184,75,.16);color:var(--mid)}
 table.cmp tr.best td{background:rgba(46,204,113,.08)}
+
+/* ── 全站统一：流程、数字块、卡片、编号、时间线都用色相拉开的配色 ── */
+.flow{counter-reset:f;gap:10px 16px}
+.flow .step{counter-increment:f;padding-left:44px;border-top:3px solid var(--sc,var(--s1))}
+.flow .step::before{content:counter(f);position:absolute;left:12px;top:12px;width:22px;height:22px;border-radius:50%;background:var(--sc,var(--s1));color:#0b1424;font-weight:800;text-align:center;line-height:22px;font-size:12px}
+.flow .step:not(:last-child)::after{content:"›";position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:18px}
+.flow .step b{color:var(--sc,var(--s1))}
+.flow .step:nth-child(6n+1){--sc:var(--s1)} .flow .step:nth-child(6n+2){--sc:var(--s2)} .flow .step:nth-child(6n+3){--sc:var(--s3)}
+.flow .step:nth-child(6n+4){--sc:var(--s4)} .flow .step:nth-child(6n+5){--sc:var(--s5)} .flow .step:nth-child(6n+6){--sc:var(--s6)}
+.tiles .tile{border-top:3px solid var(--tc,var(--s1))}
+.tiles .tile:nth-child(4n+1){--tc:var(--s1)} .tiles .tile:nth-child(4n+2){--tc:var(--s2)}
+.tiles .tile:nth-child(4n+3){--tc:var(--s3)} .tiles .tile:nth-child(4n+4){--tc:var(--s4)}
+.tiles .tile .v b{color:var(--tc,var(--accent))}
+.card:has(.state.ok){border-top:3px solid var(--ok)}
+.card:has(.state.mid){border-top:3px solid var(--mid)}
+.card:has(.state.bad){border-top:3px solid var(--bad)}
+ol.road li:nth-child(6n+1){--rc:var(--s1)} ol.road li:nth-child(6n+2){--rc:var(--s2)} ol.road li:nth-child(6n+3){--rc:var(--s3)}
+ol.road li:nth-child(6n+4){--rc:var(--s4)} ol.road li:nth-child(6n+5){--rc:var(--s5)} ol.road li:nth-child(6n+6){--rc:var(--s6)}
+ol.road li{border-left:3px solid var(--rc)}
+ol.road li::before{background:var(--rc)}
+.lessons li:nth-child(6n+1){--rc:var(--s1)} .lessons li:nth-child(6n+2){--rc:var(--s2)} .lessons li:nth-child(6n+3){--rc:var(--s3)}
+.lessons li:nth-child(6n+4){--rc:var(--s4)} .lessons li:nth-child(6n+5){--rc:var(--s5)} .lessons li:nth-child(6n+6){--rc:var(--s6)}
+.lessons li::before{color:var(--rc)}
+.lessons li b{color:var(--rc)}
+.ev{border-left:3px solid var(--line)}
+.ev.ok{border-left-color:var(--ok)} .ev.no{border-left-color:var(--bad)} .ev.mid{border-left-color:var(--mid)}
+.ev[data-k="b"] .d{color:var(--k-b)} .ev[data-k="s"] .d{color:var(--k-s)} .ev[data-k="p"] .d{color:var(--k-p)}
+.k-b{color:var(--k-b)} .k-s{color:var(--k-s)} .k-p{color:var(--k-p)}
+.kchip{display:inline-block;font-size:12px;padding:0 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+th{border-bottom:2px solid var(--line)}
+
+/* 刻度条：皮肤 C 档 */
+.scale{display:flex;height:34px;border-radius:8px;overflow:hidden;margin:14px 0 4px;font-size:13px;font-weight:700}
+.scale>div{display:flex;align-items:center;justify-content:center;color:#0b1424}
+.scale-axis{position:relative;height:18px;font-size:12px;color:var(--muted);margin-bottom:12px}
+.scale-axis span{position:absolute;top:0;transform:translateX(-50%)}
+/* 堆叠条：权重组成 */
+.stack{margin:10px 0 14px}
+.stack .lab{font-size:13px;color:var(--muted);margin-bottom:4px}
+.stack .bar{display:flex;height:28px;border-radius:7px;overflow:hidden;font-size:12.5px;font-weight:700}
+.stack .bar>div{display:flex;align-items:center;justify-content:center;color:#0b1424;white-space:nowrap;overflow:hidden;padding:0 6px}
+
+/* 模块状态网格（总览） */
+.mods{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;margin:12px 0}
+.mod{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--mc);border-radius:10px;padding:10px 12px}
+.mod.ok{--mc:var(--ok)} .mod.mid{--mc:var(--mid)} .mod.bad{--mc:var(--bad)}
+.mod .h{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.mod .h b{font-size:14.5px}
+.mod .h span{font-size:12px;color:var(--mc);white-space:nowrap}
+.mod .n{font-size:20px;font-weight:800;color:var(--mc);margin:4px 0 0;font-variant-numeric:tabular-nums}
+.mod .n small{font-size:12px;font-weight:400;color:var(--muted);margin-left:4px}
+.mod p{margin:2px 0 0;font-size:13px;color:var(--muted)}
+.grp{font-size:13px;font-weight:700;margin:16px 0 0}
+
+/* 看板（想法清单） */
+.kanban{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}
+@media (max-width:900px){.kanban{grid-template-columns:1fr}}
+.kanban .col{background:rgba(255,255,255,.02);border:1px solid var(--line);border-top:4px solid var(--kc);border-radius:10px;padding:10px}
+.kanban .col.ok{--kc:var(--ok)} .kanban .col.mid{--kc:var(--mid)} .kanban .col.bad{--kc:var(--bad)}
+.kanban .col>h3{color:var(--kc);font-size:14px;margin:0 0 8px}
+.kanban .col>h3 small{color:var(--muted);font-weight:400;margin-left:6px}
+.item{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:0 0 8px}
+.item b{display:block;font-size:14px}
+.item p{margin:3px 0 0;font-size:13px;color:var(--muted)}
+.item .cost{display:inline-block;margin-top:5px;font-size:11.5px;color:var(--kc);border:1px solid var(--kc);border-radius:99px;padding:0 7px}
+
+/* 排名清单（业界进展） */
+.rank{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.rank>div{display:grid;grid-template-columns:44px 1fr auto;gap:12px;align-items:center;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--rc);border-radius:10px;padding:10px 14px}
+.rank .no{width:32px;height:32px;border-radius:50%;background:var(--rc);color:#0b1424;font-weight:800;display:flex;align-items:center;justify-content:center}
+.rank b{font-size:14.5px}
+.rank p{margin:2px 0 0;font-size:13px;color:var(--muted)}
+.rank .where{font-size:12px;color:var(--muted);text-align:right;white-space:nowrap}
+.rank .done{--rc:var(--ok)} .rank .fail{--rc:var(--bad)} .rank .todo{--rc:var(--s1)}
+@media (max-width:640px){.rank>div{grid-template-columns:36px 1fr}.rank .where{grid-column:2;text-align:left}}
+/* 年代三栏（业界进展时间线） */
+.eras{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}
+@media (max-width:900px){.eras{grid-template-columns:1fr}}
+.era{background:var(--panel);border:1px solid var(--line);border-top:4px solid var(--ec);border-radius:10px;padding:10px 12px}
+.era h3{color:var(--ec);margin:0 0 6px}
+.era ul{list-style:none;margin:0;padding:0}
+.era li{display:grid;grid-template-columns:58px 1fr;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.era li:last-child{border-bottom:none}
+.era li .y{color:var(--ec);font-weight:700;font-variant-numeric:tabular-nums}
+.era li span{display:block;color:var(--muted);font-size:12.5px}
+.era li span.tag{display:inline-block;margin-left:4px;font-size:11px}
+/* 里程碑（来时路） */
+.miles{list-style:none;margin:12px 0;padding:0 0 0 16px;border-left:2px solid var(--line)}
+.miles li{position:relative;padding:6px 0 8px 14px}
+.miles li::before{content:"";position:absolute;left:-23px;top:12px;width:12px;height:12px;border-radius:50%;background:var(--mc);border:2px solid var(--bg)}
+.miles li.b{--mc:var(--k-b)} .miles li.s{--mc:var(--k-s)} .miles li.p{--mc:var(--k-p)}
+.miles .d{font-size:12.5px;color:var(--mc);font-weight:700;margin-right:8px;font-variant-numeric:tabular-nums}
+.miles .t{font-size:14px}
+/* 问题 → 办法（业界进展） */
+.fix{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin:12px 0}
+.fix>div{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.fix .p{color:var(--bad);font-weight:700;font-size:14px}
+.fix .c{color:var(--muted);font-size:13px;margin:3px 0}
+.fix .s{color:var(--ok);font-size:13px}
+.fix .s::before{content:"→ "}

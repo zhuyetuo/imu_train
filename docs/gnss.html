@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IMU 智能打点</title>
-<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="site.css?v=20261124">
 <style>
-  :root{ --f-dep:#3ccf8e; --f-mov:#22c7d6; --f-arr:#f2b84b; --f-hb:#8fa0bd; --mv:#7c9cff; }
+  :root{ --f-dep:#2ecc71; --f-mov:#4f8cff; --f-arr:#ff9f1c; --f-hb:#e2e8f0; --mv:#64748b; }
   .scene{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   .scene .card{text-align:center}
   .scene .card .ico{font-size:30px;line-height:1.2}
@@ -250,8 +250,8 @@ if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
       el("text", { x: L2 + Math.max(2, (v / max) * W) + 6, y: y + 16, fill: "var(--text)", "font-size": 13 }, s, v + unit);
     });
   }
-  bars("barFix", "每天打几个点", [["省电", 14.5, "var(--accent)", 1], ["标准", 29.5, "var(--accent2)"], ["精细", 83.5, "var(--accent2)"], ["每 5 分钟", 288, "var(--bad)"]], 288, " 个");
-  bars("barGap", "两点间最长漏追", [["省电", 96, "var(--accent)", 1], ["标准", 51, "var(--accent2)"], ["精细", 17, "var(--accent2)"], ["每 5 分钟", 377, "var(--bad)"]], 377, " m");
+  bars("barFix", "每天打几个点", [["省电", 14.5, "var(--s3)", 1], ["标准", 29.5, "var(--s1)"], ["精细", 83.5, "var(--s2)"], ["每 5 分钟", 288, "var(--bad)"]], 288, " 个");
+  bars("barGap", "两点间最长漏追", [["省电", 96, "var(--s3)", 1], ["标准", 51, "var(--s1)"], ["精细", 17, "var(--s2)"], ["每 5 分钟", 377, "var(--bad)"]], 377, " m");
 
 
   // ── 轨迹示意：出门 → 公园撒欢 → 睡 → 回家，用跟板上同一套规则算打点 ──
@@ -481,7 +481,7 @@ if (gt_tick(&amp;st) != GT_NONE)         // 每秒一次：该打点了
 
   // ── 准确率 ──
   const A = [["小跑", 96.2, "go"], ["走", 91.2, "go"], ["奔跑", 85.2, "go"], ["嗅闻（边走边嗅）", 82.8, "mv"], ["趴", 2.5, "st"], ["坐", 1.7, "st"], ["站", 5.2, "st"], ["进食", 13.8, "cf"], ["饮水", 69.8, "cf"], ["抖身", 62.3, "cf"]];
-  const col = { go: "var(--ok)", mv: "var(--accent2)", st: "var(--muted)", cf: "var(--mid)" };
+  const col = { go: "var(--ok)", mv: "var(--s1)", st: "var(--muted)", cf: "var(--mid)" };
   const s = document.getElementById("barAcc"), L3 = 150, W3 = 1000 - L3 - 70;
   el("text", { x: 0, y: 18, fill: "var(--text)", "font-size": 15, "font-weight": 700 }, s, "被判成「在走」的比例");
   [["该开", "go"], ["其实在挪", "mv"], ["原地，不该开", "st"], ["原地但像在走", "cf"]].forEach(([t, k], i) => {
