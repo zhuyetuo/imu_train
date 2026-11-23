@@ -1,0 +1,158 @@
+{
+ "hz": 20.0,
+ "window": 80,
+ "stride_s": 0.5,
+ "axes": 6,
+ "classes": [
+  "未佩戴",
+  "静止/休息",
+  "活动",
+  "抓挠",
+  "甩头/抖身",
+  "进食",
+  "饮水",
+  "舔",
+  "啃"
+ ],
+ "label_remap": {
+  "未佩戴": "未佩戴",
+  "静止/休息": "静止/休息",
+  "活动": "活动",
+  "抓挠": "抓挠",
+  "甩头/抖身": "甩头/抖身",
+  "进食": "进食",
+  "饮水": "饮水",
+  "舔": "舔",
+  "啃": "啃",
+  "睡觉": "静止/休息",
+  "吠叫": "活动",
+  "甩身体": "甩头/抖身",
+  "疑似如厕": "活动",
+  "疑似如厕-排尿": "活动",
+  "蹭": "活动",
+  "甩头/抖身-甩头": "甩头/抖身",
+  "抓挠-右耳/耳后": "抓挠",
+  "抓挠-头颈耳": "抓挠",
+  "抓挠-耳/耳后": "抓挠",
+  "抓挠-肩胸": "抓挠",
+  "抓挠-躯干": "抓挠",
+  "舔-会阴·臀·尾": "舔",
+  "舔-前肢": "舔",
+  "舔-后肢": "舔",
+  "舔-躯干": "舔",
+  "啃身体": "啃",
+  "啃-会阴·臀·尾": "啃",
+  "啃-前右爪": "啃",
+  "啃-前爪": "啃",
+  "啃-前肢": "啃",
+  "啃-右大腿": "啃",
+  "啃-右大腿内侧": "啃",
+  "啃-右小腿": "啃",
+  "啃-后左爪": "啃",
+  "啃-后爪": "啃",
+  "啃-后肢": "啃",
+  "啃-大腿": "啃",
+  "啃-大腿内侧": "啃",
+  "啃-小腿": "啃",
+  "啃-尾根": "啃",
+  "啃-躯干": "啃",
+  "行走": "活动",
+  "奔跑": "活动",
+  "嗅闻": "活动",
+  "戴摘项圈": "活动",
+  "蹭擦身体": "活动",
+  "伸懒腰": "活动",
+  "跳跃": "活动",
+  "舔身体": "舔",
+  "喘气": "活动"
+ },
+ "fine_labels": null,
+ "class_scale": {},
+ "drop_gravity_level": true,
+ "still_motion_g": 0.005,
+ "model": "cnn",
+ "target": "edge",
+ "model_params": {
+  "filters": [
+   64,
+   128,
+   128
+  ],
+  "kernel_size": 9,
+  "epochs": 30,
+  "n_estimators": 20,
+  "max_depth": 8
+ },
+ "run_name": "evt_gap1",
+ "nas_root": "/home/toky/ai_data",
+ "datasets": [
+  {
+   "name": "pool_latest_20261120_165839",
+   "export_json": "/home/toky/ai_data/data_train/pool_latest_20261120_165839/merged_tmp.json",
+   "source_hz": null
+  },
+  {
+   "name": "ds_old_0828",
+   "export_json": "/home/toky/ai_data/data_train/ds_old_0828/merged_tmp.json",
+   "source_hz": 50.0,
+   "exclude_classes": [
+    "未佩戴",
+    "静止/休息",
+    "活动",
+    "甩头/抖身",
+    "进食",
+    "饮水",
+    "舔",
+    "啃"
+   ]
+  },
+  {
+   "name": "ds_old_0811_0827",
+   "export_json": "/home/toky/ai_data/data_train/ds_old_0811_0827/merged_tmp.json",
+   "source_hz": 50.0,
+   "exclude_classes": [
+    "未佩戴",
+    "静止/休息",
+    "活动",
+    "甩头/抖身",
+    "进食",
+    "饮水",
+    "舔",
+    "啃"
+   ]
+  },
+  {
+   "name": "ds_old1_0714_0729",
+   "export_json": "/home/toky/ai_data/data_train/ds_old1_0714_0729/merged_tmp.json",
+   "source_hz": 16.0,
+   "exclude_classes": [
+    "未佩戴",
+    "静止/休息",
+    "活动",
+    "甩头/抖身",
+    "进食",
+    "饮水",
+    "舔",
+    "啃"
+   ]
+  },
+  {
+   "name": "pub_vehkaoja2022",
+   "export_json": "/home/toky/ai_data/data_train/pub_vehkaoja2022/merged_tmp.json",
+   "source_hz": 100.0,
+   "exclude_classes": []
+  },
+  {
+   "name": "pub_marcato2023",
+   "export_json": "/home/toky/ai_data/data_train/pub_marcato2023/merged_tmp.json",
+   "source_hz": 100.0,
+   "exclude_classes": []
+  }
+ ],
+ "gap_negatives": {
+  "margin_scr": 30,
+  "margin_any": 2,
+  "min_len": 8,
+  "max_ratio": 1.0
+ }
+}
