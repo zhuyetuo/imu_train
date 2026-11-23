@@ -55,6 +55,17 @@ def is_precise(algo: str | None) -> bool:
     return bool(algo) and str(algo).endswith(PRECISE_SUFFIX)
 
 
+#: 版本串后缀：同样的解码（viterbi），**只把抓挠的三道门槛收紧**（段内平均概率、陀螺仪 std、2–10 Hz 节律占比，
+#: 数值见 StableParams.strict_*）。要的是"别把不是抓挠的报成抓挠"，起止、长短差一些都能接受。
+#: 别的类别、甩身体、疑似抓挠候选一律不变——被严格版筛掉的抓挠段，会照常落进疑似抓挠候选里给人看。
+#: 做成版本（不是改默认配置）的理由同 _noshake：结果按 (样本, 模型, 版本) 存，能跟 v2 并排比，老项目也不受影响。
+STRICT_SUFFIX = "_strict"
+
+
+def is_strict(algo: str | None) -> bool:
+    return bool(algo) and str(algo).endswith(STRICT_SUFFIX)
+
+
 @dataclass
 class StableParams:
     event_labels: tuple[str, ...] = ("抓挠", "甩身体")
@@ -68,6 +79,8 @@ class StableParams:
     shake_absorb_s: float = 3.0    # 抓挠 bout 前后多少秒内的甩身体并进抓挠
     event_min_windows: int = 2     # bout 至少几个窗口
     event_min_mean: float = 0.45   # bout 内该事件的平均概率下限
+    # 只对抓挠的平均概率下限（0 = 跟 event_min_mean 一样）。严格版用它，甩身体不跟着变
+    scratch_min_mean: float = 0.0
     event_single_conf: float = 0.85  # 单窗口也保留的最高概率下限
     spectral_min: float = 0.0      # 抓挠 bout 的平均频谱占比下限，0 = 不启用
     # 「真的在挠」的物理证据门限（0 = 不启用）。CNN 只用三轴加速度：设备没戴、
@@ -81,6 +94,13 @@ class StableParams:
     # 加速度模长在 2–10 Hz 的能量占比下限。抓挠是后腿高频往复（真抓挠 0.37–0.93），
     # 信号不好/设备被碰的波动集中在 1 Hz 以下（实测误报 0.16）
     acc_rhythm_min: float = 0.0
+    # 严格版（viterbi_strict）的抓挠门槛。2026-11-24 在 train_v2 4 s 窗口模型（训练记录 #61，job60）的
+    # 5 折留出预测上扫出来（experiments/claude_2026_11/evt/evt_eval.py）：事件级（重叠 ≥ 0.5 s 算对）
+    # 查全 0.892 → 0.833，确定查准（只算人看过的时间）0.909 → 0.948，全部预测里报对的比例 0.595 → 0.746。
+    # 陀螺仪 / 节律门槛取 max(线上值, 这里)，只收紧不放松
+    strict_scratch_min_mean: float = 0.7
+    strict_gyro_std_min: float = 20.0
+    strict_acc_rhythm_min: float = 0.45
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
     # 短的「未佩戴」碎片并回旁边的静止：狗睡着 / 趴着不动时，模型偶尔冒出几十秒未佩戴——
     # 戴着的项圈总有呼吸、心跳带来的细微晃动，跟放在桌上不完全一样，但模型分不太清。
@@ -555,6 +575,13 @@ def precise_boundaries(segments: list[dict], envelope: dict | None, bias: tuple[
             seg["end_ts"] = _fmt_ts(t0 + timedelta(seconds=(new_e + 1) / hz))
 
 
+def strict_params(p: StableParams) -> StableParams:
+    """严格版的参数：抓挠平均概率下限换成 strict_scratch_min_mean，陀螺仪 / 节律门槛只往严里收"""
+    return replace(p, scratch_min_mean=p.strict_scratch_min_mean,
+                   gyro_std_min=max(p.gyro_std_min, p.strict_gyro_std_min),
+                   acc_rhythm_min=max(p.acc_rhythm_min, p.strict_acc_rhythm_min))
+
+
 def _scratch_quality_ok(b: list[int], windows: list[dict], p: StableParams) -> bool:
     """抓挠 bout 的「身体真的在动」证据。特征算不出来时不拦（宁可多留，不误杀）。"""
     gs = [windows[i]["gstd"] for i in b if windows[i].get("gstd") is not None]
@@ -585,6 +612,7 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
       stable / viterbi                    两套解码，见模块顶部
       stable_noshake / viterbi_noshake    同上，但**不让抓挠吞并甩身体**
       viterbi_precise                     解码跟 viterbi 一样，起止在 app.py 里按 precise_boundaries 调
+      viterbi_strict                      解码跟 viterbi 一样，只把抓挠的门槛换成 strict_*（见 STRICT_SUFFIX）
 
     `_noshake` 后缀单独做成一个 algo、而不是让调用方改 params，是为了让它
     在平台上是一个**独立的版本**：结果按 (样本, 模型, 版本) 存，版本串不同
@@ -592,6 +620,9 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
     "viterbi"，后一次直接把前一次顶掉。
     """
     p = params or StableParams()
+    if algo.endswith(STRICT_SUFFIX):
+        p = strict_params(p)
+        algo = algo[: -len(STRICT_SUFFIX)]
     if algo.endswith(PRECISE_SUFFIX):
         # 解码跟不带后缀的完全一样；起止的调整在 app.py 里拿到能量包络之后做（precise_boundaries）
         algo = algo[: -len(PRECISE_SUFFIX)]
@@ -683,7 +714,8 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
         for b in bouts_by_event[ev]:
             pv = [probs[i].get(ev, 0.0) for i in b]
             mean_c, max_c = sum(pv) / len(pv), max(pv)
-            keep = (len(b) >= p.event_min_windows and mean_c >= p.event_min_mean) or max_c >= p.event_single_conf
+            min_mean = p.scratch_min_mean if (ev == sl and p.scratch_min_mean > 0) else p.event_min_mean
+            keep = (len(b) >= p.event_min_windows and mean_c >= min_mean) or max_c >= p.event_single_conf
             if keep and ev == sl and p.spectral_min > 0:
                 sv = [spec[i] for i in b if spec[i] is not None]
                 if sv and sum(sv) / len(sv) < p.spectral_min:

@@ -125,8 +125,8 @@ class InferRequest(BaseModel):
     path: str = Field(..., description="NAS_ROOT 下的相对路径，指向一份 IMU CSV")
     sample_id: int | None = Field(None, description="label_infra 的 sample.id，仅用于回显关联")
     mode: Literal["raw", "stable", "viterbi",
-                  "stable_noshake", "viterbi_noshake", "viterbi_precise"] = Field(
-        "raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码）；**_noshake 后缀**=同样的解码但不让抓挠吞并甩身体，用来并排对比那条规则值不值；viterbi_precise=精准版：同 v2 的片段，起止先校正系统偏差、再按抓挠节律能量对齐（见 postprocess.py）")
+                  "stable_noshake", "viterbi_noshake", "viterbi_precise", "viterbi_strict"] = Field(
+        "raw", description="raw=调试版（模型逐窗口原始输出）；stable=稳定版（滞回+间隙合并+过滤）；viterbi=稳定版 v2（动态规划解码）；**_noshake 后缀**=同样的解码但不让抓挠吞并甩身体，用来并排对比那条规则值不值；viterbi_precise=精准版：同 v2 的片段，起止先校正系统偏差、再按抓挠节律能量对齐（见 postprocess.py）；viterbi_strict=抓挠严格：同 v2 的解码，抓挠的平均概率 / 陀螺仪 / 节律门槛收紧，少报不是抓挠的")
     device_hz: float | None = Field(None, description="这份 CSV 的实际采样率。不传就用全局 DEVICE_HZ——但两者并存：8-11 之前的数据采集端就已经降到 16Hz 存了，8-11 起才是 50Hz 原始流，按错的频率跑重采样和特征窗口全错，所以调用方知道就传上来")
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
@@ -205,6 +205,9 @@ def _stable_params() -> postprocess.StableParams:
         amag_min=config.STABLE_AMAG_MIN,
         amag_max=config.STABLE_AMAG_MAX,
         acc_rhythm_min=config.STABLE_ACC_RHYTHM_MIN,
+        strict_scratch_min_mean=config.STABLE_STRICT_SCRATCH_MIN_MEAN,
+        strict_gyro_std_min=config.STABLE_STRICT_GYRO_STD_MIN,
+        strict_acc_rhythm_min=config.STABLE_STRICT_ACC_RHYTHM_MIN,
         viterbi_switch=config.STABLE_VITERBI_SWITCH,
         notworn_min_s=config.STABLE_NOTWORN_MIN_S,
         cand_enter=config.CAND_ENTER,
@@ -380,7 +383,8 @@ class InferSamplesRequest(BaseModel):
     acc: list[list[float]] = Field(..., description="[[ax, ay, az], ...]，单位 g（跟采集 CSV 一样）")
     gyro: list[list[float]] | None = Field(None, description="[[gx, gy, gz], ...] °/s；没有（项圈只有加速度）就不传，按 0")
     hz: float = Field(..., gt=0, description="这批数据的采样率（项圈 31.25）")
-    mode: Literal["raw", "stable", "viterbi", "stable_noshake", "viterbi_noshake", "viterbi_precise"] = "raw"
+    mode: Literal["raw", "stable", "viterbi", "stable_noshake", "viterbi_noshake", "viterbi_precise",
+                  "viterbi_strict"] = "raw"
     model: str | None = None
 
 
@@ -455,7 +459,7 @@ class InferBatchItem(BaseModel):
 class InferBatchRequest(BaseModel):
     items: list[InferBatchItem] = Field(..., min_length=1)
     mode: Literal["raw", "stable", "viterbi",
-                  "stable_noshake", "viterbi_noshake", "viterbi_precise"] = "raw"
+                  "stable_noshake", "viterbi_noshake", "viterbi_precise", "viterbi_strict"] = "raw"
     model: str | None = Field(None, description="模型标签（GET /api/v1/label/models 里的 tag）。"
                                                 "不传 = 默认模型，行为跟以前一样")
     mine_neg: bool = Field(True, description="模型判成负例类别的片段是否输出成候选，见 /infer")
