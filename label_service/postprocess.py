@@ -55,8 +55,7 @@ def is_precise(algo: str | None) -> bool:
     return bool(algo) and str(algo).endswith(PRECISE_SUFFIX)
 
 
-#: 版本串后缀：同样的解码（viterbi），**只把抓挠的三道门槛收紧**（段内平均概率、陀螺仪 std、2–10 Hz 节律占比，
-#: 数值见 StableParams.strict_*）。要的是"别把不是抓挠的报成抓挠"，起止、长短差一些都能接受。
+#: 版本串后缀：同样的解码（viterbi），**只把抓挠的段内平均概率下限收紧**（数值见 StableParams.strict_*）。要的是"别把不是抓挠的报成抓挠"，起止、长短差一些都能接受。
 #: 别的类别、甩身体、疑似抓挠候选一律不变——被严格版筛掉的抓挠段，会照常落进疑似抓挠候选里给人看。
 #: 做成版本（不是改默认配置）的理由同 _noshake：结果按 (样本, 模型, 版本) 存，能跟 v2 并排比，老项目也不受影响。
 STRICT_SUFFIX = "_strict"
@@ -96,11 +95,13 @@ class StableParams:
     acc_rhythm_min: float = 0.0
     # 严格版（viterbi_strict）的抓挠门槛。2026-11-24 在 train_v2 4 s 窗口模型（训练记录 #61，job60）的
     # 5 折留出预测上扫出来（experiments/claude_2026_11/evt/evt_eval.py）：事件级（重叠 ≥ 0.5 s 算对）
-    # 查全 0.892 → 0.833，确定查准（只算人看过的时间）0.909 → 0.948，全部预测里报对的比例 0.595 → 0.746。
-    # 陀螺仪 / 节律门槛取 max(线上值, 这里)，只收紧不放松
+    # 查全 0.892 → 0.851，确定查准（只算人看过的时间）0.909 → 0.946，全部预测里报对的比例 0.595 → 0.734。
+    # 陀螺仪 / 节律门槛取 max(线上值, 这里)，只收紧不放松。**默认 0 = 沿用线上值**：评估里的陀螺仪 std /
+    # 节律占比是按模型的 20 Hz 算的，线上按设备原始采样率（50–220 Hz）算，节律占比整体偏低，评估里扫出来的
+    # 0.45 搬到线上严得多（11-18 抽 12 个文件，8 段抓挠删了 7 段）。要用得先按线上口径重新量
     strict_scratch_min_mean: float = 0.7
-    strict_gyro_std_min: float = 20.0
-    strict_acc_rhythm_min: float = 0.45
+    strict_gyro_std_min: float = 0.0
+    strict_acc_rhythm_min: float = 0.0
     viterbi_switch: float = 3.0    # viterbi 切换类别的代价（对数单位）
     # 短的「未佩戴」碎片并回旁边的静止：狗睡着 / 趴着不动时，模型偶尔冒出几十秒未佩戴——
     # 戴着的项圈总有呼吸、心跳带来的细微晃动，跟放在桌上不完全一样，但模型分不太清。

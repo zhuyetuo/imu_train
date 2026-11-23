@@ -40,16 +40,18 @@ def test_平均概率不到0点7的抓挠严格版去掉():
     assert _n(_run(w, "viterbi_strict")) == 0
 
 
-def test_陀螺仪不够的抓挠严格版去掉():
-    w = _windows([(20, 30, "抓挠", 0.8)], gstd=10.0)
-    assert _n(_run(w, "viterbi")) == 1          # 线上门槛 5（这里默认 0）都过
-    assert _n(_run(w, "viterbi_strict")) == 0
+def test_物理门槛默认沿用线上值():
+    """评估和线上的陀螺仪 / 节律口径不同，严格版默认不另收这两道"""
+    w = _windows([(20, 30, "抓挠", 0.8)], gstd=10.0, arhythm=0.35)
+    on = pp.StableParams(gyro_std_min=5.0, acc_rhythm_min=0.25)
+    assert _n(_run(w, "viterbi", on)) == 1 and _n(_run(w, "viterbi_strict", on)) == 1
+    assert _n(_run(w, "viterbi_strict", pp.StableParams(gyro_std_min=20.0))) == 0
 
 
-def test_节律不够的抓挠严格版去掉():
+def test_配了严格物理门槛才收():
     w = _windows([(20, 30, "抓挠", 0.8)], arhythm=0.35)
-    assert _n(_run(w, "viterbi", pp.StableParams(acc_rhythm_min=0.25))) == 1
-    assert _n(_run(w, "viterbi_strict", pp.StableParams(acc_rhythm_min=0.25))) == 0
+    p = pp.StableParams(acc_rhythm_min=0.25, strict_acc_rhythm_min=0.45)
+    assert _n(_run(w, "viterbi", p)) == 1 and _n(_run(w, "viterbi_strict", p)) == 0
 
 
 def test_甩身体不跟着收紧():

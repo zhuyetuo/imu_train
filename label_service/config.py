@@ -99,8 +99,9 @@ STABLE_AMAG_MAX          = float(_env("STABLE_AMAG_MAX", "3.0"))
 STABLE_ACC_RHYTHM_MIN    = float(_env("STABLE_ACC_RHYTHM_MIN", "0.25"))
 # 严格版（viterbi_strict，「稳定版v2·抓挠严格」）的抓挠门槛，见 postprocess.StableParams.strict_*
 STABLE_STRICT_SCRATCH_MIN_MEAN = float(_env("STABLE_STRICT_SCRATCH_MIN_MEAN", "0.7"))
-STABLE_STRICT_GYRO_STD_MIN     = float(_env("STABLE_STRICT_GYRO_STD_MIN", "20"))
-STABLE_STRICT_ACC_RHYTHM_MIN   = float(_env("STABLE_STRICT_ACC_RHYTHM_MIN", "0.45"))
+# 下面两个默认 0 = 沿用 STABLE_GYRO_STD_MIN / STABLE_ACC_RHYTHM_MIN（原因见 postprocess.StableParams.strict_*）
+STABLE_STRICT_GYRO_STD_MIN     = float(_env("STABLE_STRICT_GYRO_STD_MIN", "0"))
+STABLE_STRICT_ACC_RHYTHM_MIN   = float(_env("STABLE_STRICT_ACC_RHYTHM_MIN", "0"))
 # viterbi（稳定版 v2）切换类别的代价，对数单位；越大越不爱切换
 STABLE_VITERBI_SWITCH    = float(_env("STABLE_VITERBI_SWITCH", "3.0"))
 # 短于这么多秒、挨着静止的「未佩戴」并回静止（睡着时模型偶尔冒出的碎片；真摘下来充电都很长）。0 = 不启用
