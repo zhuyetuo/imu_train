@@ -1,0 +1,353 @@
+[
+ {
+  "cand": 502578,
+  "task": 58664,
+  "s": 376050,
+  "e": 385550,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502579,
+  "task": 66787,
+  "s": 1973600,
+  "e": 1984100,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "跳过·已经写过"
+ },
+ {
+  "cand": 502580,
+  "task": 66787,
+  "s": 2306600,
+  "e": 2310600,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502581,
+  "task": 66779,
+  "s": 1108550,
+  "e": 1117550,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502582,
+  "task": 66706,
+  "s": 1930050,
+  "e": 1933050,
+  "label": "抓挠-躯干",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502583,
+  "task": 59270,
+  "s": 1898800,
+  "e": 1902300,
+  "label": "抓挠-躯干",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502584,
+  "task": 65040,
+  "s": 2175550,
+  "e": 2193550,
+  "label": "抓挠",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502585,
+  "task": 66787,
+  "s": 2369880,
+  "e": 2371100,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502586,
+  "task": 64282,
+  "s": 1613400,
+  "e": 1615900,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502587,
+  "task": 67813,
+  "s": 1651750,
+  "e": 1654250,
+  "label": "抓挠-躯干",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502588,
+  "task": 65009,
+  "s": 3135000,
+  "e": 3138500,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502589,
+  "task": 58217,
+  "s": 2809050,
+  "e": 2812050,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502590,
+  "task": 65114,
+  "s": 1013780,
+  "e": 1015880,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502592,
+  "task": 60627,
+  "s": 457500,
+  "e": 467500,
+  "label": "抓挠-躯干",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502593,
+  "task": 65170,
+  "s": 1380900,
+  "e": 1394400,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502596,
+  "task": 66172,
+  "s": 987250,
+  "e": 994750,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502597,
+  "task": 66779,
+  "s": 2303550,
+  "e": 2308050,
+  "label": "抓挠-躯干",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502599,
+  "task": 60760,
+  "s": 2547800,
+  "e": 2558300,
+  "label": "抓挠-躯干",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502600,
+  "task": 67845,
+  "s": 2647550,
+  "e": 2653050,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502601,
+  "task": 67640,
+  "s": 1266210,
+  "e": 1279150,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502603,
+  "task": 65009,
+  "s": 2370540,
+  "e": 2372920,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502604,
+  "task": 58176,
+  "s": 2179650,
+  "e": 2193150,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502605,
+  "task": 67825,
+  "s": 1498900,
+  "e": 1505900,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502607,
+  "task": 66131,
+  "s": 594200,
+  "e": 601700,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502608,
+  "task": 44831,
+  "s": 1303350,
+  "e": 1306350,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502609,
+  "task": 65600,
+  "s": 2579940,
+  "e": 2586110,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502610,
+  "task": 65770,
+  "s": 1468050,
+  "e": 1476550,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502615,
+  "task": 6781,
+  "s": 1941000,
+  "e": 1942180,
+  "label": "抓挠-头颈耳",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502616,
+  "task": 65546,
+  "s": 886550,
+  "e": 890550,
+  "label": "抓挠",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502617,
+  "task": 65898,
+  "s": 3276850,
+  "e": 3280850,
+  "label": "抓挠",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502620,
+  "task": 48029,
+  "s": 563900,
+  "e": 574400,
+  "label": "抓挠-躯干",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502621,
+  "task": 48029,
+  "s": 679900,
+  "e": 692400,
+  "label": "抓挠",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502622,
+  "task": 47208,
+  "s": 2533200,
+  "e": 2535200,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502624,
+  "task": 52022,
+  "s": 335230,
+  "e": 337470,
+  "label": "抓挠-躯干",
+  "task_status": "APPROVED",
+  "do": "新加"
+ },
+ {
+  "cand": 502626,
+  "task": 48199,
+  "s": 339400,
+  "e": 341900,
+  "label": "抓挠-躯干",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502627,
+  "task": 48107,
+  "s": 1609300,
+  "e": 1612300,
+  "label": "抓挠-头颈耳",
+  "task_status": "SUBMITTED",
+  "do": "新加"
+ },
+ {
+  "cand": 502629,
+  "task": 65114,
+  "s": 1020720,
+  "e": 1024200,
+  "label": "抓挠-躯干",
+  "task_status": "PENDING_ASSIGN",
+  "do": "新加"
+ },
+ {
+  "cand": 502630,
+  "task": 52022,
+  "s": 339880,
+  "e": 364240,
+  "label": "抓挠-躯干",
+  "task_status": "APPROVED",
+  "do": "新加"
+ },
+ {
+  "cand": 502631,
+  "task": 52022,
+  "s": 365970,
+  "e": 370040,
+  "label": "抓挠-躯干",
+  "task_status": "APPROVED",
+  "do": "新加"
+ }
+]
