@@ -93,7 +93,9 @@ STABLE_SPECTRAL_MIN      = float(_env("STABLE_SPECTRAL_MIN", "0"))
 STABLE_GYRO_STD_MIN      = float(_env("STABLE_GYRO_STD_MIN", "5"))
 STABLE_MISSING_MAX       = float(_env("STABLE_MISSING_MAX", "0.1"))
 STABLE_AMAG_MIN          = float(_env("STABLE_AMAG_MIN", "0.8"))
-STABLE_AMAG_MAX          = float(_env("STABLE_AMAG_MAX", "3.0"))
+# 中大型犬剧烈抓挠时 4 秒窗模长均值可达 3.1–4.5g（如 2026-09-08/17 lulu 均因 >3.0g 被误杀），
+# 上限放宽到 8.0g，既覆盖大犬剧烈抓挠，又能挡住传感器卡死/满量程 16g 异常
+STABLE_AMAG_MAX          = float(_env("STABLE_AMAG_MAX", "8.0"))
 # 加速度模长 2–10 Hz 能量占比下限：抓挠是节律性高频往复（真抓挠 0.37–0.93），
 # 信号不好/设备被碰的波动集中在 1 Hz 以下（误报 0.16）
 STABLE_ACC_RHYTHM_MIN    = float(_env("STABLE_ACC_RHYTHM_MIN", "0.25"))

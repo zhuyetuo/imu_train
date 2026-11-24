@@ -265,12 +265,16 @@ def _spectral_ratio_per_window(full_path: str, windows: list[dict], window_s: fl
             pg[: len(gm)] = gm
             w_amag = pa[offsets].mean(axis=1)
             w_gstd = pg[offsets].std(axis=1)
-            # 加速度自身的「节律」：真抓挠是后腿高频往复，模长在 2–10 Hz 有明显能量；
-            # 信号不好/设备被碰的波动是低频漂移（实测误报段 84% 能量在 1 Hz 以下）。
-            # 这样即使陀螺仪那一路不可用，也能拦住"加速度乱抖"冒充抓挠
-            asegs = pa[offsets]
-            asegs = asegs - asegs.mean(axis=1, keepdims=True)
-            apw = np.abs(np.fft.rfft(asegs * hann, axis=1)) ** 2
+            # 加速度自身的「节律」：真抓挠是后腿 3–9 Hz 高频往复；信号不好/设备被碰的波动是 <1 Hz 低频漂移。
+            # 直接对三轴分量分别做 FFT 再把功率谱相加（而不是对模长 amag 做 FFT）：
+            # 取模长 √(ax²+ay²+az²) 会把 6–7 Hz 快抓挠整流成 12–14 Hz 二倍频，掉出 2–10 Hz 频带导致高置信真抓挠被误杀
+            # （实测 2026-08-21 任务 #60417 峰值 0.935、均值 0.765 的真抓挠因 amag 主频 12.98 Hz 仅得 0.188 被误杀）。
+            acc_f = np.asarray(acc, dtype=np.float32)
+            p3 = np.zeros((len(acc_f) + n_samp, acc_f.shape[1]), dtype=np.float32)
+            p3[: len(acc_f)] = acc_f
+            a3 = p3[offsets]
+            a3 = a3 - a3.mean(axis=1, keepdims=True)
+            apw = (np.abs(np.fft.rfft(a3 * hann[None, :, None], axis=1)) ** 2).sum(axis=2)
             aband = (freqs >= 2) & (freqs <= 10)
             awide = (freqs >= 0.5) & (freqs <= 15)
             atot = apw[:, awide].sum(axis=1)

@@ -90,9 +90,13 @@ class StableParams:
     missing_max: float = 0.0       # 窗口缺数据（空值/六轴全 0）比例上限
     amag_min: float = 0.0          # 窗口加速度模长均值下限（佩戴时≈1g）
     amag_max: float = 0.0          # 窗口加速度模长均值上限（抓挠 1.1–2.5g）
-    # 加速度模长在 2–10 Hz 的能量占比下限。抓挠是后腿高频往复（真抓挠 0.37–0.93），
+    # 三轴加速度在 2–10 Hz 的能量占比下限。抓挠是后腿高频往复（真抓挠 0.37–0.93），
     # 信号不好/设备被碰的波动集中在 1 Hz 以下（实测误报 0.16）
     acc_rhythm_min: float = 0.0
+    # 高置信度豁免 acc_rhythm_min：当模型段均值 ≥ rhythm_exempt_mean 或峰值 ≥ rhythm_exempt_max，
+    # 且陀螺仪/掉点/模长门限都已通过（证明设备戴着且真的在动）时，不再被单一项频谱节律占比误杀。0 = 不豁免
+    rhythm_exempt_mean: float = 0.85
+    rhythm_exempt_max: float = 0.90
     # 严格版（viterbi_strict）的抓挠门槛。2026-11-24 在 train_v2 4 s 窗口模型（训练记录 #61，job60）的
     # 5 折留出预测上扫出来（experiments/claude_2026_11/evt/evt_eval.py）：事件级（重叠 ≥ 0.5 s 算对）
     # 查全 0.892 → 0.851，确定查准（只算人看过的时间）0.909 → 0.946，全部预测里报对的比例 0.595 → 0.734。
@@ -439,7 +443,7 @@ def scratch_candidates(windows: list[dict], final_segments: dict[str, list[dict]
             continue
         # 候选是低门槛找漏检，但也得是"可能漏掉的抓挠"：设备没戴/躺着被碰、
         # 信号掉点的波动不成立（陀螺仪不动、模长不对、没有 2–10 Hz 节律）
-        if not _scratch_quality_ok(b, windows, p):
+        if not _scratch_quality_ok(b, windows, p, conf_mean=mean_c, conf_max=max(vals)):
             continue
         sv = [spec[i] for i in range(i0, i1 + 1) if spec[i] is not None]
         out.append({
@@ -583,16 +587,14 @@ def strict_params(p: StableParams) -> StableParams:
                    acc_rhythm_min=max(p.acc_rhythm_min, p.strict_acc_rhythm_min))
 
 
-def _scratch_quality_ok(b: list[int], windows: list[dict], p: StableParams) -> bool:
+def _scratch_quality_ok(b: list[int], windows: list[dict], p: StableParams,
+                        *, conf_mean: float | None = None, conf_max: float | None = None) -> bool:
     """抓挠 bout 的「身体真的在动」证据。特征算不出来时不拦（宁可多留，不误杀）。"""
     gs = [windows[i]["gstd"] for i in b if windows[i].get("gstd") is not None]
     if p.gyro_std_min > 0 and gs and sum(gs) / len(gs) < p.gyro_std_min:
         return False
     ms = [windows[i]["missing"] for i in b if windows[i].get("missing") is not None]
     if p.missing_max > 0 and ms and sum(ms) / len(ms) > p.missing_max:
-        return False
-    ar = [windows[i]["arhythm"] for i in b if windows[i].get("arhythm") is not None]
-    if p.acc_rhythm_min > 0 and ar and sum(ar) / len(ar) < p.acc_rhythm_min:
         return False
     am = [windows[i]["amag"] for i in b if windows[i].get("amag") is not None]
     if am:
@@ -601,6 +603,13 @@ def _scratch_quality_ok(b: list[int], windows: list[dict], p: StableParams) -> b
             return False
         if p.amag_max > 0 and mean_am > p.amag_max:
             return False
+    rhythm_exempt = (
+        (p.rhythm_exempt_mean > 0 and conf_mean is not None and conf_mean >= p.rhythm_exempt_mean)
+        or (p.rhythm_exempt_max > 0 and conf_max is not None and conf_max >= p.rhythm_exempt_max)
+    )
+    ar = [windows[i]["arhythm"] for i in b if windows[i].get("arhythm") is not None]
+    if not rhythm_exempt and p.acc_rhythm_min > 0 and ar and sum(ar) / len(ar) < p.acc_rhythm_min:
+        return False
     return True
 
 
@@ -724,7 +733,7 @@ def stabilize(windows: list[dict], classes: list[str], target_labels: list[str],
             # 概率再高也要有「身体真的在动」的证据：陀螺仪不动 / 大量掉点 /
             # 模长偏离 1g 的，是设备没戴或被碰，不是抓挠
             if keep and ev == sl:
-                keep = _scratch_quality_ok(b, windows, p)
+                keep = _scratch_quality_ok(b, windows, p, conf_mean=mean_c, conf_max=max_c)
             if not keep:
                 continue
             for i in b:
