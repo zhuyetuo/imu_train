@@ -23,7 +23,7 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-23</div>
+  <div class="eyebrow">还没做 / 做了一半 / 缺数据 · 更新于 2026-11-25</div>
   <h1>想法清单</h1>
   <p class="lead">先把手上的做完，再回来挑。每条写清楚为什么值得做、到哪一步、要多少时间或什么数据。做完的移到<a href="history.html">来时路</a>。</p>
   <div class="key"><span><i style="background:var(--ok)"></i>进行中 / 有结论</span><span><i style="background:var(--mid)"></i>待做</span><span><i style="background:var(--bad)"></i>缺数据 / 暂停 / 试过没赢</span></div>
@@ -67,13 +67,16 @@
 <h2 id="behavior">① 行为识别</h2>
 <div class="note"><b>事件查全 0.65 → 0.78~0.82 的路线：</b>先修短段（2 s / 3 s 窗）和边界对齐 → 再看多余预测段（查准 0.47）→ 最后才补数据 / 调阈值。每步都按事件口径和段长分桶比。</div>
 <div class="kanban">
-  <div class="col ok"><h3>进行中<small>4</small></h3>
+  <div class="col ok"><h3>进行中<small>6</small></h3>
+    <div class="item"><b>用自动归因洗测试集真值（疑似人工漏标复核）</b><p>影棚-小型犬 7 条误报里 6 条峰值 0.85–0.96、持续 5.6–11.6 s 且原任务仅粗标「活动」；按归因筛选看视频确认后，在工作台一键补标并「审核入池剥离测试集」。</p><span class="cost">人工复核</span></div>
+    <div class="item"><b>相似动作混淆（甩头/抖身）困难负样本挖掘</b><p>打分自动归因已能直接标出与「甩头/抖身」等非背景动作重叠的误报，集中沉淀为困难负样本并入下一轮训练。</p><span class="cost">数据 + 训练</span></div>
     <div class="item"><b>现场失败样本回放</b><p>影棚现场“一段都判不出”，交叉验证却有 0.961。线上默认加载的还是 8 月老 RF，先确认现场测的是哪一版。</p><span class="cost">半天</span></div>
     <div class="item"><b>影棚 vs 狗场的域偏移</b><p>先查清模型版本、窗口 / 步长是否一致，真是域差异再补难例或分场地校准。</p><span class="cost">数据 + 训练</span></div>
     <div class="item"><b>用已确认的负例重训</b><p>误报主要来自吃、喝、舔、啃；标注员按“现在重点补”一次确认一类，判完一批就重训。</p><span class="cost">等标注</span></div>
     <div class="item"><b>GR5513 小模型上板</b><p>11-18 正式小模型 train44（6 轴）/ train45（3 轴），64 KB，端侧包已出（停用，由你启用）。剩真板子实测。</p><span class="cost">上板</span></div>
   </div>
-  <div class="col mid"><h3>待做<small>11</small></h3>
+  <div class="col mid"><h3>待做<small>12</small></h3>
+    <div class="item"><b>短抓挠（1.7–3 s）严格版召回提升</b><p>4 s 滑窗下短抓挠易被前后背景稀释，导致 <code>viterbi_strict</code>（0.70 门槛）漏报（影棚小型犬 / 中大型犬剩余漏报均为 1.7–3.0 s、峰值 0.67–0.73）；对比普通稳定版 v2（0.45）或定向扩充短抓挠正样本。</p><span class="cost">数据 + 评估</span></div>
     <div class="item"><b>2 s / 3 s 窗口（下一步）</b><p>&lt;3 s 的段 IoU 过关只有 0.318，是主要缺口；1 s 窗已证明太短。</p><span class="cost">20 分钟 / 版</span></div>
     <div class="item"><b>预测段长度 / 多余段</b><p>7286 个预测里 2553 个不碰任何真值；先量落在哪、多长，再定后处理。</p><span class="cost">小</span></div>
     <div class="item"><b>边界对齐适配 4 s / 2 s 窗口</b><p>精准版能量对齐目前只在 8 s 生效；2 s 的段要边界误差 ≤0.3 s 才稳过 IoU 0.5。</p><span class="cost">1 天</span></div>
