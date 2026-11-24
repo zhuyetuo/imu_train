@@ -914,3 +914,12 @@ v1 的人标抓挠数（5026）跟别的（5296）不一样，它的召回不完
 ### 2026-11-23 平台顶部加「补标·抓挠 待判 N」模式（label_infra b38f918）
 - 项目页顶部「现在重点补」右边加按钮「补标·抓挠 待判 N（M 个项目）」，跟「专项待判」一样：点了项目列表只剩有 unl_fill 待判的项目，点开都只看有补标待判的任务；再点退出。跟专项模式互斥。
 - 补丁：experiments/claude_2026_11/evt/patch_fill_li3.py
+
+### 2026-11-23 模型测试：狗关联核对 + 测试集后台（label_infra 2b7284c）
+- 狗关联：平台本来就「人工关联优先，否则按 场地+IMU 推」（dog_name_service.sample_dog_id）。16407 个已标样本全对得上；
+  带场地的数据推断跟人工 100% 一致，8 月～9 月初文件名不带场地的老影棚数据人工核对过的 981 条里 775 条跟推断不一致 → 这段不进测试集按狗统计。
+  脚本：experiments/claude_2026_11/model_test/dogmap_check.py、dogmap_clash.py
+- 新表 model_test_sets / model_test_items（迁移 d3b8f1a6c4e9），接口 /api/v1/model-tests：建、冻结、复制成新版本、加/删片段、
+  配额表（体型×抓挠/活动/静止休息/未佩戴、长短、狗占比>15% 提醒）、各模型见没见过（按 dataset_spec 里数据集导出文件的 sample_code）。
+- training_export_service.export_dataset：测试集里的样本整份不导出，meta.n_skipped_test + warning。
+- 后端全量测试 917 过；10 条失败（test_cam_map 等）不带改动也一样挂。
