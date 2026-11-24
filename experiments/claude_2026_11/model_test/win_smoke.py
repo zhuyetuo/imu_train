@@ -10,7 +10,11 @@ from app.services.model_eval_service import evaluate
 
 async def m():
     async with SessionLocal() as db:
+        from app.models.task import Task
+        from app.services.model_eval_service import _REVIEWED
+        reviewed = select(Task.sample_id).where(Task.status.in_(_REVIEWED))
         rows = (await db.execute(select(SampleInferenceRun.sample_id, SampleInferenceRun.model_tag, SampleInferenceRun.mode)
+                                 .where(SampleInferenceRun.sample_id.in_(reviewed))
                                  .order_by(SampleInferenceRun.id.desc()).limit(3000))).all()
         c = Counter((t, md) for _s, t, md in rows)
         (tag, mode), _ = c.most_common(1)[0]

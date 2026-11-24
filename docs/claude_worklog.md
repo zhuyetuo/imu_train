@@ -936,3 +936,4 @@ v1 的人标抓挠数（5026）跟别的（5296）不一样，它的召回不完
 - model_eval_service.evaluate 加 windows={样本: [(起, 止)]}：真值和预测都裁到窗口里（跨边切开）；/model-eval/compare 收 windows。
   线上核对：窗口 = 整个样本时跟不给窗口结果一致（win_smoke.py）。
 - 加片段：pad_to_sec 围绕起止前后各延长一半凑够 N 秒，碰到样本头尾往另一边补；GET /model-tests/task-segments 列任务的标注事件，页面上勾事件直接加。
+- 补记核对结果（审过的 40 个样本，ml_rf·viterbi，抓挠）：不给窗口 真值82/tp77/fp3/fn5；窗口=整段 完全一致；窗口=前一半 40/38/1/2。
