@@ -997,3 +997,14 @@ v1 的人标抓挠数（5026）跟别的（5296）不一样，它的召回不完
 - 修 44f2b93 引入的 MissingGreenlet：heartbeat rollback 后读 user.role 触发懒加载；改成先读角色。线上异步会话复现验证（hb_live.py）。教训：sqlite 同步测试测不出异步懒加载，碰 rollback 后的 ORM 对象要线上真库验一下。
 - 项目列表分组（label_infra 本次）：日期项目 87 / 模型测试 2 / 老数据·其他 6 / 全部，按名字自动分，默认日期项目。
 - 左边菜单「项目」角标不算模型测试项目：label_review_progress 的 total / cand_total / spot_total / fill_total 跳过名字以「模型测试」开头的项目（label_infra 本次）。
+
+## 2026-11-24 公开狗 IMU 数据集复核（用户转来一份别处 AI 写的清单，逐条核实）
+| 清单里的 | 核实结果 | 对我们 |
+|---|---|---|
+| Vehkaoja 2022 Movement Sensor Dataset（Mendeley vxhx934tbn，现在是 v4，CC BY 4.0，45 只，项圈+胸背带，ActiGraph 100 Hz） | 属实 | **11-17 已接入**（pub_vehkaoja2022，18 h）；#61 训练用过 |
+| Marcato 2023 dog posture（Mendeley mpph6bmn7g，GitHub mmarcato/dog_posture，CC BY，含抖身） | 属实 | **11-17 已接入**（pub_marcato2023，4.7 h）；#61 训练用过 |
+| Chambers 2021「含抓挠、Zenodo 10.5281/zenodo.4835313」 | 论文属实（Animals 11:1549，Mars Petcare / Whistle，>2500 只狗，行为表里有 SCRATCH，抓挠灵敏度 0.870 / 特异度 0.997，25–50 Hz）；**数据不公开**：「Data available on request due to privacy restrictions」。Zenodo 那条打不开（410），论文里挂的 Zenodo 只有补充视频 | 拿不到。说「少有的含抓挠公开数据集」不对 |
+| DECADE / dogTorch（CVPR'18） | 有 IMU（背上 Arduino）+ 狗头 GoPro，Google Drive 可下，MIT；标签是关节运动 / 姿态，**没有行为标签、没有抓挠** | 对抓挠没用；最多做自监督预训练，暂不接 |
+| 其他（Wernimont 2018 Vetrax 6 只、13 只验证、Whistle/Pet Insight、ANIMO） | 都没找到可下载的原始数据 | — |
+结论跟 11-17 一样：**没有公开的狗抓挠 IMU 数据**，抓挠只能靠自己标；公开数据只用来补姿态 / 抖身 / 进食饮水嗅闻和做难负样本。
+清单里「人类 HAR 预训练（UCI-HAR / PAMAP2）再微调」11-17 也记过（ssl-wearables 手腕权重），没做。
