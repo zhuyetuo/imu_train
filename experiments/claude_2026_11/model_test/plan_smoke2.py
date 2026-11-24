@@ -29,11 +29,9 @@ async def m():
         r = await mts.plan_run(db, 1, plan)
         print(f"用时 {time.time() - t0:.1f} 秒；计划 200 段，挑到 {r['n_picked']} 段，视频 {r['video_hours']} 小时")
         for d in ("60", "420"):
-            want = Counter()
-            for s, n, v, p in PLAN:
-                k = v[1] if d == "60" else v[3]
-                for c, x in zip(CATS, mts.split_by_ratio(k, [c["ratio"] for c in CATS])):
-                    want[c["name"]] += x
+            rows = [v[1] if d == "60" else v[3] for s, n, v, p in PLAN]
+            cols = mts.split_by_ratio(sum(rows), [c["ratio"] for c in CATS])
+            want = Counter({c["name"]: x for c, x in zip(CATS, cols)})
             got = Counter()
             for rep in r["report"].values():
                 got.update(rep.get("n", {}).get(d, {}))
